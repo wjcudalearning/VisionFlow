@@ -312,6 +312,17 @@ tile:
 
 先在搜尋區域找出模板錨點，再依偏移、列欄數、ROI 大小及間距產生規則網格，適合有小幅位置漂移的重複工件。
 
+可用獨立批量工具直接把此邏輯套用到整個資料夾，不會執行 Detector：
+
+```powershell
+.\env\Scripts\python.exe export_pattern_grid_tiles.py `
+  --input-dir "D:\images" `
+  --output-dir "D:\tiles" `
+  --recipe "D:\configs\pattern_grid.yaml"
+```
+
+`--recipe` 可讀完整 AOI recipe 或只有 `tile:` 的 YAML。也可不使用 recipe，改以 `--template-path`、`--rows`、`--cols`、`--roi-w`、`--roi-h` 及其他模板網格參數直接指定。工具預設遞迴處理 JPG、PNG、BMP、TIF/TIFF，模板圖及位於輸入資料夾內的輸出目錄會自動排除。每張來源圖會建立自己的小圖資料夾，並在輸出根目錄寫入 `tiles_manifest.csv`；個別圖片失敗時會繼續處理並記錄到 `errors.csv`。
+
 ### 輪廓切圖 `contour`
 
 ```yaml
