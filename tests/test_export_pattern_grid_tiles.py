@@ -1,16 +1,23 @@
 from __future__ import annotations
 
 import csv
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 import cv2
 import numpy as np
 import yaml
+from PySide6.QtCore import QEventLoop, QSettings, QTimer
+from PySide6.QtWidgets import QApplication
 
 from export_pattern_grid_tiles import (
+    PatternGridBatchWindow,
     build_tile_config,
+    build_parser,
     crop_batch,
     discover_images,
     load_tile_config,
@@ -26,6 +33,10 @@ def write_png(path: Path, image) -> None:
 
 
 class PatternGridBatchCropTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
     def make_fixture(self, root: Path) -> tuple[Path, np.ndarray, dict]:
         rng = np.random.default_rng(27)
         template = rng.integers(0, 256, (8, 10, 3), dtype=np.uint8)
@@ -143,6 +154,76 @@ class PatternGridBatchCropTests(unittest.TestCase):
                 errors = list(csv.DictReader(handle))
             self.assertEqual(Path(errors[0]["input_path"]).name, "b_bad.png")
             self.assertIn("below threshold", errors[0]["error"])
+
+    def test_gui_loads_recipe_fields_and_persists_working_paths(self):
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            template_path, _, config = self.make_fixture(root)
+            recipe_path = root / "pattern_grid.yaml"
+            recipe_path.write_text(
+                yaml.safe_dump({"tile": config}, allow_unicode=True),
+                encoding="utf-8",
+            )
+            settings = QSettings(str(root / "gui.ini"), QSettings.IniFormat)
+            window = PatternGridBatchWindow(settings=settings)
+
+            self.assertTrue(window.load_recipe(recipe_path))
+            self.assertEqual(Path(window.template_edit.text()), template_path)
+            self.assertEqual(window.parameter_spins["rows"].value(), 2)
+            self.assertEqual(window.parameter_spins["cols"].value(), 2)
+            self.assertEqual(window.parameter_spins["roi_w"].value(), 12)
+            self.assertAlmostEqual(window.match_threshold_spin.value(), 0.9)
+
+            window.input_edit.setText(str(root / "input"))
+            window.output_edit.setText(str(root / "output"))
+            window._save_settings()
+            restored = PatternGridBatchWindow(settings=settings)
+            self.assertEqual(restored.input_edit.text(), str(root / "input"))
+            self.assertEqual(restored.output_edit.text(), str(root / "output"))
+            self.assertEqual(restored.parameter_spins["gap_x"].value(), 3)
+            self.assertTrue(restored.recursive_checkbox.isChecked())
+            window.close()
+            restored.close()
+
+    def test_gui_flag_does_not_require_cli_paths(self):
+        args = build_parser().parse_args(["--gui"])
+        self.assertTrue(args.gui)
+        self.assertIsNone(args.input_path)
+        self.assertIsNone(args.output_dir)
+
+    def test_gui_runs_batch_in_background_without_preview(self):
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            _, template, config = self.make_fixture(root)
+            image = np.zeros((80, 100, 3), dtype=np.uint8)
+            image[15:23, 20:30] = template
+            write_png(input_dir / "source.png", image)
+            recipe_path = root / "pattern_grid.yaml"
+            recipe_path.write_text(
+                yaml.safe_dump({"tile": config}, allow_unicode=True),
+                encoding="utf-8",
+            )
+            settings = QSettings(str(root / "gui.ini"), QSettings.IniFormat)
+            window = PatternGridBatchWindow(settings=settings)
+            self.assertTrue(window.load_recipe(recipe_path))
+            window.input_edit.setText(str(input_dir))
+            window.output_edit.setText(str(output_dir))
+
+            window._start_batch()
+            self.assertFalse(window.run_button.isEnabled())
+            if window._thread is not None:
+                loop = QEventLoop()
+                window._thread.finished.connect(loop.quit)
+                QTimer.singleShot(5_000, loop.quit)
+                loop.exec()
+
+            self.assertIsNone(window._thread)
+            self.assertTrue(window.run_button.isEnabled())
+            self.assertIn("輸出 4 張小圖", window.status_label.text())
+            self.assertEqual(len(list(output_dir.rglob("source_r*.png"))), 4)
+            window.close()
 
 
 if __name__ == "__main__":

@@ -315,6 +315,15 @@ tile:
 可用獨立批量工具直接把此邏輯套用到整個資料夾，不會執行 Detector：
 
 ```powershell
+# 不帶參數會開啟 PySide6 GUI
+.\env\Scripts\python.exe export_pattern_grid_tiles.py
+```
+
+GUI 不顯示影像預覽，只提供輸入／輸出路徑、recipe、Pattern 模板、搜尋範圍、網格偏移、列欄數、ROI 大小、間距、匹配門檻與批次選項。Recipe 載入後會把參數填回欄位供修改，切圖在背景執行，並保存上次使用的路徑與參數。
+
+命令列批次模式仍可使用：
+
+```powershell
 .\env\Scripts\python.exe export_pattern_grid_tiles.py `
   --input-dir "D:\images" `
   --output-dir "D:\tiles" `
