@@ -386,6 +386,9 @@ def make_param_widget(value, read_only: bool = False, spec: dict | None = None) 
 
 
 def param_value(widget: QWidget):
+    parameter_value = getattr(widget, "parameter_value", None)
+    if callable(parameter_value):
+        return parameter_value()
     if isinstance(widget, Toggle):
         return widget.isChecked()
     if isinstance(widget, NumStepper):

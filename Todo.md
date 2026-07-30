@@ -256,7 +256,7 @@
 - [x] 定義 detector ID 為 `yolox`、顯示名稱為「YOLOX 物件偵測」，輸入語意為目前 tile／ROI 的 BGR `uint8` 影像；命中指定缺陷類別即產生 defect，零筆 defect 為 PASS。
 - [x] 建立受控的 YOLOX model registry；Recipe 只保存穩定的 `model_id`，不可直接依賴使用者電腦上的任意絕對路徑。每個模型 manifest 至少記錄模型名稱、版本、格式、SHA-256、class names、輸入尺寸、色彩順序、正規化方式、letterbox padding、輸出節點與 decoder/stride 規格。
 - [x] 第一版工程模式可調參數固定為：
-  - `model_id`：從已驗證的 model registry 下拉選擇模型。
+  - `model_id`：透過資料夾選擇視窗載入只含單一模型、且已驗證的 model registry；Recipe 仍只保存穩定 model ID。
   - `confidence_threshold`：信心門檻，範圍 `0.0～1.0`，建議預設 `0.25`。
   - `nms_iou_threshold`：NMS 重疊率門檻，範圍 `0.0～1.0`，建議預設 `0.45`。
   - `target_class_ids`：要判定為 NG 的類別；空值代表模型 manifest 內全部類別。
@@ -289,7 +289,7 @@
 
 - [x] M0：完成 model manifest/schema、model registry、ONNX Runtime CPU session cache、獨立前處理/後處理單元測試與一個可散佈的 tiny 測試模型；此階段不接 GUI、不預設 GPU。
 - [x] M1：新增 `DetectorYolox`、DetectorManager registration、Recipe round trip、繁中 detector label 與合成 CLI smoke；驗證 PASS/NG、defect count、class、confidence、bbox、area、metadata 與排序。
-- [x] M2：Recipe Designer 加入模型下拉、信心門檻、NMS 重疊率、NG 類別、最大筆數與最小 bbox 面積；模型不存在、checksum 錯誤或 backend 不可用時使用 inline notice，Recipe 不可在錯誤狀態下儲存。
+- [x] M2：Recipe Designer 加入模型資料夾選擇視窗、信心門檻、NMS 重疊率、NG 類別、最大筆數與最小 bbox 面積；模型不存在、checksum 錯誤或 backend 不可用時使用 inline notice，Recipe 不可在錯誤狀態下儲存。
 - [ ] M3：接入 ONNX Runtime CUDA，再以相同 ONNX 模型比較 CPU/CUDA 的前處理、raw output、NMS 後 class/數量/座標/分數；先定義 bbox 與 confidence 容差，任何不等價都不得預設啟用。
   - [x] M3 軟體接入：provider 探測、CPU/CUDA 分離 session cache、禁止 CUDA EP 靜默 CPU fallback、初始化／OOM／推論失敗完整 CPU 重跑、strict CUDA 明確失敗及實機 validator 已完成。
   - [x] RTX workflow 接線：runner 環境會以 `onnxruntime-gpu==1.27.0` 執行 M3 等價、CUDA 1000 次 stability，並可選擇執行 production acceptance；JSON 全部上傳為 workflow artifact。
@@ -400,3 +400,4 @@
 - [x] 2026-07-27：新增獨立 `export_pattern_grid_tiles.py` 批量切圖工具，重用 production Template Anchor Grid 邏輯，支援 recipe 或直接參數、遞迴資料夾、Unicode 路徑、逐圖錯誤隔離、PNG 小圖及座標／匹配分數 CSV manifest；187 tests、compileall、CUDA source preflight、實際 CLI 4-tile smoke 與 `git diff --check` 均通過。
 - [x] 2026-07-27：替 Pattern 定位固定網格批量切圖工具新增 PySide6 GUI；不含影像預覽，提供輸入／輸出／recipe／模板選擇與全部模板網格參數，支援 recipe 回填後修改、背景執行、執行中關閉保護及工作參數保存，同時保留原 CLI；190 tests、compileall、CUDA source preflight、主 GUI／小工具 GUI offscreen smoke、CLI 4-tile smoke 與 `git diff --check` 均通過。
 - [x] 2026-07-29：依星期四至星期三週期，彙整 2026-07-23 至 2026-07-29 的 9 筆提交與驗證證據，產出本週進度報告；內容涵蓋 YOLOX CPU reference、Recipe Designer、ONNX Runtime CUDA fallback、session／acceptance／stability／RTX workflow，以及 Pattern 定位固定網格批量切圖 GUI／CLI，並明確保留 production 權重、標註資料、CUDA provider 與 RTX 3090 實機驗收的未完成狀態。
+- [x] 2026-07-30：YOLOX Recipe Designer 的模型選擇由下拉選單改為模型資料夾視窗；所選資料夾必須包含單一模型的 `registry.yaml` 與通過 SHA-256 驗證的權重，成功後安全切換 session registry、Recipe 維持只保存 `model_id`，GUI 偏好設定記住資料夾並在切換時清除既有單張 session cache。完整 192 tests、compileall、CUDA source preflight、GUI offscreen smoke、YOLOX CLI 固定 2 筆 NG smoke（預期 exit 2）、畫面截圖檢查與 `git diff --check` 均通過。

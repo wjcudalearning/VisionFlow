@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import Path
 
+from core.ai_runtime import YoloXModelRegistry
 from detectors.detector_401 import Detector401
 from detectors.detector_401_1 import Detector401_1
 from detectors.detector_401_2 import Detector401_2
@@ -126,6 +128,17 @@ class DetectorManager:
     def ai_available_providers(self) -> tuple[str, ...]:
         return self._ai_manager().available_providers()
 
+    def set_yolox_model_directory(self, directory: Path) -> YoloXModelRegistry:
+        registry = YoloXModelRegistry(Path(directory))
+        model_ids = registry.model_ids()
+        if len(model_ids) != 1:
+            raise ValueError(
+                "所選資料夾必須只包含一個 YOLOX 模型；"
+                f"目前 registry 定義了 {len(model_ids)} 個模型。"
+            )
+        self._ai_manager().set_registry(registry)
+        return registry
+
     @classmethod
     def uses_native_cuda_runtime(cls, detector_id: str) -> bool:
         return str(detector_id) != DetectorYolox.detector_id
@@ -158,6 +171,14 @@ class DetectorManager:
                         "test_only": manifest.test_only,
                     }
                 )
-            return {"model_options": models, "model_registry_error": ""}
+            return {
+                "model_options": models,
+                "model_registry_error": "",
+                "model_directory": str(registry.root),
+            }
         except RuntimeError as exc:
-            return {"model_options": [], "model_registry_error": str(exc)}
+            return {
+                "model_options": [],
+                "model_registry_error": str(exc),
+                "model_directory": str(YoloXModelRegistry.default_root().resolve()),
+            }

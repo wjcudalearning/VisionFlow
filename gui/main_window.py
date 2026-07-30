@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import os
 import time
 from pathlib import Path
 
@@ -130,6 +131,17 @@ class MainWindow(QMainWindow, LogMixin):
 
         # ---- state ----
         self.preferences = GuiPreferences(settings)
+        yolox_model_directory = self.preferences.existing_path(
+            "paths/yolox_model_directory"
+        )
+        if yolox_model_directory is not None:
+            os.environ["VISIONFLOW_YOLOX_MODEL_DIR"] = str(yolox_model_directory)
+        configured_yolox_directory = os.getenv("VISIONFLOW_YOLOX_MODEL_DIR", "")
+        self.yolox_model_directory = (
+            Path(configured_yolox_directory).resolve()
+            if configured_yolox_directory
+            else None
+        )
         self.permission_manager = permission_manager or PermissionManager()
         self.password_prompt = password_prompt or ModePasswordPrompt()
         self.permission_manager.switch_mode("op")
@@ -333,6 +345,9 @@ class MainWindow(QMainWindow, LogMixin):
         self.designer_screen.preview_requested.connect(self._preview_contour_tiles)
         self.designer_screen.recipe_saved.connect(self._on_designed_recipe_saved)
         self.designer_screen.validation_changed.connect(self._on_recipe_validation_changed)
+        self.designer_screen.yolox_model_directory_changed.connect(
+            self._on_yolox_model_directory_changed
+        )
 
         self.results_screen.defect_selected.connect(self._on_defect_selected)
         self.results_screen.view_requested.connect(self._on_view_defect)
@@ -442,9 +457,20 @@ class MainWindow(QMainWindow, LogMixin):
         self.preferences.set_value("paths/batch", str(self.batch_dir or ""))
         self.preferences.set_value("paths/monitor", str(self.monitor_dir or ""))
         self.preferences.set_value("paths/monitor_move", str(self.monitor_move_dir or ""))
+        self.preferences.set_value(
+            "paths/yolox_model_directory", str(self.yolox_model_directory or "")
+        )
         self.preferences.set_value("output/directory", self.output_dir)
         self.preferences.save_output_options(self.output_opts)
         self.preferences.settings.sync()
+
+    def _on_yolox_model_directory_changed(self, directory: str) -> None:
+        resolved = str(Path(directory).resolve())
+        os.environ["VISIONFLOW_YOLOX_MODEL_DIR"] = resolved
+        self.yolox_model_directory = Path(resolved)
+        self.preferences.set_value("paths/yolox_model_directory", resolved)
+        self.preferences.settings.sync()
+        self._inspection_gpu_sessions.invalidate()
 
     def _confirm_discard_designer_changes(self) -> bool:
         if not self.designer_screen.is_dirty():

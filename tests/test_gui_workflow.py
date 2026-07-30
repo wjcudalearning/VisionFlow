@@ -10,14 +10,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QSettings
 from PySide6.QtGui import QImage
-from PySide6.QtWidgets import QApplication, QComboBox
+from PySide6.QtWidgets import QApplication
 
 from core.recipe_manager import RecipeManager
 from gui.main_window import MainWindow, _backend_status_from_result
 from gui.permission_manager import ModePasswordPrompt, PermissionManager
 from gui.workers import InspectionWorker
 from gui.preferences import GuiPreferences
-from gui.screens.designer_screen import DesignerScreen
+from gui.screens.designer_screen import DesignerScreen, YoloXModelFolderPicker
 from gui.screens.results_screen import ResultsScreen
 from gui.table_models import RowTableModel, StatusFilterProxyModel, TableColumn, deterministic_sample
 from gui.widgets.topbar import TopBar
@@ -219,7 +219,7 @@ class GuiWorkflowTests(unittest.TestCase):
         self.assertEqual(screen.pixel_size_um_edit.text(), "")
         self.assertIsNone(screen.build_recipe()["output"]["pixel_size_um_per_px"])
 
-    def test_yolox_designer_uses_model_selector_labels_tooltips_and_dirty_tracking(self):
+    def test_yolox_designer_uses_model_folder_picker_labels_tooltips_and_dirty_tracking(self):
         screen = DesignerScreen()
         screen._select_detector("yolox")
 
@@ -231,8 +231,13 @@ class GuiWorkflowTests(unittest.TestCase):
             )
         ]
 
-        self.assertIsInstance(model_widget, QComboBox)
-        self.assertEqual(model_widget.currentData(), "yolox_tiny_fixture")
+        self.assertIsInstance(model_widget, YoloXModelFolderPicker)
+        self.assertEqual(model_widget.parameter_value(), "yolox_tiny_fixture")
+        self.assertEqual(
+            model_widget.model_directory(), Path("models/yolox").resolve()
+        )
+        self.assertTrue(model_widget.path_edit.isReadOnly())
+        self.assertEqual(model_widget.browse_button.text(), "瀏覽")
         self.assertIn("模型", labels)
         self.assertIn("信心門檻", labels)
         self.assertIn("NMS 重疊率 (IoU)", labels)
@@ -267,6 +272,45 @@ class GuiWorkflowTests(unittest.TestCase):
         self.assertIn("推論精度", labels)
         self.assertIn("跨類別 NMS", labels)
 
+    def test_yolox_model_folder_dialog_validates_and_switches_single_model_registry(self):
+        model_root = Path("models/yolox")
+        with tempfile.TemporaryDirectory(prefix="visionflow_yolox_folder_") as temporary:
+            root = Path(temporary)
+            (root / "fixture.onnx").write_bytes(
+                (model_root / "yolox_tiny_fixture.onnx").read_bytes()
+            )
+            registry = (
+                (model_root / "registry.yaml")
+                .read_text(encoding="utf-8")
+                .replace("yolox_tiny_fixture:", "selected_folder_model:")
+                .replace("yolox_tiny_fixture.onnx", "fixture.onnx")
+            )
+            (root / "registry.yaml").write_text(registry, encoding="utf-8")
+
+            screen = DesignerScreen()
+            screen._select_detector("yolox")
+            screen._row_widgets["yolox"]["toggle"].setChecked(True)
+            picker = screen._param_widgets["yolox"]["model_id"]
+            changed = []
+            screen.yolox_model_directory_changed.connect(changed.append)
+            screen._set_dirty(False)
+
+            with patch(
+                "gui.screens.designer_screen.QFileDialog.getExistingDirectory",
+                return_value=str(root),
+            ) as folder_dialog:
+                picker.browse_button.click()
+
+            folder_dialog.assert_called_once()
+            self.assertEqual(picker.model_directory(), root.resolve())
+            self.assertEqual(picker.parameter_value(), "selected_folder_model")
+            self.assertEqual(changed, [str(root.resolve())])
+            self.assertTrue(screen.is_dirty())
+            self.assertEqual(
+                screen.build_recipe()["detectors"]["yolox"]["params"]["model_id"],
+                "selected_folder_model",
+            )
+
     def test_yolox_unsupported_backend_is_inline_and_blocks_recipe_save(self):
         screen = DesignerScreen()
         screen.set_mode("admin")
@@ -297,7 +341,7 @@ class GuiWorkflowTests(unittest.TestCase):
         screen.set_recipe(recipe)
 
         selector = screen._param_widgets["yolox"]["model_id"]
-        self.assertEqual(selector.currentData(), "missing_model")
+        self.assertEqual(selector.parameter_value(), "missing_model")
         self.assertIn("找不到 model_id", screen.detector_notice_label.text())
         self.assertIn("YOLOX 設定錯誤", screen.editor_state_badge.text())
 
@@ -323,7 +367,7 @@ class GuiWorkflowTests(unittest.TestCase):
                 screen._row_widgets["yolox"]["toggle"].setChecked(True)
 
                 selector = screen._param_widgets["yolox"]["model_id"]
-                self.assertFalse(selector.isEnabled())
+                self.assertTrue(selector.browse_button.isEnabled())
                 self.assertIn("SHA-256 驗證失敗", screen.detector_notice_label.text())
                 with patch(
                     "gui.screens.designer_screen.QFileDialog.getSaveFileName"
@@ -394,6 +438,42 @@ class GuiWorkflowTests(unittest.TestCase):
             self.assertTrue(settings.value("ui/geometry"))
             window.deleteLater()
             self.app.processEvents()
+
+    def test_main_window_restores_yolox_model_directory_preference(self):
+        model_root = Path("models/yolox")
+        with tempfile.TemporaryDirectory(prefix="visionflow_yolox_pref_") as temporary:
+            root = Path(temporary)
+            (root / "fixture.onnx").write_bytes(
+                (model_root / "yolox_tiny_fixture.onnx").read_bytes()
+            )
+            registry = (model_root / "registry.yaml").read_text(encoding="utf-8")
+            (root / "registry.yaml").write_text(
+                registry.replace("yolox_tiny_fixture.onnx", "fixture.onnx"),
+                encoding="utf-8",
+            )
+            settings = QSettings(
+                str(root / "window.ini"), QSettings.Format.IniFormat
+            )
+            settings.setValue("paths/yolox_model_directory", str(root))
+            settings.sync()
+
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("VISIONFLOW_YOLOX_MODEL_DIR", None)
+                window = MainWindow(settings=settings)
+                window.designer_screen._select_detector("yolox")
+                picker = window.designer_screen._param_widgets["yolox"]["model_id"]
+
+                self.assertEqual(picker.model_directory(), root.resolve())
+                self.assertEqual(window.yolox_model_directory, root.resolve())
+                self.assertEqual(
+                    os.environ["VISIONFLOW_YOLOX_MODEL_DIR"], str(root.resolve())
+                )
+                window._save_preferences()
+                self.assertEqual(
+                    Path(str(settings.value("paths/yolox_model_directory"))),
+                    root.resolve(),
+                )
+                window.close()
 
     def test_incremental_model_filter_and_deterministic_sampling(self):
         model = RowTableModel([TableColumn("結果", "final_result"), TableColumn("名稱", "name")])

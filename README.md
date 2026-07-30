@@ -422,7 +422,7 @@ Detector 900 的 NG Tile 會額外繪出內外框候選、被拒絕候選、間�
 - Runtime：支援 ONNX Runtime CPU／CUDA 的 FP32 session；CUDA 必須安裝提供 `CUDAExecutionProvider` 的 `onnxruntime-gpu`。本機或 provider 不可用時，`gpu.mode=auto` 會完整改由 CPU 重跑，`gpu.mode=cuda` 則明確失敗。TensorRT 與 production acceptance 尚未完成。
 - 模型管理：Recipe 僅保存 `model_id`；`models/yolox/registry.yaml` 記錄模型版本、SHA-256、class names、輸入前處理、letterbox、輸出 decoder 與 strides。checksum 不符時拒絕推論。
 - 主要參數：`model_id`、`confidence_threshold`、`nms_iou_threshold`、`target_class_ids`（逗號分隔）、`max_detections`、`min_box_area_px`。
-- Recipe Designer：工程模式提供模型下拉與主要門檻，管理模式才顯示 backend、precision 及跨類別 NMS；模型輸入尺寸與類別 mapping 為唯讀。模型遺失、checksum 錯誤或 backend 不相容時顯示 inline notice 並禁止儲存。
+- Recipe Designer：工程模式以資料夾選擇視窗指定模型套件（資料夾須包含 `registry.yaml`、單一模型與對應權重），並提供主要門檻；管理模式才顯示 backend、precision 及跨類別 NMS。GUI 會記住最近使用的模型資料夾，Recipe 仍只保存穩定的 `model_id`。模型遺失、checksum 錯誤或 backend 不相容時顯示 inline notice 並禁止儲存。
 - Session：GUI 單張、batch 與 monitor 透過共用 execution session 重用同一份模型；cache key 包含模型 SHA-256、backend、device、precision 與 input shape。session 具 warm-up、明確 close、bounded inference queue、LRU cache 上限、選擇性 invalidation 與佇列／推論 metrics；YOLOX CUDA 使用 ONNX Runtime，不要求載入 `visionflow_cuda.dll`。
 - NMS 語意：`nms_iou_threshold` 是兩個 bbox 的交集除以聯集；同類別較低分框在 `IoU > threshold` 時移除，等於 threshold 時保留。
 - 結果：`confidence = objectness × class probability`；bbox 由模型輸入座標反 letterbox 回 Tile，再由 Pipeline 映射到全圖。

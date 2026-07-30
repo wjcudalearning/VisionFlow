@@ -589,6 +589,13 @@ class AiModelSessionManager:
                 self._registry = YoloXModelRegistry()
             return self._registry
 
+    def set_registry(self, registry: YoloXModelRegistry) -> None:
+        if not isinstance(registry, YoloXModelRegistry):
+            raise TypeError("registry must be a YoloXModelRegistry")
+        self.invalidate()
+        with self._lock:
+            self._registry = registry
+
     def configure_policy(self, *, gpu_mode: str, fallback_to_cpu: bool) -> None:
         normalized = str(gpu_mode).lower()
         if normalized not in {"auto", "cpu", "cuda"}:

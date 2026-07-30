@@ -36,7 +36,7 @@ class DetectorYolox(BaseDetector):
         {
             "model_id": {
                 "label": "模型",
-                "tooltip": "從已通過 manifest 與 SHA-256 驗證的 YOLOX 模型中選擇。",
+                "tooltip": "選擇包含 registry.yaml 與權重檔、且已通過 SHA-256 驗證的 YOLOX 模型資料夾。",
             },
             "confidence_threshold": {
                 "minimum": 0.0,
