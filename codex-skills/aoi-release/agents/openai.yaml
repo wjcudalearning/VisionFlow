@@ -1,0 +1,4 @@
+interface:
+  display_name: "AOI Release"
+  short_description: "Package, verify, tag, and publish AOI releases safely."
+  default_prompt: "Use $aoi-release to package and publish a validated AOI release."

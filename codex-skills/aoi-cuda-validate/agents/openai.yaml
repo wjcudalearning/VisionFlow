@@ -1,0 +1,4 @@
+interface:
+  display_name: "AOI CUDA Validation"
+  short_description: "Build and validate AOI CUDA on an RTX test machine."
+  default_prompt: "Use $aoi-cuda-validate to build and validate the AOI CUDA backend."

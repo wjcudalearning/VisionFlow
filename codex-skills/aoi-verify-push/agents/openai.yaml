@@ -1,0 +1,4 @@
+interface:
+  display_name: "AOI Verify and Push"
+  short_description: "Validate, update Todo, commit, and push AOI changes."
+  default_prompt: "Use $aoi-verify-push to finish this AOI project change with validation and GitHub sync."

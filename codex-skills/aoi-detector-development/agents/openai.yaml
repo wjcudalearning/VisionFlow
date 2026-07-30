@@ -1,0 +1,4 @@
+interface:
+  display_name: "AOI Detector Development"
+  short_description: "Build and migrate AOI detectors with CPU/GPU parity."
+  default_prompt: "Use $aoi-detector-development to add or migrate an AOI detector safely."
