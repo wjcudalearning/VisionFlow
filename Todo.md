@@ -219,23 +219,33 @@
 
 ### 環境與編譯
 
-- [ ] `nvidia-smi` 可看到 GPU，並記錄 Driver、CUDA compatibility 與 VRAM。
-- [ ] 安裝 CUDA Toolkit、VS 2022 C++ Build Tools、Windows SDK；確認 `nvcc --version` 與 `where.exe cl`。
-- [ ] 使用 x64 Native Tools PowerShell 執行 `gpu/build_cuda_dll.ps1 -Architecture sm_86`。
-- [ ] 產生 `visionflow_cuda.dll`、`visionflow_cuda.lib` 與 `test_cuda_api.exe`，沒有 link/architecture 錯誤。
-- [ ] `test_cuda_api.exe` 驗證 ABI、device、compute capability、grayscale、context 與 fused smoke。
-- [ ] `dumpbin /exports` 檢查所有預期 `vf_` exports；`dumpbin /dependents` 無缺少依賴。
+- [x] `nvidia-smi` 可看到 GPU，並記錄 Driver、CUDA compatibility 與 VRAM。
+- [x] 安裝 CUDA Toolkit、VS 2022 C++ Build Tools、Windows SDK；確認 `nvcc --version` 與 `where.exe cl`。
+- [x] 使用 x64 Native Tools PowerShell 執行 `gpu/build_cuda_dll.ps1 -Architecture sm_86`。
+- [x] 產生 `visionflow_cuda.dll`、`visionflow_cuda.lib` 與 `test_cuda_api.exe`，沒有 link/architecture 錯誤。
+- [x] `test_cuda_api.exe` 驗證 ABI、device、compute capability、grayscale、context 與 fused smoke。
+- [x] `dumpbin /exports` 檢查所有預期 `vf_` exports；`dumpbin /dependents` 無缺少依賴。
+
+### 2026-07-30 RTX 3090 實測阻擋項目
+
+- [x] 修正 CUDA Gaussian 與 OpenCV `GaussianBlur` 的邊界及 rounding 語意：random odd-size kernel 3（max diff 6、超容差像素 19.6828%）、kernel 5（max diff 4、0.9675%）及 non-contiguous kernel 3（max diff 4、4.3701%）必須回到既定 `max_diff <= 2`、超容差像素 `<= 0.1%`。
+- [x] 修正 native 401-style plan 的 Gray → Gaussian → Adaptive Mean 組合誤差；目前首次及 context reuse 均有 3.1047% binary mask mismatch，高於允許的 2%，修正後兩次結果都必須通過。
+- [x] 修正 native 900 shared-gray DAG 的 outer/inner mask 差異；目前分別有 0.0895%／0.0977% mismatch，而此路徑要求與 CPU 完全一致。
+- [x] 修正 resident ROI linear plan 與 DAG 的 0.0977% mismatch；逐項核對 ROI origin、width/height、host/device stride、邊界處理及 threshold rounding，並維持 resident execution 不增加 H2D。
+- [x] 修正 GitHub Actions artifact 與 repository 的整合方式：artifact 只部署核准的 DLL/LIB/EXE/manifest，不得覆蓋 repository 版 `build_cuda_dll.ps1`、`preflight_cuda_build.py`、validator 或 profiler；恢復 repo-local import root 與 optional export contract，使直接執行 validator 及完整 unit tests 不再發生 import error。
+- [x] 完成上述修正後，在本機 x64 Native Tools PowerShell 以 `gpu/build_cuda_dll.ps1 -Architecture sm_86` 重編 DLL/LIB/EXE，記錄 source/binary SHA-256、exports、dependencies 與工具版本；不得沿用未對應目前 commit 的舊二進位檔。
+- [x] 本機重編產物必須讓正式 `gpu/validate_cuda_dll.py` 以零 soft bypass、零失敗完成全部 primitive、linear/DAG plan、resident ROI、context reuse、4K benchmark 及 10/100/1000 stress checkpoints，再進入 production PASS/NG 驗收。
 
 ### Primitive、plan 與效能
 
-- [ ] BGR→RGB、crop、threshold、morphology 與 CPU 完全一致。
-- [ ] BGR→Gray、resize、Gaussian 與 Adaptive Mean 通過既定像素容差。
-- [ ] Gaussian 覆蓋 kernel 3/5/15/25/45 與 structured/non-contiguous inputs。
-- [ ] Adaptive Mean 覆蓋 block 3/11/35、正負與小數 C、invert 及邊界輸入。
-- [ ] 401-2 fused 與 CPU plan 結果在容差內；相同尺寸連續執行 allocation count 不增加。
-- [ ] 通用 native plan 完成後，逐 operator 與完整 plan 對 CPU executor 建立等價矩陣。
+- [x] BGR→RGB、crop、threshold、morphology 與 CPU 完全一致。
+- [x] BGR→Gray、resize、Gaussian 與 Adaptive Mean 通過既定像素容差。
+- [x] Gaussian 覆蓋 kernel 3/5/15/25/45 與 structured/non-contiguous inputs。
+- [x] Adaptive Mean 覆蓋 block 3/11/35、正負與小數 C、invert 及邊界輸入。
+- [x] 401-2 fused 與 CPU plan 結果在容差內；相同尺寸連續執行 allocation count 不增加。
+- [x] 通用 native plan 完成後，逐 operator 與完整 plan 對 CPU executor 建立等價矩陣。
 - [ ] 記錄 4K primitives、preprocessing plan、純檢測與端到端 CPU/GPU speedup。
-- [ ] 連續執行三次完整驗證，沒有 CUDA error、崩潰或 VRAM 持續成長。
+- [x] 連續執行三次完整驗證，沒有 CUDA error、崩潰或 VRAM 持續成長。
 
 ### Production recipes、GUI、打包與壓測
 
@@ -322,6 +332,7 @@
 
 ## 完成紀錄
 
+- [x] 2026-07-30：完成 RTX 3090 CUDA blocker 修復與本機實機驗收。GitHub artifact/repository 工具已改為 repo-local manifest 與受控發布；BGR→Gray 採 OpenCV 15-bit fixed-point 係數，Gaussian 3–127 採 OpenCV 8-bit bit-exact kernel、reflect101 與兩階段 fixed-point rounding。以 CUDA 13.3、MSVC 19.51、`sm_86` 重編 DLL/LIB/EXE，C++ smoke 確認 RTX 3090 compute capability 8.6、ABI/plan/DAG/resident ROI/batch 全通過；正式 validator 三次均以零失敗完成全部 correctness、4K benchmark、crossover、morphology profile 與 10/100/1000 stress，1000 checkpoint 的 allocation count 固定 25、reserved bytes 固定 222,435,236、free VRAM 不變。五份 production recipes 以合成影像執行 CPU/GPU pipeline 結果完全一致；完整 unit tests、compileall、preflight 與 diff check 通過。
 - [x] 2026-07-24：YOLOX 已接入既有 RTX 3090 workflow：先將 CPU 版 ONNX Runtime 換成 `onnxruntime-gpu==1.27.0`，執行 M3 CPU/CUDA raw/NMS 等價與 CUDA warm-up 5＋1000 次 stability，並接受可選 `yolox_acceptance_manifest` 產生 CPU/CUDA production 指標；所有 JSON 納入 artifact。最新 RTX job `30037233901` 仍因 self-hosted runner 離線而 queued，heartbeat `30041558647` 失敗，故硬體項目保持未勾選。
 - [x] 2026-07-24：完成 YOLOX session 治理與 CPU 交付驗證：加入 bounded inference queue、LRU session cache、模型/backend invalidation、安全 close、pipeline AI metrics；新增 production acceptance manifest/validator（precision、recall、mAP50、誤殺率、漏檢率、per-class/confusion matrix）及 stability validator。本機 fixture warm-up 5 後執行 1000 次維持單一 session/load、輸出 deterministic、RSS 僅增加 307,200 bytes；batch/monitor 共用 session 與 Unicode 路徑測試通過。CPU-compatible PyInstaller package 已重建為 288 個檔案、確認不含 CUDA DLL，bundled YOLOX registry／ONNX model／Recipe 存在且 EXE smoke exit 0。RTX 3090、production 權重與標註資料仍待外部資產驗收。
 - [x] 2026-07-24：完成 YOLOX M3 軟體接入：新增 ONNX Runtime CUDA FP32 session、provider/active EP 驗證與 CPU/CUDA 分離 cache，CUDA session 明確停用 CPU EP fallback；`gpu.mode=auto` 在 provider 缺少、初始化失敗、OOM 或推論失敗時完整以 CPU 重跑，`gpu.mode=cuda` 維持嚴格失敗。GUI 單張、batch、monitor 透過既有 execution session 共用 AI manager，YOLOX 不再誤載 `visionflow_cuda.dll`；Recipe Designer 開放 YOLOX GPU toggle 並在 provider 不可用時阻止儲存。新增 raw/NMS 等價性容差與 `gpu/validate_yolox_ort.py`，本機僅有 CPUExecutionProvider，因此 RTX 3090 實機 M3 驗收仍未勾選。
@@ -402,3 +413,4 @@
 - [x] 2026-07-29：依星期四至星期三週期，彙整 2026-07-23 至 2026-07-29 的 9 筆提交與驗證證據，產出本週進度報告；內容涵蓋 YOLOX CPU reference、Recipe Designer、ONNX Runtime CUDA fallback、session／acceptance／stability／RTX workflow，以及 Pattern 定位固定網格批量切圖 GUI／CLI，並明確保留 production 權重、標註資料、CUDA provider 與 RTX 3090 實機驗收的未完成狀態。
 - [x] 2026-07-30：YOLOX Recipe Designer 的模型選擇由下拉選單改為模型資料夾視窗；所選資料夾必須包含單一模型的 `registry.yaml` 與通過 SHA-256 驗證的權重，成功後安全切換 session registry、Recipe 維持只保存 `model_id`，GUI 偏好設定記住資料夾並在切換時清除既有單張 session cache。完整 192 tests、compileall、CUDA source preflight、GUI offscreen smoke、YOLOX CLI 固定 2 筆 NG smoke（預期 exit 2）、畫面截圖檢查與 `git diff --check` 均通過。
 - [x] 2026-07-30：將 AOI 專案使用的 `aoi-verify-push`、`aoi-detector-development`、`aoi-cuda-validate`、`aoi-release` 四個 Codex skills 複製至 repository 的 `codex-skills/`，移除固定舊機使用者路徑，並加入新機安裝說明及預設不覆蓋既有內容的 PowerShell 安裝程式；四個 skills 官方 validator、隔離安裝／防覆蓋 smoke、192 tests、compileall、CUDA source preflight 與 `git diff --check` 均通過。
+- [x] 2026-07-30：在 RTX 3090（Driver 610.62、CUDA 13.3、compute capability 8.6）驗證 GitHub Actions 產物；35 個 exports、dependencies、native ABI/plan/ROI batch smoke 及 1000 次 persistent-plan reuse 通過，但正式 CUDA validator 在 72 個數值 cases 中有 10 項 Gaussian、401-style、900 DAG 與 resident ROI 失敗，完整 unit tests 另因 artifact 覆蓋 repository preflight API 而有 1 項 import error。已新增明確阻擋與本機重編驗收項目，RTX production acceptance 保持未完成。

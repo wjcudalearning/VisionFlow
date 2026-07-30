@@ -82,6 +82,29 @@ class CudaSourceContractTests(unittest.TestCase):
         self.assertIn("persistent->stream", fused)
         self.assertEqual(fused.count("cudaMemcpy2DAsync("), 2)
 
+    def test_gray_and_gaussian_match_opencv_fixed_point_contract(self):
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "gpu" / "visionflow_cuda.cu").read_text(encoding="utf-8")
+        weights = source.split("int prepare_gaussian_weights(", 1)[1].split(
+            "int adaptive_layout(", 1
+        )[0]
+        gray = source.split("__global__ void bgr_gray_kernel(", 1)[1].split(
+            "__global__ void bgr_rgb_kernel(", 1
+        )[0]
+
+        self.assertIn("weights = {64, 128, 64}", weights)
+        self.assertIn("weights = {16, 64, 96, 64, 16}", weights)
+        self.assertIn("weights = {8, 28, 56, 72, 56, 28, 8}", weights)
+        self.assertIn("weights = {4, 13, 30, 51, 60, 51, 30, 13, 4}", weights)
+        self.assertIn("std::nearbyint(adjusted)", weights)
+        self.assertIn("GAUSSIAN_FIXED_SCALE - side_sum * 2", weights)
+        self.assertIn("__constant__ uint16_t gaussian_weights", source)
+        self.assertIn("GAUSSIAN_FINAL_ROUND", source)
+        self.assertIn("gray_shift = 15", gray)
+        self.assertIn("blue_to_gray = 3735", gray)
+        self.assertIn("green_to_gray = 19235", gray)
+        self.assertIn("red_to_gray = 9798", gray)
+
     def test_native_dag_uploads_root_once_and_downloads_requested_outputs(self):
         root = Path(__file__).resolve().parents[1]
         source = (root / "gpu" / "visionflow_cuda.cu").read_text(encoding="utf-8")

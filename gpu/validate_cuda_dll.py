@@ -773,6 +773,11 @@ def normalized_result(result: dict) -> dict:
     normalized = deepcopy(result)
     for key in ("duration_sec", "outputs", "execution"):
         normalized.pop(key, None)
+    provenance = normalized.get("provenance")
+    if isinstance(provenance, dict):
+        # Validation recipes intentionally differ in CPU/GPU routing fields.
+        provenance.pop("recipe_source_sha256", None)
+        provenance.pop("effective_recipe_sha256", None)
     for tile_result in normalized.get("tiles", []):
         for detector_result in tile_result.get("detectors", []):
             detector_result.pop("execution", None)
@@ -849,7 +854,7 @@ def validate_pipeline(image_path: Path, recipe_path: Path, dll_path: str) -> dic
     for config in gpu_recipe.get("detectors", {}).values():
         config["use_gpu"] = bool(config.get("enabled", False))
     for recipe in (cpu_recipe, gpu_recipe):
-        recipe["output"] = {key: False for key in recipe.get("output", {})}
+        recipe["output"] = _disabled_report_output(recipe.get("output", {}))
 
     with tempfile.TemporaryDirectory(prefix="visionflow_cuda_validation_") as temporary:
         temporary_path = Path(temporary)
@@ -906,6 +911,13 @@ def validate_production_manifest(path: Path, dll_path: str) -> list[dict]:
         results.append(result)
     print(f"PASS production manifest: {len(results)} CPU/GPU-equivalent labeled cases")
     return results
+
+
+def _disabled_report_output(output: dict) -> dict:
+    return {
+        key: False if isinstance(value, bool) else value
+        for key, value in output.items()
+    }
 
 
 def main() -> int:

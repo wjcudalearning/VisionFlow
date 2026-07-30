@@ -34,11 +34,13 @@ from core.preprocess_plan import (
 from detectors.detector_401_2 import Detector401_2
 from detectors.detector_401 import Detector401
 from gpu.validate_cuda_dll import (
+    _disabled_report_output,
     benchmark_crossover,
     benchmark_morphology_iterations,
     compare,
     environment_snapshot,
     load_production_manifest,
+    normalized_result,
     PRODUCTION_RECIPES,
     stress_persistent_plan,
     validate_context_reuse_matrix,
@@ -1138,6 +1140,41 @@ class ComparisonToleranceTests(unittest.TestCase):
 
 
 class BenchmarkMetadataTests(unittest.TestCase):
+    def test_pipeline_validator_disables_only_boolean_report_outputs(self):
+        output = {
+            "save_json": True,
+            "save_csv": False,
+            "pixel_size_um_per_px": 4.5,
+            "overlay_jpeg_quality": 92,
+            "preview_max_dimension": None,
+        }
+
+        disabled = _disabled_report_output(output)
+
+        self.assertFalse(disabled["save_json"])
+        self.assertFalse(disabled["save_csv"])
+        self.assertEqual(disabled["pixel_size_um_per_px"], 4.5)
+        self.assertEqual(disabled["overlay_jpeg_quality"], 92)
+        self.assertIsNone(disabled["preview_max_dimension"])
+
+    def test_pipeline_validator_ignores_expected_cpu_gpu_recipe_hash_differences(self):
+        cpu = {
+            "provenance": {
+                "recipe_source_sha256": "cpu-source",
+                "effective_recipe_sha256": "cpu-effective",
+                "app": {"commit": "abc123", "dirty": True, "source": "git"},
+                "detector_params": {"401-1": {"threshold": 20}},
+            },
+            "final_result": "PASS",
+            "summary": {"tile_count": 1, "ng_count": 0},
+            "tiles": [],
+        }
+        gpu = deepcopy(cpu)
+        gpu["provenance"]["recipe_source_sha256"] = "gpu-source"
+        gpu["provenance"]["effective_recipe_sha256"] = "gpu-effective"
+
+        self.assertEqual(normalized_result(cpu), normalized_result(gpu))
+
     def test_timing_summary_separates_cold_warm_average_median_and_p95(self):
         calls = []
 

@@ -33,13 +33,17 @@ enum TimingEventIndex {
     TIMING_MORPHOLOGY_END = 11,
 };
 
-__constant__ float gaussian_weights[MAX_GAUSSIAN_KERNEL];
+constexpr unsigned int GAUSSIAN_FIXED_SHIFT = 8;
+constexpr unsigned int GAUSSIAN_FIXED_SCALE = 1U << GAUSSIAN_FIXED_SHIFT;
+constexpr unsigned int GAUSSIAN_FINAL_ROUND =
+    1U << (GAUSSIAN_FIXED_SHIFT * 2 - 1);
+__constant__ uint16_t gaussian_weights[MAX_GAUSSIAN_KERNEL];
 
 struct PersistentContext {
     uint8_t* u8[5]{};
     size_t u8_capacity[5]{};
-    float* float_buffer = nullptr;
-    size_t float_capacity = 0;
+    uint32_t* gaussian_buffer = nullptr;
+    size_t gaussian_capacity = 0;
     unsigned long long* u64[2]{};
     size_t u64_capacity[2]{};
     std::vector<uint8_t*> dag_u8;
@@ -76,7 +80,7 @@ struct PersistentContext {
 
     ~PersistentContext() {
         for (void* pointer : u8) visionflow_cuda::free_device(pointer);
-        visionflow_cuda::free_device(float_buffer);
+        visionflow_cuda::free_device(gaussian_buffer);
         for (void* pointer : u64) visionflow_cuda::free_device(pointer);
         for (void* pointer : dag_u8) visionflow_cuda::free_device(pointer);
         visionflow_cuda::free_device(resident_u8);
@@ -214,17 +218,42 @@ int prepare_gaussian_weights(int kernel, int* radius_out) {
     if (radius_out == nullptr || kernel < 3 || kernel % 2 == 0 || kernel > MAX_GAUSSIAN_KERNEL) {
         return VF_CUDA_INVALID_ARGUMENT;
     }
-    double sigma = 0.3 * ((kernel - 1) * 0.5 - 1) + 0.8;
-    std::vector<float> weights(kernel);
-    float total = 0.0f;
+    std::vector<uint16_t> weights(kernel);
     int radius = kernel / 2;
-    for (int i = -radius; i <= radius; ++i) {
-        weights[i + radius] = expf(-(i * i) / static_cast<float>(2.0 * sigma * sigma));
-        total += weights[i + radius];
+    if (kernel == 3) {
+        weights = {64, 128, 64};
+    } else if (kernel == 5) {
+        weights = {16, 64, 96, 64, 16};
+    } else if (kernel == 7) {
+        weights = {8, 28, 56, 72, 56, 28, 8};
+    } else if (kernel == 9) {
+        weights = {4, 13, 30, 51, 60, 51, 30, 13, 4};
+    } else {
+        double sigma = 0.3 * ((kernel - 1) * 0.5 - 1) + 0.8;
+        std::vector<double> normalized(kernel);
+        double total = 0.0;
+        for (int i = -radius; i <= radius; ++i) {
+            double value = std::exp(
+                -(static_cast<double>(i) * i) / (2.0 * sigma * sigma));
+            normalized[i + radius] = value;
+            total += value;
+        }
+        for (double& value : normalized) value /= total;
+
+        double error = 0.0;
+        unsigned int side_sum = 0;
+        for (int index = 0; index < radius; ++index) {
+            double adjusted = normalized[index] * GAUSSIAN_FIXED_SCALE + error;
+            unsigned int value = static_cast<unsigned int>(std::nearbyint(adjusted));
+            error = adjusted - value;
+            weights[index] = static_cast<uint16_t>(value);
+            weights[kernel - 1 - index] = static_cast<uint16_t>(value);
+            side_sum += value;
+        }
+        weights[radius] = static_cast<uint16_t>(GAUSSIAN_FIXED_SCALE - side_sum * 2);
     }
-    for (float& value : weights) value /= total;
     cudaError_t error = cudaMemcpyToSymbol(
-        gaussian_weights, weights.data(), static_cast<size_t>(kernel) * sizeof(float));
+        gaussian_weights, weights.data(), static_cast<size_t>(kernel) * sizeof(uint16_t));
     if (error != cudaSuccess) return visionflow_cuda::runtime_error(error);
     *radius_out = radius;
     return VF_CUDA_OK;
@@ -478,7 +507,7 @@ int reserve_dag_plan_buffers(PersistentContext* context, const NativeDagPlan& pl
         return VF_CUDA_ALLOCATION_FAILED;
     }
     const size_t pixels = static_cast<size_t>(plan.width) * plan.height;
-    bool needs_float = false;
+    bool needs_gaussian = false;
     bool needs_morph_scratch = false;
     size_t maximum_padded_count = 0;
     for (size_t index = 0; index < plan.operators.size(); ++index) {
@@ -487,7 +516,7 @@ int reserve_dag_plan_buffers(PersistentContext* context, const NativeDagPlan& pl
             pixels * static_cast<size_t>(plan.node_channels[index]), &context->allocation_count);
         if (result != VF_CUDA_OK) return result;
         const VfPlanOperatorV1& op = plan.operators[index];
-        needs_float = needs_float || op.kind == VF_PLAN_GAUSSIAN;
+        needs_gaussian = needs_gaussian || op.kind == VF_PLAN_GAUSSIAN;
         needs_morph_scratch = needs_morph_scratch || op.kind == VF_PLAN_MORPHOLOGY;
         if (op.kind == VF_PLAN_ADAPTIVE_MEAN) {
             int radius = 0, padded_width = 0, padded_height = 0;
@@ -503,8 +532,9 @@ int reserve_dag_plan_buffers(PersistentContext* context, const NativeDagPlan& pl
                                 &context->allocation_count);
     if (result == VF_CUDA_OK && needs_morph_scratch) result = reserve_device(
         &context->u8[4], &context->u8_capacity[4], pixels * 3, &context->allocation_count);
-    if (result == VF_CUDA_OK && needs_float) result = reserve_device(
-        &context->float_buffer, &context->float_capacity, pixels * 3, &context->allocation_count);
+    if (result == VF_CUDA_OK && needs_gaussian) result = reserve_device(
+        &context->gaussian_buffer, &context->gaussian_capacity,
+        pixels * 3, &context->allocation_count);
     if (result == VF_CUDA_OK && maximum_padded_count > 0) result = reserve_device(
         &context->u8[3], &context->u8_capacity[3], maximum_padded_count, &context->allocation_count);
     if (result == VF_CUDA_OK && maximum_padded_count > 0) result = reserve_device(
@@ -519,7 +549,7 @@ int reserve_plan_buffers(PersistentContext* context, const NativePlan& plan) {
     const size_t input_pixels = static_cast<size_t>(plan.width) * plan.height;
     size_t maximum_pixels = input_pixels;
     int maximum_channels = plan.input_channels;
-    bool needs_float = false;
+    bool needs_gaussian = false;
     bool needs_morph_scratch = false;
     size_t maximum_padded_count = 0;
     int channels = plan.input_channels;
@@ -534,7 +564,7 @@ int reserve_plan_buffers(PersistentContext* context, const NativePlan& plan) {
         const size_t current_pixels = static_cast<size_t>(current_width) * current_height;
         maximum_pixels = std::max(maximum_pixels, current_pixels);
         maximum_channels = std::max(maximum_channels, channels);
-        needs_float = needs_float || op.kind == VF_PLAN_GAUSSIAN;
+        needs_gaussian = needs_gaussian || op.kind == VF_PLAN_GAUSSIAN;
         needs_morph_scratch = needs_morph_scratch || op.kind == VF_PLAN_MORPHOLOGY;
         if (op.kind == VF_PLAN_ADAPTIVE_MEAN) {
             int radius = 0, padded_width = 0, padded_height = 0;
@@ -554,8 +584,8 @@ int reserve_plan_buffers(PersistentContext* context, const NativePlan& plan) {
         &context->u8[2], &context->u8_capacity[2], image_bytes, &context->allocation_count);
     if (result == VF_CUDA_OK && needs_morph_scratch) result = reserve_device(
         &context->u8[4], &context->u8_capacity[4], image_bytes, &context->allocation_count);
-    if (result == VF_CUDA_OK && needs_float) result = reserve_device(
-        &context->float_buffer, &context->float_capacity,
+    if (result == VF_CUDA_OK && needs_gaussian) result = reserve_device(
+        &context->gaussian_buffer, &context->gaussian_capacity,
         maximum_pixels * static_cast<size_t>(maximum_channels), &context->allocation_count);
     if (result == VF_CUDA_OK && maximum_padded_count > 0) result = reserve_device(
         &context->u8[3], &context->u8_capacity[3], maximum_padded_count,
@@ -592,7 +622,15 @@ __global__ void bgr_gray_kernel(const uint8_t* src, uint8_t* dst, int width, int
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= width || y >= height) return;
     int index = (y * width + x) * 3;
-    dst[y * width + x] = static_cast<uint8_t>((29 * src[index] + 150 * src[index + 1] + 77 * src[index + 2] + 128) >> 8);
+    constexpr int gray_shift = 15;
+    constexpr int blue_to_gray = 3735;
+    constexpr int green_to_gray = 19235;
+    constexpr int red_to_gray = 9798;
+    dst[y * width + x] = static_cast<uint8_t>(
+        (blue_to_gray * src[index] +
+         green_to_gray * src[index + 1] +
+         red_to_gray * src[index + 2] +
+         (1 << (gray_shift - 1))) >> gray_shift);
 }
 
 __global__ void bgr_rgb_kernel(const uint8_t* src, uint8_t* dst, int width, int height) {
@@ -652,7 +690,7 @@ __global__ void resize_gray_kernel(const uint8_t* src, uint8_t* dst, int sw, int
 
 __global__ void gaussian_horizontal_kernel(
     const uint8_t* src,
-    float* intermediate,
+    uint32_t* intermediate,
     int width,
     int height,
     int channels,
@@ -661,17 +699,19 @@ __global__ void gaussian_horizontal_kernel(
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= width || y >= height) return;
     for (int c = 0; c < channels; ++c) {
-        float sum = 0.0f;
+        uint32_t sum = 0;
         for (int kx = -radius; kx <= radius; ++kx) {
             int sx = reflect101(x + kx, width);
-            sum += src[(y * width + sx) * channels + c] * gaussian_weights[kx + radius];
+            sum += static_cast<uint32_t>(
+                src[(y * width + sx) * channels + c]) *
+                gaussian_weights[kx + radius];
         }
         intermediate[(y * width + x) * channels + c] = sum;
     }
 }
 
 __global__ void gaussian_vertical_kernel(
-    const float* intermediate,
+    const uint32_t* intermediate,
     uint8_t* dst,
     int width,
     int height,
@@ -681,13 +721,16 @@ __global__ void gaussian_vertical_kernel(
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= width || y >= height) return;
     for (int c = 0; c < channels; ++c) {
-        float sum = 0.0f;
+        unsigned long long sum = 0;
         for (int ky = -radius; ky <= radius; ++ky) {
             int sy = reflect101(y + ky, height);
-            sum += intermediate[(sy * width + x) * channels + c] * gaussian_weights[ky + radius];
+            sum += static_cast<unsigned long long>(
+                intermediate[(sy * width + x) * channels + c]) *
+                gaussian_weights[ky + radius];
         }
-        dst[(y * width + x) * channels + c] =
-            static_cast<uint8_t>(fminf(255.0f, fmaxf(0.0f, sum + 0.5f)));
+        dst[(y * width + x) * channels + c] = static_cast<uint8_t>(
+            (sum + GAUSSIAN_FINAL_ROUND) >>
+            (GAUSSIAN_FIXED_SHIFT * 2));
     }
 }
 
@@ -924,9 +967,9 @@ static int execute_linear_plan_device(
                 int result = prepare_gaussian_weights(op.int_params[0], &radius);
                 if (result != VF_CUDA_OK) return result;
                 gaussian_horizontal_kernel<<<grid2d(width, height), dim3(BLOCK_X, BLOCK_Y), 0, context->stream>>>(
-                    current, context->float_buffer, width, height, channels, radius);
+                    current, context->gaussian_buffer, width, height, channels, radius);
                 gaussian_vertical_kernel<<<grid2d(width, height), dim3(BLOCK_X, BLOCK_Y), 0, context->stream>>>(
-                    context->float_buffer, next, width, height, channels, radius);
+                    context->gaussian_buffer, next, width, height, channels, radius);
                 cudaEventRecord(context->timing_events[TIMING_GAUSSIAN_END], context->stream);
                 current = next;
                 break;
@@ -1044,9 +1087,9 @@ static int execute_dag_plan_device(
                 int result = prepare_gaussian_weights(op.int_params[0], &radius);
                 if (result != VF_CUDA_OK) return result;
                 gaussian_horizontal_kernel<<<grid2d(width, height), dim3(BLOCK_X, BLOCK_Y), 0, context->stream>>>(
-                    input, context->float_buffer, width, height, channels, radius);
+                    input, context->gaussian_buffer, width, height, channels, radius);
                 gaussian_vertical_kernel<<<grid2d(width, height), dim3(BLOCK_X, BLOCK_Y), 0, context->stream>>>(
-                    context->float_buffer, output, width, height, channels, radius);
+                    context->gaussian_buffer, output, width, height, channels, radius);
                 cudaEventRecord(context->timing_events[TIMING_GAUSSIAN_END], context->stream);
                 values[index] = output;
                 break;
@@ -1223,7 +1266,7 @@ VF_CUDA_API int vf_context_stats(
     PersistentContext* persistent = static_cast<PersistentContext*>(context);
     uint64_t bytes = 0;
     for (size_t capacity : persistent->u8_capacity) bytes += static_cast<uint64_t>(capacity);
-    bytes += static_cast<uint64_t>(persistent->float_capacity) * sizeof(float);
+    bytes += static_cast<uint64_t>(persistent->gaussian_capacity) * sizeof(uint32_t);
     for (size_t capacity : persistent->u64_capacity) {
         bytes += static_cast<uint64_t>(capacity) * sizeof(unsigned long long);
     }
@@ -1717,12 +1760,13 @@ VF_CUDA_API int vf_gaussian_blur_u8(const uint8_t* src,int w,int h,int stride,in
         return VF_CUDA_INVALID_ARGUMENT;
     }
     uint8_t *ds = nullptr, *dd = nullptr;
-    float* intermediate = nullptr;
+    uint32_t* intermediate = nullptr;
     int result = alloc_copy(src, w, h, stride, sc, &ds);
     if (result != VF_CUDA_OK) return result;
     result = visionflow_cuda::allocate_bytes(&dd, static_cast<size_t>(w) * h * sc);
     if (result != VF_CUDA_OK) { visionflow_cuda::free_device(ds); return result; }
-    cudaError_t error = cudaMalloc(&intermediate, static_cast<size_t>(w) * h * sc * sizeof(float));
+    cudaError_t error = cudaMalloc(
+        &intermediate, static_cast<size_t>(w) * h * sc * sizeof(uint32_t));
     if (error != cudaSuccess) {
         visionflow_cuda::free_device(dd);
         visionflow_cuda::free_device(ds);
@@ -1877,8 +1921,8 @@ VF_CUDA_API int vf_preprocess_401_2_u8(
     }
     if (result == VF_CUDA_OK) {
         result = reserve_device(
-            &persistent->float_buffer,
-            &persistent->float_capacity,
+            &persistent->gaussian_buffer,
+            &persistent->gaussian_capacity,
             pixel_count,
             &persistent->allocation_count);
     }
@@ -1917,9 +1961,9 @@ VF_CUDA_API int vf_preprocess_401_2_u8(
             persistent->u8[0], gray, w, h);
     }
     gaussian_horizontal_kernel<<<grid2d(w, h), dim3(BLOCK_X, BLOCK_Y), 0, persistent->stream>>>(
-        gray, persistent->float_buffer, w, h, 1, radius);
+        gray, persistent->gaussian_buffer, w, h, 1, radius);
     gaussian_vertical_kernel<<<grid2d(w, h), dim3(BLOCK_X, BLOCK_Y), 0, persistent->stream>>>(
-        persistent->float_buffer, gray, w, h, 1, radius);
+        persistent->gaussian_buffer, gray, w, h, 1, radius);
     replicate_border_kernel<<<grid2d(padded_width, padded_height), dim3(BLOCK_X, BLOCK_Y), 0, persistent->stream>>>(
         gray,
         persistent->u8[3],
