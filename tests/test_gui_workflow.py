@@ -9,8 +9,8 @@ from unittest.mock import Mock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QSettings
-from PySide6.QtGui import QImage
-from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QImage, QPalette
+from PySide6.QtWidgets import QApplication, QComboBox
 
 from core.recipe_manager import RecipeManager
 from gui.main_window import MainWindow, _backend_status_from_result
@@ -20,6 +20,7 @@ from gui.preferences import GuiPreferences
 from gui.screens.designer_screen import DesignerScreen, YoloXModelFolderPicker
 from gui.screens.results_screen import ResultsScreen
 from gui.table_models import RowTableModel, StatusFilterProxyModel, TableColumn, deterministic_sample
+from gui.theme import COLORS, build_stylesheet
 from gui.widgets.topbar import TopBar
 
 
@@ -73,6 +74,33 @@ class GuiWorkflowTests(unittest.TestCase):
         )
         self.assertTrue(ai_status["active"])
         self.assertEqual(ai_status["device_name"], "CUDA")
+
+    def test_combobox_theme_keeps_closed_and_popup_text_visible(self):
+        previous_stylesheet = self.app.styleSheet()
+        combo = QComboBox()
+        try:
+            self.app.setStyleSheet(build_stylesheet())
+            combo.addItems(["Auto", "CPU only", "CUDA required"])
+            combo.show()
+            self.app.processEvents()
+
+            for widget in (combo, combo.view(), combo.view().viewport()):
+                palette = widget.palette()
+                self.assertEqual(
+                    palette.color(QPalette.ColorRole.Base).name(),
+                    COLORS["surface"],
+                )
+                self.assertEqual(
+                    palette.color(QPalette.ColorRole.Text).name(),
+                    COLORS["text"],
+                )
+                self.assertNotEqual(
+                    palette.color(QPalette.ColorRole.Base),
+                    palette.color(QPalette.ColorRole.Text),
+                )
+        finally:
+            combo.deleteLater()
+            self.app.setStyleSheet(previous_stylesheet)
 
     def test_permission_manager_defaults_to_op_and_checks_each_privileged_password(self):
         permissions = PermissionManager()

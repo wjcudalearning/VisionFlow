@@ -277,6 +277,49 @@ def build_stylesheet() -> str:
         background: {c['surface_2']};
         color: {c['text_3']};
     }}
+    QComboBox {{
+        min-height: {ROW_H}px;
+        border: 1px solid {c['border_strong']};
+        border-radius: {R_SM}px;
+        padding: 0 28px 0 9px;
+        background: {c['surface']};
+        color: {c['text']};
+        selection-background-color: {c['accent_soft']};
+        selection-color: {c['accent_text']};
+    }}
+    QComboBox:hover {{
+        border-color: {c['text_3']};
+    }}
+    QComboBox:focus, QComboBox:on {{
+        border-color: {c['accent']};
+    }}
+    QComboBox:disabled {{
+        background: {c['surface_2']};
+        color: {c['text_3']};
+        border-color: {c['border']};
+    }}
+    QComboBox QAbstractItemView {{
+        background: {c['surface']};
+        color: {c['text']};
+        border: 1px solid {c['border_strong']};
+        selection-background-color: {c['accent_soft']};
+        selection-color: {c['accent_text']};
+        outline: 0;
+        padding: 4px;
+    }}
+    QComboBox QAbstractItemView::item {{
+        min-height: 28px;
+        padding: 2px 8px;
+        background: {c['surface']};
+        color: {c['text']};
+    }}
+    QComboBox QAbstractItemView::item:selected {{
+        background: {c['accent_soft']};
+        color: {c['accent_text']};
+    }}
+    QComboBox QAbstractItemView::item:disabled {{
+        color: {c['text_3']};
+    }}
 
     /* ---------- progress bar ---------- */
     QProgressBar[role="thin"] {{
