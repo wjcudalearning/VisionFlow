@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import yaml
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QSettings
@@ -17,7 +19,7 @@ from gui.main_window import MainWindow, _backend_status_from_result
 from gui.permission_manager import ModePasswordPrompt, PermissionManager
 from gui.workers import InspectionWorker
 from gui.preferences import GuiPreferences
-from gui.screens.designer_screen import DesignerScreen, YoloXModelFolderPicker
+from gui.screens.designer_screen import DesignerScreen, YoloXModelFilePicker
 from gui.screens.results_screen import ResultsScreen
 from gui.table_models import RowTableModel, StatusFilterProxyModel, TableColumn, deterministic_sample
 from gui.theme import COLORS, build_stylesheet
@@ -247,7 +249,7 @@ class GuiWorkflowTests(unittest.TestCase):
         self.assertEqual(screen.pixel_size_um_edit.text(), "")
         self.assertIsNone(screen.build_recipe()["output"]["pixel_size_um_per_px"])
 
-    def test_yolox_designer_uses_model_folder_picker_labels_tooltips_and_dirty_tracking(self):
+    def test_yolox_designer_uses_model_file_picker_labels_tooltips_and_dirty_tracking(self):
         screen = DesignerScreen()
         screen._select_detector("yolox")
 
@@ -259,10 +261,11 @@ class GuiWorkflowTests(unittest.TestCase):
             )
         ]
 
-        self.assertIsInstance(model_widget, YoloXModelFolderPicker)
+        self.assertIsInstance(model_widget, YoloXModelFilePicker)
         self.assertEqual(model_widget.parameter_value(), "yolox_tiny_fixture")
         self.assertEqual(
-            model_widget.model_directory(), Path("models/yolox").resolve()
+            model_widget.model_path(),
+            Path("models/yolox/yolox_tiny_fixture.onnx").resolve(),
         )
         self.assertTrue(model_widget.path_edit.isReadOnly())
         self.assertEqual(model_widget.browse_button.text(), "瀏覽")
@@ -300,20 +303,29 @@ class GuiWorkflowTests(unittest.TestCase):
         self.assertIn("推論精度", labels)
         self.assertIn("跨類別 NMS", labels)
 
-    def test_yolox_model_folder_dialog_validates_and_switches_single_model_registry(self):
+    def test_yolox_model_file_dialog_validates_and_switches_registry_model(self):
         model_root = Path("models/yolox")
-        with tempfile.TemporaryDirectory(prefix="visionflow_yolox_folder_") as temporary:
+        with tempfile.TemporaryDirectory(prefix="visionflow_yolox_file_") as temporary:
             root = Path(temporary)
-            (root / "fixture.onnx").write_bytes(
+            model_file = root / "fixture.onnx"
+            model_file.write_bytes(
                 (model_root / "yolox_tiny_fixture.onnx").read_bytes()
             )
-            registry = (
-                (model_root / "registry.yaml")
-                .read_text(encoding="utf-8")
-                .replace("yolox_tiny_fixture:", "selected_folder_model:")
-                .replace("yolox_tiny_fixture.onnx", "fixture.onnx")
+            other_model_file = root / "other.onnx"
+            other_model_file.write_bytes(model_file.read_bytes())
+            registry = yaml.safe_load(
+                (model_root / "registry.yaml").read_text(encoding="utf-8")
             )
-            (root / "registry.yaml").write_text(registry, encoding="utf-8")
+            selected_config = registry["models"].pop("yolox_tiny_fixture")
+            selected_config["file"] = "fixture.onnx"
+            registry["models"]["selected_file_model"] = selected_config
+            other_config = yaml.safe_load(yaml.safe_dump(selected_config))
+            other_config["file"] = "other.onnx"
+            registry["models"]["other_model"] = other_config
+            (root / "registry.yaml").write_text(
+                yaml.safe_dump(registry, sort_keys=False),
+                encoding="utf-8",
+            )
 
             screen = DesignerScreen()
             screen._select_detector("yolox")
@@ -324,20 +336,46 @@ class GuiWorkflowTests(unittest.TestCase):
             screen._set_dirty(False)
 
             with patch(
-                "gui.screens.designer_screen.QFileDialog.getExistingDirectory",
-                return_value=str(root),
-            ) as folder_dialog:
+                "gui.screens.designer_screen.QFileDialog.getOpenFileName",
+                return_value=(str(model_file), "ONNX 模型 (*.onnx)"),
+            ) as file_dialog:
                 picker.browse_button.click()
 
-            folder_dialog.assert_called_once()
-            self.assertEqual(picker.model_directory(), root.resolve())
-            self.assertEqual(picker.parameter_value(), "selected_folder_model")
+            file_dialog.assert_called_once()
+            self.assertEqual(picker.model_path(), model_file.resolve())
+            self.assertEqual(picker.parameter_value(), "selected_file_model")
             self.assertEqual(changed, [str(root.resolve())])
             self.assertTrue(screen.is_dirty())
             self.assertEqual(
                 screen.build_recipe()["detectors"]["yolox"]["params"]["model_id"],
-                "selected_folder_model",
+                "selected_file_model",
             )
+
+    def test_yolox_model_file_picker_rejects_unregistered_and_pytorch_files(self):
+        model_root = Path("models/yolox")
+        with tempfile.TemporaryDirectory(prefix="visionflow_yolox_invalid_") as temporary:
+            root = Path(temporary)
+            (root / "registry.yaml").write_text(
+                (model_root / "registry.yaml").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            unsupported = root / "weights.pt"
+            unsupported.write_bytes(b"not-a-supported-model")
+
+            screen = DesignerScreen()
+            screen._select_detector("yolox")
+            screen._row_widgets["yolox"]["toggle"].setChecked(True)
+            picker = screen._param_widgets["yolox"]["model_id"]
+
+            with patch(
+                "gui.screens.designer_screen.QFileDialog.getOpenFileName",
+                return_value=(str(unsupported), "ONNX 模型 (*.onnx)"),
+            ):
+                picker.browse_button.click()
+
+            self.assertEqual(picker.model_path(), unsupported.resolve())
+            self.assertIn("只支援 ONNX 模型", screen.detector_notice_label.text())
+            self.assertIn(".pt／.pth 尚未支援", screen.detector_notice_label.text())
 
     def test_yolox_unsupported_backend_is_inline_and_blocks_recipe_save(self):
         screen = DesignerScreen()
@@ -491,7 +529,7 @@ class GuiWorkflowTests(unittest.TestCase):
                 window.designer_screen._select_detector("yolox")
                 picker = window.designer_screen._param_widgets["yolox"]["model_id"]
 
-                self.assertEqual(picker.model_directory(), root.resolve())
+                self.assertEqual(picker.model_path(), (root / "fixture.onnx").resolve())
                 self.assertEqual(window.yolox_model_directory, root.resolve())
                 self.assertEqual(
                     os.environ["VISIONFLOW_YOLOX_MODEL_DIR"], str(root.resolve())

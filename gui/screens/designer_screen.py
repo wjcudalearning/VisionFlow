@@ -190,20 +190,22 @@ class TilePreviewLabel(QLabel):
         painter.drawPixmap(x, y, scaled)
 
 
-class YoloXModelFolderPicker(QWidget):
+class YoloXModelFilePicker(QWidget):
     valueChanged = Signal(str)
     browseRequested = Signal()
 
     def __init__(
         self,
-        directory: Path | str,
+        model_path: Path | str,
         model_id: str,
         model_label: str = "",
         parent=None,
     ):
         super().__init__(parent)
         self._model_id = str(model_id or "")
-        self._directory = Path(directory).resolve() if str(directory or "").strip() else None
+        self._model_path = (
+            Path(model_path).resolve() if str(model_path or "").strip() else None
+        )
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -212,23 +214,23 @@ class YoloXModelFolderPicker(QWidget):
         self.path_edit = QLineEdit()
         self.path_edit.setReadOnly(True)
         self.path_edit.setProperty("mono", "true")
-        self.path_edit.setAccessibleName("YOLOX 模型資料夾")
+        self.path_edit.setAccessibleName("YOLOX 模型檔案")
         layout.addWidget(self.path_edit, 1)
 
         self.browse_button = QPushButton("瀏覽")
         self.browse_button.setProperty("variant", "secondary")
         self.browse_button.setProperty("size", "sm")
-        self.browse_button.setAccessibleName("選擇 YOLOX 模型資料夾")
+        self.browse_button.setAccessibleName("選擇 YOLOX 模型檔案")
         self.browse_button.clicked.connect(self.browseRequested.emit)
         layout.addWidget(self.browse_button)
 
-        self.set_selection(self._directory, self._model_id, model_label, emit=False)
+        self.set_selection(self._model_path, self._model_id, model_label, emit=False)
 
     def parameter_value(self) -> str:
         return self._model_id
 
-    def model_directory(self) -> Path | None:
-        return self._directory
+    def model_path(self) -> Path | None:
+        return self._model_path
 
     def set_parameter_value(self, model_id: str) -> None:
         normalized = str(model_id or "")
@@ -239,24 +241,28 @@ class YoloXModelFolderPicker(QWidget):
 
     def set_selection(
         self,
-        directory: Path | str | None,
+        model_path: Path | str | None,
         model_id: str,
         model_label: str = "",
         *,
         emit: bool = True,
     ) -> None:
-        old_directory = self._directory
+        old_model_path = self._model_path
         old_model_id = self._model_id
-        self._directory = (
-            Path(directory).resolve() if directory is not None and str(directory).strip() else None
+        self._model_path = (
+            Path(model_path).resolve()
+            if model_path is not None and str(model_path).strip()
+            else None
         )
         self._model_id = str(model_id or "")
-        display_path = str(self._directory) if self._directory is not None else "尚未選擇"
+        display_path = (
+            str(self._model_path) if self._model_path is not None else "尚未選擇"
+        )
         self.path_edit.setText(display_path)
         details = model_label or self._model_id or "未選擇模型"
         self.path_edit.setToolTip(f"{display_path}\n{details}")
         if emit and (
-            self._directory != old_directory or self._model_id != old_model_id
+            self._model_path != old_model_path or self._model_id != old_model_id
         ):
             self.valueChanged.emit(self._model_id)
 
@@ -634,7 +640,7 @@ class DesignerScreen(QWidget):
             widget.textChanged.connect(self._mark_dirty)
         elif isinstance(widget, QComboBox):
             widget.currentIndexChanged.connect(self._mark_dirty)
-        elif isinstance(widget, YoloXModelFolderPicker):
+        elif isinstance(widget, YoloXModelFilePicker):
             widget.valueChanged.connect(self._mark_dirty)
         elif isinstance(widget, Toggle):
             widget.toggled.connect(self._mark_dirty)
@@ -1008,57 +1014,64 @@ class DesignerScreen(QWidget):
                 ),
                 None,
             )
-            widget = YoloXModelFolderPicker(
-                self.detector_definitions[detector_id].get("model_directory", ""),
+            widget = YoloXModelFilePicker(
+                str(option.get("model_path", "")) if option else "",
                 selected,
                 str(option.get("label", "")) if option else "",
             )
-            widget.browseRequested.connect(self._choose_yolox_model_directory)
+            widget.browseRequested.connect(self._choose_yolox_model_file)
         else:
             widget = make_param_widget(value, spec=spec)
         self._track_dirty_widget(widget)
         return widget
 
-    def _choose_yolox_model_directory(self) -> None:
+    def _choose_yolox_model_file(self) -> None:
         picker = self._param_widgets.get("yolox", {}).get("model_id")
-        if not isinstance(picker, YoloXModelFolderPicker):
+        if not isinstance(picker, YoloXModelFilePicker):
             return
-        current_directory = picker.model_directory()
-        start_directory = str(
-            current_directory
+        current_model_path = picker.model_path()
+        start_path = str(
+            current_model_path
             or Path(
                 self.detector_definitions["yolox"].get(
                     "model_directory", Path.cwd()
                 )
             )
         )
-        selected_directory = QFileDialog.getExistingDirectory(
+        selected_file, _selected_filter = QFileDialog.getOpenFileName(
             self,
-            "選擇 YOLOX 模型資料夾",
-            start_directory,
+            "選擇 YOLOX 模型",
+            start_path,
+            "ONNX 模型 (*.onnx)",
         )
-        if not selected_directory:
+        if not selected_file:
             return
 
-        directory = Path(selected_directory).resolve()
+        model_path = Path(selected_file).resolve()
         try:
-            registry = self.detector_manager.set_yolox_model_directory(directory)
-            model_ids = registry.model_ids()
-            model_id = model_ids[0]
+            _registry, model_id = self.detector_manager.set_yolox_model_file(
+                model_path
+            )
             metadata = self.detector_manager.definitions(
                 include_runtime_metadata=True
             )["yolox"]
         except (RuntimeError, TypeError, ValueError) as exc:
             self._yolox_selection_error = str(exc)
-            picker.set_selection(directory, picker.parameter_value(), "模型資料夾無效")
+            picker.set_selection(
+                model_path, picker.parameter_value(), "模型檔案無效"
+            )
             self._refresh_active_detector_status()
             return
 
         self._yolox_selection_error = ""
         self.detector_definitions["yolox"].update(metadata)
-        option = metadata["model_options"][0]
-        picker.set_selection(directory, model_id, str(option["label"]))
-        self.yolox_model_directory_changed.emit(str(directory))
+        option = next(
+            item
+            for item in metadata["model_options"]
+            if str(item["model_id"]) == model_id
+        )
+        picker.set_selection(model_path, model_id, str(option["label"]))
+        self.yolox_model_directory_changed.emit(str(model_path.parent))
         self._refresh_active_detector_status()
 
     def _refresh_active_detector_status(self) -> None:
@@ -1364,7 +1377,7 @@ def _wrap_layout(layout) -> QWidget:
 
 
 def _set_widget_value(widget: QWidget, value) -> None:
-    if isinstance(widget, YoloXModelFolderPicker):
+    if isinstance(widget, YoloXModelFilePicker):
         widget.set_parameter_value(str(value or ""))
     elif isinstance(widget, Toggle):
         widget.setChecked(bool(value))

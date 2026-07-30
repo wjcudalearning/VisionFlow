@@ -266,7 +266,7 @@
 - [x] 定義 detector ID 為 `yolox`、顯示名稱為「YOLOX 物件偵測」，輸入語意為目前 tile／ROI 的 BGR `uint8` 影像；命中指定缺陷類別即產生 defect，零筆 defect 為 PASS。
 - [x] 建立受控的 YOLOX model registry；Recipe 只保存穩定的 `model_id`，不可直接依賴使用者電腦上的任意絕對路徑。每個模型 manifest 至少記錄模型名稱、版本、格式、SHA-256、class names、輸入尺寸、色彩順序、正規化方式、letterbox padding、輸出節點與 decoder/stride 規格。
 - [x] 第一版工程模式可調參數固定為：
-  - `model_id`：透過資料夾選擇視窗載入只含單一模型、且已驗證的 model registry；Recipe 仍只保存穩定 model ID。
+  - `model_id`：透過檔案選擇視窗指定 `.onnx`，再由同資料夾已驗證的 model registry 解析；Recipe 仍只保存穩定 model ID。
   - `confidence_threshold`：信心門檻，範圍 `0.0～1.0`，建議預設 `0.25`。
   - `nms_iou_threshold`：NMS 重疊率門檻，範圍 `0.0～1.0`，建議預設 `0.45`。
   - `target_class_ids`：要判定為 NG 的類別；空值代表模型 manifest 內全部類別。
@@ -299,7 +299,7 @@
 
 - [x] M0：完成 model manifest/schema、model registry、ONNX Runtime CPU session cache、獨立前處理/後處理單元測試與一個可散佈的 tiny 測試模型；此階段不接 GUI、不預設 GPU。
 - [x] M1：新增 `DetectorYolox`、DetectorManager registration、Recipe round trip、繁中 detector label 與合成 CLI smoke；驗證 PASS/NG、defect count、class、confidence、bbox、area、metadata 與排序。
-- [x] M2：Recipe Designer 加入模型資料夾選擇視窗、信心門檻、NMS 重疊率、NG 類別、最大筆數與最小 bbox 面積；模型不存在、checksum 錯誤或 backend 不可用時使用 inline notice，Recipe 不可在錯誤狀態下儲存。
+- [x] M2：Recipe Designer 加入 `.onnx` 模型檔案選擇視窗、信心門檻、NMS 重疊率、NG 類別、最大筆數與最小 bbox 面積；模型不存在、未登錄、checksum 錯誤或 backend 不可用時使用 inline notice，Recipe 不可在錯誤狀態下儲存。
 - [ ] M3：接入 ONNX Runtime CUDA，再以相同 ONNX 模型比較 CPU/CUDA 的前處理、raw output、NMS 後 class/數量/座標/分數；先定義 bbox 與 confidence 容差，任何不等價都不得預設啟用。
   - [x] M3 軟體接入：provider 探測、CPU/CUDA 分離 session cache、禁止 CUDA EP 靜默 CPU fallback、初始化／OOM／推論失敗完整 CPU 重跑、strict CUDA 明確失敗及實機 validator 已完成。
   - [x] RTX workflow 接線：runner 環境會以 `onnxruntime-gpu==1.27.0` 執行 M3 等價、CUDA 1000 次 stability，並可選擇執行 production acceptance；JSON 全部上傳為 workflow artifact。
@@ -415,3 +415,4 @@
 - [x] 2026-07-30：將 AOI 專案使用的 `aoi-verify-push`、`aoi-detector-development`、`aoi-cuda-validate`、`aoi-release` 四個 Codex skills 複製至 repository 的 `codex-skills/`，移除固定舊機使用者路徑，並加入新機安裝說明及預設不覆蓋既有內容的 PowerShell 安裝程式；四個 skills 官方 validator、隔離安裝／防覆蓋 smoke、192 tests、compileall、CUDA source preflight 與 `git diff --check` 均通過。
 - [x] 2026-07-30：在 RTX 3090（Driver 610.62、CUDA 13.3、compute capability 8.6）驗證 GitHub Actions 產物；35 個 exports、dependencies、native ABI/plan/ROI batch smoke 及 1000 次 persistent-plan reuse 通過，但正式 CUDA validator 在 72 個數值 cases 中有 10 項 Gaussian、401-style、900 DAG 與 resident ROI 失敗，完整 unit tests 另因 artifact 覆蓋 repository preflight API 而有 1 項 import error。已新增明確阻擋與本機重編驗收項目，RTX production acceptance 保持未完成。
 - [x] 2026-07-30：修正 GUI 全域 `QComboBox` 樣式，明確設定選單本體、停用狀態、下拉 popup 與選取項目的前景／背景色，避免 Windows 原生黑色 popup 與應用程式深色文字疊成黑底黑字；GPU Mode 與所有共用參數下拉選單同步生效，並新增 palette regression test。完整 196 tests、compileall、CUDA source preflight、GUI offscreen smoke、畫面渲染檢查與 `git diff --check` 均通過。
+- [x] 2026-07-30：YOLOX Recipe Designer 的模型選擇改為直接挑選 `.onnx` 檔案，再以同資料夾 `registry.yaml` 驗證所選檔案唯一對應的 model ID 與 SHA-256；支援同 registry 多模型，不再要求整個資料夾只能有一個模型。`.pt`／`.pth` 因目前沒有 PyTorch 推論後端而明確拒絕，Recipe 仍只保存穩定 `model_id`。完整 197 tests、compileall、CUDA source preflight、GUI offscreen smoke、YOLOX CLI 固定 2 筆 NG smoke（預期 exit 2）與 `git diff --check` 均通過。

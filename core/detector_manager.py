@@ -139,6 +139,28 @@ class DetectorManager:
         self._ai_manager().set_registry(registry)
         return registry
 
+    def set_yolox_model_file(
+        self, model_file: Path
+    ) -> tuple[YoloXModelRegistry, str]:
+        selected = Path(model_file).resolve()
+        if selected.suffix.lower() != ".onnx":
+            raise ValueError(
+                "目前 YOLOX 推論只支援 ONNX 模型，請選擇 .onnx 檔案；"
+                ".pt／.pth 尚未支援。"
+            )
+        registry = YoloXModelRegistry(selected.parent)
+        matching_model_ids = [
+            model_id
+            for model_id in registry.model_ids()
+            if registry.get(model_id).model_path == selected
+        ]
+        if len(matching_model_ids) != 1:
+            raise ValueError(
+                f"所選模型必須在同資料夾的 registry.yaml 中定義一次：{selected.name}"
+            )
+        self._ai_manager().set_registry(registry)
+        return registry, matching_model_ids[0]
+
     @classmethod
     def uses_native_cuda_runtime(cls, detector_id: str) -> bool:
         return str(detector_id) != DetectorYolox.detector_id
@@ -169,6 +191,7 @@ class DetectorManager:
                         "allowed_backends": list(manifest.allowed_backends),
                         "allowed_precisions": list(manifest.allowed_precisions),
                         "test_only": manifest.test_only,
+                        "model_path": str(manifest.model_path),
                     }
                 )
             return {

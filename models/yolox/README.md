@@ -4,6 +4,11 @@
 stable `model_id`; the registry resolves the model file and verifies its SHA-256
 before ONNX Runtime creates a session.
 
+The Recipe Designer lets the operator select an `.onnx` file directly, then
+requires that exact file to be declared by the `registry.yaml` beside it. PyTorch
+`.pt` and `.pth` checkpoints are not supported by the current ONNX Runtime
+inference backend.
+
 `yolox_tiny_fixture.onnx` is a 758-byte deterministic test fixture. It returns a
 fixed raw YOLOX tensor for CPU reference, NMS, coordinate, recipe, and CLI tests.
 It is marked `test_only` and must not be used as a production inspection model.
