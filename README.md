@@ -330,6 +330,14 @@ GUI 不顯示影像預覽，只提供輸入／輸出路徑、recipe、Pattern �
   --recipe "D:\configs\pattern_grid.yaml"
 ```
 
+若要建立不需安裝 Python、可獨立攜帶的單檔 Windows EXE，可執行：
+
+```powershell
+.\build_pattern_grid_tile_exporter.ps1
+```
+
+成品位於 `dist\Pattern-Grid-Tile-Exporter\export_pattern_grid_tiles.exe`。此工具使用 CPU 執行 Template Anchor Grid 與切圖，不需要 CUDA DLL；直接雙擊會開啟 GUI，也保留上述 CLI 參數。
+
 `--recipe` 可讀完整 AOI recipe 或只有 `tile:` 的 YAML。也可不使用 recipe，改以 `--template-path`、`--rows`、`--cols`、`--roi-w`、`--roi-h` 及其他模板網格參數直接指定。工具預設遞迴處理 JPG、PNG、BMP、TIF/TIFF，模板圖及位於輸入資料夾內的輸出目錄會自動排除。每張來源圖會建立自己的小圖資料夾，並在輸出根目錄寫入 `tiles_manifest.csv`；個別圖片失敗時會繼續處理並記錄到 `errors.csv`。
 
 ### 輪廓切圖 `contour`
