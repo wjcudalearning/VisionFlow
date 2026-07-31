@@ -8,6 +8,7 @@ env/
 venv/
 
 outputs_validation/
+outputs/logs/
 tmp_validation_input.png
 tmp_validation_pass.png
 tmp_validation_gui.png
@@ -16,6 +17,11 @@ build/
 dist/
 
 *.zip
+/gpu/cuda_build_preflight.json
+/gpu/test_cuda_api.exe
+/gpu/visionflow_cuda.dll
+/gpu/visionflow_cuda.exp
+/gpu/visionflow_cuda.lib
 .coverage
 htmlcov/
 .claude/scheduled_tasks.lock
