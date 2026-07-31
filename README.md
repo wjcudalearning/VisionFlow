@@ -668,6 +668,25 @@ CUDA 詳細架構及操作請參考 [`gpu/README.md`](gpu/README.md)，完整實
 
 兩者獨立於主 Pipeline，讓後處理工具可自行演進。
 
+目前四個獨立工具都有各自的 PyInstaller one-file EXE：
+
+| 工具 | 個別建置命令 | 成品 |
+|---|---|---|
+| NG Tile 面積分類 | `.\build_ng_tile_area_tool.ps1` | `dist\NG-Tile-Area-Tool\NG Tile 面積分類小工具.exe` |
+| Pattern 固定網格切圖 | `.\build_pattern_grid_tile_exporter.ps1` | `dist\Pattern-Grid-Tile-Exporter\export_pattern_grid_tiles.exe` |
+| 矩陣 CSV 彙總 | `.\build_matrix_summary_exporter.ps1` | `dist\Matrix-Summary-Exporter\export_matrix_summary.exe` |
+| 散點圖匯出 | `.\build_scatter_plot_exporter.ps1` | `dist\Scatter-Plot-Exporter\export_scatter_plots.exe` |
+
+四支 EXE 都可直接雙擊開啟 GUI，也保留命令列模式；`--help` 顯示參數、`--version` 顯示工具版本、`--smoke-test` 可供非互動打包驗證。它們都是 CPU-only 後處理／切圖工具，不執行 AOI Detector、不收錄 CUDA DLL，也不需要另外安裝 Python。
+
+若要建立單一 GitHub Release 資產，可指定語意版本一次重建四支工具並產生合集 ZIP：
+
+```powershell
+.\build_utility_tools.ps1 -Version 1.0.0
+```
+
+輸出為 `VisionFlow-Utility-Tools-v1.0.0-windows-x64.zip`，內含四支獨立 EXE、`README.txt` 與 `VERSION.txt`。工具合集使用 `utility-tools-vX.Y.Z` Tag，不與主程式 `vX.Y.Z` 或既有 `ng-tile-area-tool-vX.Y.Z` Tag 混用；成品目前未進行程式碼簽章，發佈說明必須明確標示 Windows SmartScreen 可能顯示未知發行者。
+
 ## 建立 Windows 執行檔
 
 ```powershell

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import cv2
 import yaml
-from PySide6.QtCore import QObject, QSettings, QThread, Signal, Slot
+from PySide6.QtCore import QObject, QSettings, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -28,6 +28,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+TOOL_VERSION = "1.0.0"
 
 from core.image_loader import SUPPORTED_EXTENSIONS, ImageLoader
 from core.tiler import Tiler
@@ -614,10 +616,12 @@ class PatternGridBatchWindow(QWidget):
         event.accept()
 
 
-def run_gui() -> int:
+def run_gui(*, smoke_test: bool = False) -> int:
     app = QApplication.instance() or QApplication(sys.argv)
     window = PatternGridBatchWindow()
     window.show()
+    if smoke_test:
+        QTimer.singleShot(0, app.quit)
     return app.exec()
 
 
@@ -626,6 +630,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="先找一個模板錨點，再依固定網格批量輸出 PNG 小圖。"
     )
     parser.add_argument("--gui", action="store_true", help="開啟 PySide6 參數視窗")
+    parser.add_argument("--smoke-test", action="store_true", help="建立 GUI 後立即結束，供打包驗證。")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {TOOL_VERSION}")
     parser.add_argument("--input", "--input-dir", dest="input_path", type=Path)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--recipe", type=Path, help="沿用 AOI recipe 的 tile 設定")
@@ -655,6 +661,8 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = build_parser()
     args = parser.parse_args(raw_argv)
+    if args.smoke_test:
+        return run_gui(smoke_test=True)
     if args.gui:
         return run_gui()
     if args.input_path is None or args.output_dir is None:

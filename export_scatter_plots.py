@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import sys
@@ -18,6 +19,7 @@ except ImportError as exc:
 
 CANVAS_SIZE = (1000, 760)
 PLOT_BOX = (82, 92, 940, 650)
+TOOL_VERSION = "1.0.0"
 COLORS = {
     "bg": "#f5f7fb",
     "panel": "#ffffff",
@@ -562,19 +564,49 @@ def _font(size: int, bold: bool = False) -> ImageFont.ImageFont:
     return ImageFont.load_default()
 
 
-def main(argv: list[str] | None = None) -> int:
-    argv = list(argv or sys.argv[1:])
-    if argv:
-        input_dir = Path(argv[0])
-        output_dir = Path(argv[1]) if len(argv) > 1 else input_dir / "scatter_plots"
-        exported, errors = export_folder(input_dir, output_dir, recursive=True)
-        print(f"Exported {exported} scatter plot(s) to {output_dir}")
-        if errors:
-            print(f"Skipped {len(errors)} file(s). First error: {errors[0]}")
-        return 0 if exported else 1
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Export AOI JSON or CSV reports as scatter plot PNG files."
+    )
+    parser.add_argument("input_dir", nargs="?", type=Path, help="AOI report folder.")
+    parser.add_argument("output_dir", nargs="?", type=Path, help="Scatter plot output folder.")
+    parser.add_argument("--no-recursive", action="store_true", help="Only scan the input folder.")
+    parser.add_argument("--json-only", action="store_true", help="Read JSON reports only.")
+    parser.add_argument("--csv-only", action="store_true", help="Read CSV reports only.")
+    parser.add_argument("--smoke-test", action="store_true", help="Create and close the GUI for package validation.")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {TOOL_VERSION}")
+    return parser
 
-    ScatterExportApp().run()
-    return 0
+
+def main(argv: list[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if not raw_argv:
+        ScatterExportApp().run()
+        return 0
+
+    args = build_parser().parse_args(raw_argv)
+    if args.smoke_test:
+        app = ScatterExportApp()
+        app.root.update_idletasks()
+        app.root.destroy()
+        return 0
+    if args.json_only and args.csv_only:
+        build_parser().error("--json-only and --csv-only cannot be used together.")
+    if args.input_dir is None:
+        build_parser().error("CLI mode requires an input_dir.")
+
+    output_dir = args.output_dir or args.input_dir / "scatter_plots"
+    exported, errors = export_folder(
+        args.input_dir,
+        output_dir,
+        recursive=not args.no_recursive,
+        include_json=not args.csv_only,
+        include_csv=not args.json_only,
+    )
+    print(f"Exported {exported} scatter plot(s) to {output_dir}")
+    if errors:
+        print(f"Skipped {len(errors)} file(s). First error: {errors[0]}")
+    return 0 if exported else 1
 
 
 if __name__ == "__main__":

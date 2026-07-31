@@ -12,6 +12,7 @@ from tkinter import BooleanVar, StringVar, Tk, filedialog, messagebox, ttk
 
 MATRIX_COLUMN_RE = re.compile(r"^c\d+$", re.IGNORECASE)
 DEFAULT_OUTPUT_NAME = "matrix_summary.csv"
+TOOL_VERSION = "1.0.0"
 
 
 @dataclass(frozen=True)
@@ -193,11 +194,18 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--input", "-i", type=Path, help="Folder that contains matrix CSV files.")
     parser.add_argument("--output", "-o", type=Path, help="Output CSV path. Defaults to matrix_summary.csv in input folder.")
     parser.add_argument("--no-recursive", action="store_true", help="Only scan CSV files directly in the input folder.")
+    parser.add_argument("--smoke-test", action="store_true", help="Create and close the GUI for package validation.")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {TOOL_VERSION}")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
+    if args.smoke_test:
+        app = MatrixSummaryApp()
+        app.root.update_idletasks()
+        app.root.destroy()
+        return 0
     if args.input:
         output_path, file_count, row_count = combine_matrix_csvs(
             args.input,
