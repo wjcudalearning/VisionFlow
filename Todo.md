@@ -186,6 +186,7 @@
 - [x] workflow 明確加入 `gpu/include/`，上傳 DLL、LIB、test EXE 與 build log artifacts。
 - [x] CUDA runtime、CPU/GPU 等價、VRAM leak 與 benchmark 只在 GPU self-hosted runner 執行。
 - [x] self-hosted runner 使用 `self-hosted`、`Windows`、`X64`、`gpu`、`rtx3090` labels。
+- [ ] 在目前 `wjcudalearning/VisionFlow` repository 註冊或授權具有上述 labels 的 RTX self-hosted runner；2026-07-31 GitHub API 回報可用 runner 數量為 0。
 - [x] 不允許不受信任的 fork PR 直接在可接觸本機資料的 self-hosted runner 執行。
 - [x] GPU job 支援手動與 nightly；PR 至少完成 compile/static checks。
 - [ ] 保存 benchmark JSON、Nsight report、Driver/Toolkit/GPU 與 commit hash，支援 commit 間比較。（JSON、環境與 commit 已完成；workflow 已加入可用時執行 nsys smoke capture 並記錄 skip/status，report 待 RTX runner）
@@ -418,3 +419,4 @@
 - [x] 2026-07-30：YOLOX Recipe Designer 的模型選擇改為直接挑選 `.onnx` 檔案，再以同資料夾 `registry.yaml` 驗證所選檔案唯一對應的 model ID 與 SHA-256；支援同 registry 多模型，不再要求整個資料夾只能有一個模型。`.pt`／`.pth` 因目前沒有 PyTorch 推論後端而明確拒絕，Recipe 仍只保存穩定 `model_id`。完整 197 tests、compileall、CUDA source preflight、GUI offscreen smoke、YOLOX CLI 固定 2 筆 NG smoke（預期 exit 2）與 `git diff --check` 均通過。
 - [x] 2026-07-31：為 `export_pattern_grid_tiles.py` 新增獨立 PyInstaller one-file spec 與建置腳本，輸出 `dist/Pattern-Grid-Tile-Exporter/export_pattern_grid_tiles.exe`；成品不需 Python 或 CUDA DLL，已完成無參數 GUI 啟動、CLI 合成影像 4-tile／manifest smoke、完整 197 tests、compileall、CUDA source preflight 與 `git diff --check`。
 - [x] 2026-07-31：準備 VisionFlow AOI v1.2.0 CUDA-enabled Windows x64 發行；GUI Pipeline 版本同步為 1.2.0，發行包將收錄針對同一 release commit 以 CUDA 13.3／`sm_86` 重編並在 RTX 3090 驗證的 `gpu/visionflow_cuda.dll`。Git 僅追蹤 CUDA source、header 與建置腳本，DLL／LIB／EXP／native test EXE 改由 `.gitignore` 防止誤提交，正式二進位檔只放入版本化 ZIP 與 GitHub Release。
+- [x] 2026-07-31：修正新 repository 的 GitHub Actions：Windows CI 強制 UTF-8，避免 Pattern Grid 中文輸出在英文 runner 被 `charmap` 誤判為影像失敗；短路徑測試統一比較 resolved path，YOLOX model directory 在寫入環境變數前正規化；Windows compileall 補齊 GUI launcher 與 standalone exporters。同步將 Windows／weekly／RTX workflows 限縮為 `contents: read`、使用 lock-file cache／乾淨 venv，RTX guard 由舊 owner 改為精確的 `wjcudalearning/VisionFlow`，heartbeat 加入 5 分鐘 timeout。四份 workflow 通過 actionlint（自訂 RTX labels 除外），完整 197 tests、compileall、CUDA source preflight、GUI offscreen smoke 與 `git diff --check` 均通過；目前 repository 尚無可用 self-hosted runner，RTX runtime 仍待註冊後執行。

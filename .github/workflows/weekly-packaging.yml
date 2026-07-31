@@ -5,10 +5,16 @@ on:
     - cron: "30 20 * * 0"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   package-smoke:
     runs-on: windows-latest
     timeout-minutes: 45
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -19,7 +25,7 @@ jobs:
       - name: Create locked build environment
         shell: pwsh
         run: |
-          python -m venv env
+          python -m venv --clear env
           .\env\Scripts\python.exe -m pip install -r requirements.lock.txt
       - name: Build PyInstaller package
         shell: pwsh

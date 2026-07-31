@@ -14,11 +14,17 @@ on:
   schedule:
     - cron: "0 18 * * *"
 
+permissions:
+  contents: read
+
 jobs:
   cuda-runtime:
-    if: github.repository_owner == 'Wwjyun'
+    if: github.repository == 'wjcudalearning/VisionFlow'
     runs-on: [self-hosted, Windows, X64, gpu, rtx3090]
     timeout-minutes: 120
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -28,7 +34,7 @@ jobs:
       - name: Prepare isolated environment
         shell: pwsh
         run: |
-          python -m venv env
+          python -m venv --clear env
           .\env\Scripts\python.exe -m pip install -r requirements.lock.txt
           .\env\Scripts\python.exe -m pip uninstall --yes onnxruntime
           .\env\Scripts\python.exe -m pip install onnxruntime-gpu==1.27.0

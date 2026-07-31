@@ -6,22 +6,41 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   cpu-static:
     runs-on: windows-latest
     timeout-minutes: 30
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+      QT_QPA_PLATFORM: "offscreen"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
           cache: pip
+          cache-dependency-path: requirements.lock.txt
       - name: Install dependencies
         run: python -m pip install -r requirements.lock.txt
       - name: Unit tests
         run: python -m unittest discover -s tests -v
       - name: Compile Python sources
-        run: python -m compileall main.py core detectors gui gpu
+        run: >-
+          python -m compileall
+          main.py
+          gui_launcher.py
+          export_matrix_summary.py
+          export_ng_tiles_by_area.py
+          export_pattern_grid_tiles.py
+          export_scatter_plots.py
+          core
+          detectors
+          gui
+          gpu
       - name: Validate CUDA headers and source contract
         run: python gpu/preflight_cuda_build.py
       - name: Recipe and CLI smoke
@@ -35,8 +54,6 @@ jobs:
           exit 0
       - name: GUI offscreen smoke
         shell: pwsh
-        env:
-          QT_QPA_PLATFORM: offscreen
         run: python -c "from pathlib import Path; from PySide6.QtWidgets import QApplication; from gui.main_window import MainWindow; app=QApplication([]); w=MainWindow(); w.recipe_panel.load_recipe(Path('recipes/PRODUCT_A_AOI_01.yaml')); assert w.recipe_panel.detector_list.count() > 0"
       - name: Upload static validation artifacts
         if: always()

@@ -135,6 +135,7 @@ class MainWindow(QMainWindow, LogMixin):
             "paths/yolox_model_directory"
         )
         if yolox_model_directory is not None:
+            yolox_model_directory = yolox_model_directory.resolve()
             os.environ["VISIONFLOW_YOLOX_MODEL_DIR"] = str(yolox_model_directory)
         configured_yolox_directory = os.getenv("VISIONFLOW_YOLOX_MODEL_DIR", "")
         self.yolox_model_directory = (

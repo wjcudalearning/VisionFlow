@@ -128,7 +128,7 @@ class PatternGridBatchCropTests(unittest.TestCase):
             loaded = load_tile_config(recipe_path)
             built = build_tile_config(recipe_path, rows=3)
 
-            self.assertEqual(Path(loaded["template_path"]), template_path)
+            self.assertEqual(Path(loaded["template_path"]), template_path.resolve())
             self.assertEqual(built["rows"], 3)
             self.assertEqual(built["cols"], 2)
 
@@ -168,7 +168,7 @@ class PatternGridBatchCropTests(unittest.TestCase):
             window = PatternGridBatchWindow(settings=settings)
 
             self.assertTrue(window.load_recipe(recipe_path))
-            self.assertEqual(Path(window.template_edit.text()), template_path)
+            self.assertEqual(Path(window.template_edit.text()), template_path.resolve())
             self.assertEqual(window.parameter_spins["rows"].value(), 2)
             self.assertEqual(window.parameter_spins["cols"].value(), 2)
             self.assertEqual(window.parameter_spins["roi_w"].value(), 12)
