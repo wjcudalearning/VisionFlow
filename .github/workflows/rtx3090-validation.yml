@@ -26,8 +26,8 @@ jobs:
       PYTHONUTF8: "1"
       PYTHONIOENCODING: "utf-8"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
           cache: pip
@@ -56,7 +56,7 @@ jobs:
         run: .\gpu\test_cuda_api.exe
       - name: Restore accepted RTX benchmark baseline
         id: baseline
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: outputs_validation/baseline
           key: rtx3090-benchmark-baseline-v1
@@ -124,7 +124,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "RTX benchmark P95 regression exceeded 15%" }
       - name: Save initial RTX benchmark baseline
         if: steps.baseline.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: outputs_validation/baseline
           key: rtx3090-benchmark-baseline-v1
@@ -142,7 +142,7 @@ jobs:
           "nsys capture completed" | Tee-Object -FilePath outputs_validation/nsight_status.txt
       - name: Upload CUDA build and benchmark artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rtx3090-${{ github.sha }}
           path: |

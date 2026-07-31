@@ -16,8 +16,8 @@ jobs:
       PYTHONUTF8: "1"
       PYTHONIOENCODING: "utf-8"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
           cache: pip
@@ -35,10 +35,17 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
-          & '.\dist\VisionFlow AOI\VisionFlow AOI.exe' --smoke-test
-          if ($LASTEXITCODE -ne 0) { throw "Packaged smoke failed with exit code $LASTEXITCODE" }
+          $process = Start-Process `
+            -FilePath '.\dist\VisionFlow AOI\VisionFlow AOI.exe' `
+            -ArgumentList '--smoke-test' `
+            -Wait `
+            -PassThru `
+            -ErrorAction Stop
+          if ($process.ExitCode -ne 0) {
+            throw "Packaged smoke failed with exit code $($process.ExitCode)"
+          }
       - name: Upload package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: weekly-visionflow-aoi-${{ github.sha }}
           path: dist/VisionFlow AOI/

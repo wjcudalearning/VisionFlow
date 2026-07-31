@@ -18,8 +18,8 @@ jobs:
       PYTHONIOENCODING: "utf-8"
       QT_QPA_PLATFORM: "offscreen"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
           cache: pip
@@ -57,7 +57,7 @@ jobs:
         run: python -c "from pathlib import Path; from PySide6.QtWidgets import QApplication; from gui.main_window import MainWindow; app=QApplication([]); w=MainWindow(); w.recipe_panel.load_recipe(Path('recipes/PRODUCT_A_AOI_01.yaml')); assert w.recipe_panel.detector_list.count() > 0"
       - name: Upload static validation artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows-static-${{ github.sha }}
           path: |
