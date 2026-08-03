@@ -5,7 +5,7 @@ from pathlib import Path
 
 import yaml
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QDoubleValidator, QImage, QPainter, QPixmap
+from PySide6.QtGui import QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
@@ -23,9 +23,15 @@ from PySide6.QtWidgets import (
 
 from core.detector_manager import DetectorManager
 from core.gpu_runtime import GpuRuntime
-from core.recipe_builder import RecipeTemplatePathSync
-from core.recipe_manager import RecipeError, RecipeManager
+from core.recipe_manager import RecipeError
 from gui import icons
+from gui.designer_model import (
+    DesignerEditorState,
+    DesignerRecipeMapper,
+    DesignerRecipeValidator,
+    RecipeDraft,
+)
+from gui.designer_panels import GpuSettingsPanel, PreviewPanel, RecipeInfoPanel
 from gui.detector_labels import detector_zh_name
 from gui.theme import COLORS, R_MD
 from gui.widgets.common import Badge, NumStepper, Segmented, Toggle, make_param_widget, param_value
@@ -276,8 +282,10 @@ class DesignerScreen(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._editor_state = DesignerEditorState()
         self.image_path: Path | None = None
         self.detector_manager = DetectorManager()
+        self._recipe_validator = DesignerRecipeValidator(self.detector_manager)
         self.detector_definitions = self.detector_manager.definitions(
             include_runtime_metadata=True
         )
@@ -329,67 +337,58 @@ class DesignerScreen(QWidget):
         self._bind_dirty_tracking()
         self._set_editor_state("saved", "已儲存")
 
+    @property
+    def _dirty(self) -> bool:
+        return self._editor_state.dirty
+
+    @_dirty.setter
+    def _dirty(self, value: bool) -> None:
+        self._editor_state.dirty = bool(value)
+
+    @property
+    def _loading_recipe(self) -> bool:
+        return self._editor_state.loading_recipe
+
+    @_loading_recipe.setter
+    def _loading_recipe(self, value: bool) -> None:
+        self._editor_state.loading_recipe = bool(value)
+
+    @property
+    def _active_detector(self) -> str:
+        return self._editor_state.active_detector
+
+    @_active_detector.setter
+    def _active_detector(self, value: str) -> None:
+        self._editor_state.active_detector = str(value)
+
+    @property
+    def mode(self) -> str:
+        return self._editor_state.mode
+
+    @mode.setter
+    def mode(self, value: str) -> None:
+        self._editor_state.mode = str(value)
+
     # ------------------------------------------------------------------
     # recipe info
     # ------------------------------------------------------------------
     def _build_recipe_info_panel(self) -> Panel:
-        panel = Panel(title="Recipe 資訊")
-        form = _form_grid()
-
-        self.recipe_name_edit = QLineEdit("PRODUCT_A_CIRCLE_401_1_AOI_01")
-        self.recipe_name_edit.setProperty("mono", "true")
-        self.product_id_edit = QLineEdit("PRODUCT_A")
-        self.product_id_edit.setProperty("mono", "true")
-        self.machine_id_edit = QLineEdit("AOI_01")
-        self.machine_id_edit.setProperty("mono", "true")
-        self.version_edit = QLineEdit("0.1.0")
-        self.version_edit.setProperty("mono", "true")
-        self.pixel_size_um_edit = QLineEdit()
-        self.pixel_size_um_edit.setProperty("mono", "true")
-        self.pixel_size_um_edit.setPlaceholderText("未填則 CSV 保持 px²")
-        pixel_size_validator = QDoubleValidator(0.000000001, 1_000_000_000.0, 9, self.pixel_size_um_edit)
-        pixel_size_validator.setNotation(QDoubleValidator.Notation.StandardNotation)
-        self.pixel_size_um_edit.setValidator(pixel_size_validator)
-        self.pixel_size_um_edit.setToolTip("1 px 對應的微米數；CSV 面積會乘上此數值的平方。")
-
-        form.addRow(_label("Recipe 名稱"), self.recipe_name_edit)
-        form.addRow(_label("產品 Product"), self.product_id_edit)
-        form.addRow(_label("機台 Machine"), self.machine_id_edit)
-        form.addRow(_label("版本 Version"), self.version_edit)
-        form.addRow(_label("精度 (µm/px)"), self.pixel_size_um_edit)
-
-        panel.add_layout(form)
+        panel = RecipeInfoPanel()
+        self.recipe_name_edit = panel.recipe_name_edit
+        self.product_id_edit = panel.product_id_edit
+        self.machine_id_edit = panel.machine_id_edit
+        self.version_edit = panel.version_edit
+        self.pixel_size_um_edit = panel.pixel_size_um_edit
         return panel
 
     def _build_gpu_panel(self) -> Panel:
-        panel = Panel(title="GPU / CUDA DLL")
-        form = _form_grid()
-        self.gpu_mode_combo = QComboBox()
-        self.gpu_mode_combo.addItem("Auto（可安全回退）", "auto")
-        self.gpu_mode_combo.addItem("CPU only", "cpu")
-        self.gpu_mode_combo.addItem("CUDA required", "cuda")
-        self.gpu_tiling_toggle = Toggle(checked=False)
-        self.gpu_display_toggle = Toggle(checked=False)
-        self.gpu_fallback_toggle = Toggle(checked=True)
-        self.gpu_dll_path_edit = QLineEdit(GpuRuntime.DEFAULT_DLL)
-        self.gpu_dll_path_edit.setProperty("mono", "true")
-        form.addRow(_label("GPU mode"), self.gpu_mode_combo)
-        form.addRow(_label("切小圖使用 GPU"), self.gpu_tiling_toggle)
-        form.addRow(_label("GUI 預覽使用 GPU"), self.gpu_display_toggle)
-        form.addRow(_label("失敗回退 CPU"), self.gpu_fallback_toggle)
-        form.addRow(_label("CUDA DLL"), self.gpu_dll_path_edit)
-        panel.add_layout(form)
-        self.gpu_status_label = QLabel("")
-        self.gpu_status_label.setWordWrap(True)
-        self.gpu_status_label.setStyleSheet(f"color: {COLORS['text_3']}; font-size: 11px;")
-        panel.add_widget(self.gpu_status_label)
-        self.gpu_dll_path_edit.editingFinished.connect(self._refresh_gpu_status)
-        self.gpu_tiling_toggle.toggled.connect(lambda _checked: self._refresh_gpu_status())
-        self.gpu_display_toggle.toggled.connect(lambda _checked: self._refresh_gpu_status())
-        self.gpu_fallback_toggle.toggled.connect(
-            lambda _checked: self._refresh_active_detector_status()
-        )
-        self.gpu_mode_combo.currentIndexChanged.connect(lambda _index: self._refresh_gpu_status())
+        panel = GpuSettingsPanel(self._refresh_gpu_status, self._refresh_active_detector_status)
+        self.gpu_mode_combo = panel.mode_combo
+        self.gpu_tiling_toggle = panel.tiling_toggle
+        self.gpu_display_toggle = panel.display_toggle
+        self.gpu_fallback_toggle = panel.fallback_toggle
+        self.gpu_dll_path_edit = panel.dll_path_edit
+        self.gpu_status_label = panel.status_label
         self._refresh_gpu_status()
         return panel
 
@@ -584,14 +583,9 @@ class DesignerScreen(QWidget):
     # tile preview
     # ------------------------------------------------------------------
     def _build_preview_panel(self) -> Panel:
-        panel = Panel(title="切圖預覽")
-        self.preview_label = TilePreviewLabel()
-        panel.add_widget(self.preview_label)
-
-        self.preview_status = QLabel("尚未預覽")
-        self.preview_status.setStyleSheet(f"color: {COLORS['text_3']}; font-size: 9pt;")
-        self.preview_status.setWordWrap(True)
-        panel.add_widget(self.preview_status)
+        panel = PreviewPanel(TilePreviewLabel())
+        self.preview_label = panel.preview_label
+        self.preview_status = panel.status_label
         return panel
 
     def set_image_path(self, path: Path | None) -> None:
@@ -668,6 +662,8 @@ class DesignerScreen(QWidget):
         self.dirty_changed.emit(dirty)
 
     def _set_editor_state(self, state: str, message: str) -> None:
+        self._editor_state.validation_state = str(state)
+        self._editor_state.validation_message = str(message)
         if not hasattr(self, "editor_state_badge"):
             return
         kind = {"saved": "pass", "dirty": "neutral", "invalid": "ng"}.get(state, "neutral")
@@ -1264,29 +1260,19 @@ class DesignerScreen(QWidget):
 
     def build_recipe(self) -> dict:
         detectors = self._selected_detectors()
-        recipe = {
-            "recipe_name": self.recipe_name_edit.text() or "PRODUCT_A_CIRCLE_401_1_AOI_01",
-            "product_id": self.product_id_edit.text() or "PRODUCT_A",
-            "machine_id": self.machine_id_edit.text() or "AOI_01",
-            "version": self.version_edit.text() or "0.1.0",
-            "tile": self.build_tile_config(),
-            "gpu": self.build_gpu_config(),
-            "decision": {
-                "mode": "all_detectors_must_pass",
-                "important_detectors": list(detectors),
-                "max_ng_count": 0,
-            },
-            "detectors": detectors,
-            "output": {
-                "save_overlay": True,
-                "save_ng_tiles": True,
-                "save_csv": True,
-                "save_matrix_csv": True,
-                "save_json": True,
-                "pixel_size_um_per_px": self._pixel_size_um_per_px(),
-            },
-        }
-        return RecipeTemplatePathSync(self._active_template_path()).apply(recipe)
+        return DesignerRecipeMapper.build(
+            RecipeDraft(
+                recipe_name=self.recipe_name_edit.text(),
+                product_id=self.product_id_edit.text(),
+                machine_id=self.machine_id_edit.text(),
+                version=self.version_edit.text(),
+                tile=self.build_tile_config(),
+                gpu=self.build_gpu_config(),
+                detectors=detectors,
+                pixel_size_um_per_px=self._pixel_size_um_per_px(),
+                active_template_path=self._active_template_path(),
+            )
+        )
 
     def _pixel_size_um_per_px(self) -> float | None:
         text = self.pixel_size_um_edit.text().strip()
@@ -1323,8 +1309,7 @@ class DesignerScreen(QWidget):
 
         try:
             recipe = self.build_recipe()
-            RecipeManager().validate(recipe)
-            self._validate_runtime_settings(recipe)
+            self._recipe_validator.validate(recipe)
         except (RecipeError, RuntimeError, TypeError, ValueError) as exc:
             message = f"Recipe 驗證失敗：{exc}"
             self.preview_status.setText(message)
@@ -1357,17 +1342,7 @@ class DesignerScreen(QWidget):
         self.preview_status.setStyleSheet(f"color: {COLORS['accent_text']}; font-size: 9pt;")
 
     def _validate_runtime_settings(self, recipe: dict) -> None:
-        gpu = recipe.get("gpu", {}) or {}
-        config = (recipe.get("detectors", {}) or {}).get("yolox")
-        if not config or not config.get("enabled", False):
-            return
-        self.detector_manager.validate_runtime_parameters(
-            "yolox",
-            config.get("params", {}),
-            use_gpu=bool(config.get("use_gpu", False)),
-            gpu_mode=str(gpu.get("mode", "auto")),
-            fallback_to_cpu=bool(gpu.get("fallback_to_cpu", True)),
-        )
+        self._recipe_validator.validate(recipe)
 
 
 def _wrap_layout(layout) -> QWidget:

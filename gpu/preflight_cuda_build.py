@@ -105,7 +105,12 @@ def inspect_contract() -> dict:
     source = PROJECT_DIR / "visionflow_cuda.cu"
     smoke = PROJECT_DIR / "test_cuda_api.cu"
     build_script = PROJECT_DIR / "build_cuda_dll.ps1"
-    required_files = [header, source, smoke, PROJECT_DIR / "cuda_project.json", build_script]
+    runtime_paths = (
+        REPOSITORY_ROOT / "core" / "gpu_runtime.py",
+        REPOSITORY_ROOT / "core" / "gpu_runtime_components.py",
+        REPOSITORY_ROOT / "core" / "gpu_plan_descriptors.py",
+    )
+    required_files = [header, source, smoke, PROJECT_DIR / "cuda_project.json", build_script, *runtime_paths]
     missing = [str(path) for path in required_files if not path.is_file()]
     if missing:
         raise AssertionError(f"Missing action build contract files: {missing}")
@@ -147,7 +152,7 @@ def inspect_contract() -> dict:
     source_text = source.read_text(encoding="utf-8")
     smoke_text = smoke.read_text(encoding="utf-8")
     build_text = build_script.read_text(encoding="utf-8")
-    runtime_text = (REPOSITORY_ROOT / "core" / "gpu_runtime.py").read_text(encoding="utf-8")
+    runtime_text = "\n".join(path.read_text(encoding="utf-8") for path in runtime_paths)
     validator_text = (PROJECT_DIR / "validate_cuda_dll.py").read_text(encoding="utf-8")
 
     header_exports = set(re.findall(r"VF_CUDA_API\s+int\s+(vf_[A-Za-z0-9_]+)\s*\(", header_text))
@@ -201,7 +206,7 @@ def inspect_contract() -> dict:
     if abi_match is None:
         raise AssertionError("VF_CUDA_ABI_VERSION is missing from the public header")
 
-    tracked = [header, source, smoke, PROJECT_DIR / "cuda_project.json", build_script]
+    tracked = [header, source, smoke, PROJECT_DIR / "cuda_project.json", build_script, *runtime_paths]
     return {
         "schema_version": 1,
         "project": manifest.get("output_name", PROJECT_DIR.name),

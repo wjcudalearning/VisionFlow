@@ -33,20 +33,16 @@ class GuiThreadingPackagingContractTests(unittest.TestCase):
         self.assertEqual(run_packaged_gpu_fallback_smoke_test(), 0)
 
     def test_cuda_pipeline_workers_are_moved_to_qthreads_before_start(self):
-        source = (ROOT / "gui" / "main_window.py").read_text(encoding="utf-8")
-        for worker in (
-            "_preview_worker",
-            "_inspection_worker",
-            "_batch_worker",
-            "_monitor_worker",
-            "_tile_preview_worker",
-        ):
-            move = f"self.{worker}.moveToThread"
-            started = f"started.connect(self.{worker}.run)"
-            self.assertIn(move, source)
-            self.assertIn(started, source)
-            self.assertLess(source.index(move), source.index(started))
-        self.assertNotIn(".wait(", source)
+        window_source = (ROOT / "gui" / "main_window.py").read_text(encoding="utf-8")
+        controller_source = (ROOT / "gui" / "workflow_controllers.py").read_text(encoding="utf-8")
+        move = "worker.moveToThread(thread)"
+        started = "thread.started.connect(worker.run)"
+        self.assertIn(move, controller_source)
+        self.assertIn(started, controller_source)
+        self.assertLess(controller_source.index(move), controller_source.index(started))
+        self.assertIn("InspectionWorkflowController", window_source)
+        self.assertIn("MonitorWorkflowController", window_source)
+        self.assertNotIn(".wait(", window_source + controller_source)
 
     def test_worker_error_progress_and_monitor_cancel_use_signals_or_callback(self):
         workers = (ROOT / "gui" / "workers.py").read_text(encoding="utf-8")

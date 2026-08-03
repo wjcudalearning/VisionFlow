@@ -14,6 +14,13 @@ from core.gpu_abi import (
     VfPlanOperatorV1 as _VfPlanOperatorV1, VfRoiV1 as _VfRoiV1,
 )
 from core.gpu_metrics import GpuPerformanceRecorder
+from core.gpu_plan_descriptors import GpuPlanDescriptorBuilder
+from core.gpu_runtime_components import (
+    GpuCapabilities,
+    GpuLibraryBindings,
+    GpuResourceRegistry,
+    NativePlanManager,
+)
 
 
 class GpuRuntimeError(RuntimeError):
@@ -110,9 +117,12 @@ class GpuRuntime:
         self._queue_slots = threading.BoundedSemaphore(self.queue_depth)
         self._dll = None
         self._context = None
-        self._native_plans: dict[tuple, ctypes.c_void_p] = {}
-        self._native_dag_plans: dict[tuple, ctypes.c_void_p] = {}
-        self._roi_batches: dict[int, ctypes.c_void_p] = {}
+        self._resources = GpuResourceRegistry()
+        self._native_plans = self._resources.native_plans
+        self._native_dag_plans = self._resources.native_dag_plans
+        self._roi_batches = self._resources.roi_batches
+        self._capabilities = GpuCapabilities(self)
+        self._plan_descriptors = GpuPlanDescriptorBuilder(GpuRuntimeError, self.PLAN_VERSION)
         self._max_native_plans = 64
         self.device_count = 0
         self.device_name = ""
@@ -139,49 +149,23 @@ class GpuRuntime:
 
     @property
     def supports_fused_401_2(self) -> bool:
-        return bool(
-            self.available
-            and self._context is not None
-            and getattr(self._dll, "vf_preprocess_401_2_u8", None) is not None
-        )
+        return self._capabilities.fused_401_2
 
     @property
     def supports_native_plan(self) -> bool:
-        required = ("vf_plan_query", "vf_plan_create", "vf_plan_execute", "vf_plan_destroy")
-        return bool(
-            self.available
-            and self._context is not None
-            and all(getattr(self._dll, name, None) is not None for name in required)
-        )
+        return self._capabilities.native_plan
 
     @property
     def supports_native_dag_plan(self) -> bool:
-        required = ("vf_dag_plan_query", "vf_dag_plan_create", "vf_dag_plan_execute", "vf_dag_plan_destroy")
-        return bool(
-            self.available
-            and self._context is not None
-            and all(getattr(self._dll, name, None) is not None for name in required)
-        )
+        return self._capabilities.native_dag_plan
 
     @property
     def supports_resident_roi(self) -> bool:
-        required = ("vf_context_upload_u8", "vf_plan_execute_roi", "vf_dag_plan_execute_roi")
-        return bool(
-            self.supports_native_plan
-            and self.supports_native_dag_plan
-            and all(getattr(self._dll, name, None) is not None for name in required)
-        )
+        return self._capabilities.resident_roi
 
     @property
     def supports_roi_batch(self) -> bool:
-        required = (
-            "vf_roi_batch_create", "vf_roi_batch_info",
-            "vf_roi_batch_download_u8", "vf_roi_batch_destroy",
-        )
-        return bool(
-            self.supports_resident_roi
-            and all(getattr(self._dll, name, None) is not None for name in required)
-        )
+        return self._capabilities.roi_batch
 
     def status(self, requested: bool = False) -> dict:
         active = bool(requested and self.available and not self.last_error)
@@ -532,7 +516,7 @@ class GpuRuntime:
             return False, self.native_plan_unavailable_reason or "CUDA DLL has no generic native plan ABI"
         source = self._u8_image(image, channels=(1, 3))
         try:
-            descriptor, operators = self._native_plan_descriptor(plan, source)
+            descriptor, operators = self._plan_descriptors.linear(plan, source)
         except GpuRuntimeError as exc:
             return False, str(exc)
         reason = ctypes.create_string_buffer(256)
@@ -558,9 +542,8 @@ class GpuRuntime:
         queued = time.perf_counter()
         with self._queue_slots, self._lock:
             lock_acquired = time.perf_counter()
-            handle = self._native_plans.get(key)
-            if handle is None:
-                descriptor, operators = self._native_plan_descriptor(plan, source)
+            def create_plan():
+                descriptor, operators = self._plan_descriptors.linear(plan, source)
                 created = ctypes.c_void_p()
                 result = int(self._dll.vf_plan_create(
                     self._context,
@@ -573,18 +556,14 @@ class GpuRuntime:
                     raise GpuRuntimeError(
                         f"vf_plan_create failed with CUDA DLL error {result}: {self._error_message(result)}"
                     )
-                if len(self._native_plans) >= self._max_native_plans:
-                    expired_key, expired = next(iter(self._native_plans.items()))
-                    destroy_result = int(self._dll.vf_plan_destroy(expired))
-                    if destroy_result != 0:
-                        int(self._dll.vf_plan_destroy(created))
-                        raise GpuRuntimeError(
-                            f"vf_plan_destroy failed with CUDA DLL error {destroy_result}: "
-                            f"{self._error_message(destroy_result)}"
-                        )
-                    del self._native_plans[expired_key]
-                handle = created
-                self._native_plans[key] = handle
+                return created
+            handle = NativePlanManager(
+                self._native_plans,
+                self._max_native_plans,
+                self._dll.vf_plan_destroy,
+                self._error_message,
+                GpuRuntimeError,
+            ).get_or_create(key, create_plan)
             src_channels = 1 if source.ndim == 2 else source.shape[2]
             if device_roi is not None:
                 self._validate_device_roi(device_roi, source)
@@ -615,7 +594,7 @@ class GpuRuntime:
             )
             if result == 0 and self._capture_native_cumulative:
                 self._record_native_performance_unlocked(
-                    kernel_launch_count=self._plan_kernel_launch_count(plan, src_channels)
+                    kernel_launch_count=self._plan_descriptors.kernel_launch_count(plan, src_channels)
                 )
         if result != 0:
             raise GpuRuntimeError(
@@ -628,7 +607,7 @@ class GpuRuntime:
             return False, self.native_dag_plan_unavailable_reason or "CUDA DLL has no generic native DAG plan ABI"
         source = self._u8_image(image, channels=(1, 3))
         try:
-            descriptor, operators, output_nodes = self._native_dag_plan_descriptor(plan, source)
+            descriptor, operators, output_nodes = self._plan_descriptors.dag(plan, source)
         except GpuRuntimeError as exc:
             return False, str(exc)
         reason = ctypes.create_string_buffer(256)
@@ -645,7 +624,7 @@ class GpuRuntime:
             raise GpuRuntimeError(reason)
         key = (plan.signature, source.shape, source.dtype.str)
         specs = plan.output_specs(source)
-        node_channels = self._dag_node_channels(plan, source)
+        node_channels = self._plan_descriptors.dag_node_channels(plan, source)
         outputs = {
             name: np.empty(specs[name].shape, dtype=np.uint8)
             for name in plan.outputs
@@ -653,9 +632,8 @@ class GpuRuntime:
         queued = time.perf_counter()
         with self._queue_slots, self._lock:
             lock_acquired = time.perf_counter()
-            handle = self._native_dag_plans.get(key)
-            if handle is None:
-                descriptor, operators, output_nodes = self._native_dag_plan_descriptor(plan, source)
+            def create_dag_plan():
+                descriptor, operators, output_nodes = self._plan_descriptors.dag(plan, source)
                 created = ctypes.c_void_p()
                 result = int(self._dll.vf_dag_plan_create(
                     self._context, ctypes.byref(descriptor), int(source.shape[1]),
@@ -665,18 +643,14 @@ class GpuRuntime:
                     raise GpuRuntimeError(
                         f"vf_dag_plan_create failed with CUDA DLL error {result}: {self._error_message(result)}"
                     )
-                if len(self._native_dag_plans) >= self._max_native_plans:
-                    expired_key, expired = next(iter(self._native_dag_plans.items()))
-                    destroy_result = int(self._dll.vf_dag_plan_destroy(expired))
-                    if destroy_result != 0:
-                        int(self._dll.vf_dag_plan_destroy(created))
-                        raise GpuRuntimeError(
-                            f"vf_dag_plan_destroy failed with CUDA DLL error {destroy_result}: "
-                            f"{self._error_message(destroy_result)}"
-                        )
-                    del self._native_dag_plans[expired_key]
-                handle = created
-                self._native_dag_plans[key] = handle
+                return created
+            handle = NativePlanManager(
+                self._native_dag_plans,
+                self._max_native_plans,
+                self._dll.vf_dag_plan_destroy,
+                self._error_message,
+                GpuRuntimeError,
+            ).get_or_create(key, create_dag_plan)
             node_index = {node.name: index for index, node in enumerate(plan.nodes)}
             encoded_outputs = (_VfDagOutputV1 * len(plan.outputs))(*(
                 _VfDagOutputV1(
@@ -726,31 +700,9 @@ class GpuRuntime:
 
     def close(self) -> None:
         with self._lock:
-            destroy_batch = getattr(self._dll, "vf_roi_batch_destroy", None) if self._dll is not None else None
-            if destroy_batch is not None:
-                for handle in self._roi_batches.values():
-                    int(destroy_batch(handle))
-            self._roi_batches.clear()
-            destroy_dag_plan = getattr(self._dll, "vf_dag_plan_destroy", None) if self._dll is not None else None
-            if destroy_dag_plan is not None:
-                for handle in self._native_dag_plans.values():
-                    result = int(destroy_dag_plan(handle))
-                    if result != 0:
-                        self.last_error = (
-                            f"vf_dag_plan_destroy failed with CUDA DLL error {result}: "
-                            f"{self._error_message(result)}"
-                        )
-            self._native_dag_plans.clear()
-            destroy_plan = getattr(self._dll, "vf_plan_destroy", None) if self._dll is not None else None
-            if destroy_plan is not None:
-                for handle in self._native_plans.values():
-                    result = int(destroy_plan(handle))
-                    if result != 0:
-                        self.last_error = (
-                            f"vf_plan_destroy failed with CUDA DLL error {result}: "
-                            f"{self._error_message(result)}"
-                        )
-            self._native_plans.clear()
+            resource_error = self._resources.close(self._dll, self._error_message)
+            if resource_error:
+                self.last_error = resource_error
             context = self._context
             self._context = None
             if context is None or self._dll is None:
@@ -775,39 +727,15 @@ class GpuRuntime:
             pass
 
     def _load(self) -> None:
-        if not self.dll_path.exists():
-            self.unavailable_reason = f"CUDA DLL not found: {self.dll_path}"
+        state = GpuLibraryBindings.load(self.dll_path, self.ABI_VERSION)
+        self.unavailable_reason = state.unavailable_reason
+        if state.dll is None:
             return
-        try:
-            dll = ctypes.CDLL(str(self.dll_path))
-            dll.vf_gpu_abi_version.restype = ctypes.c_int
-            abi_version = int(dll.vf_gpu_abi_version())
-            if abi_version != self.ABI_VERSION:
-                self.unavailable_reason = (
-                    f"CUDA DLL ABI mismatch: expected {self.ABI_VERSION}, got {abi_version}"
-                )
-                return
-            dll.vf_gpu_device_count.restype = ctypes.c_int
-            dll.vf_gpu_device_name.argtypes = [ctypes.c_char_p, ctypes.c_int]
-            dll.vf_gpu_device_name.restype = ctypes.c_int
-            count = int(dll.vf_gpu_device_count())
-            if count <= 0:
-                self.unavailable_reason = "CUDA DLL loaded but no CUDA device is available"
-                return
-            buffer = ctypes.create_string_buffer(256)
-            if int(dll.vf_gpu_device_name(buffer, len(buffer))) != 0:
-                self.unavailable_reason = "CUDA DLL could not query the device name"
-                return
-            self._dll = dll
-            self.device_count = count
-            self.device_name = buffer.value.decode("utf-8", errors="replace")
-            capability = getattr(dll, "vf_gpu_compute_capability", None)
-            if capability is not None:
-                encoded = int(capability())
-                self.compute_capability = f"{encoded // 10}.{encoded % 10}" if encoded > 0 else ""
-            self._load_optional_context()
-        except (OSError, AttributeError) as exc:
-            self.unavailable_reason = f"CUDA DLL load failed: {exc}"
+        self._dll = state.dll
+        self.device_count = state.device_count
+        self.device_name = state.device_name
+        self.compute_capability = state.compute_capability
+        self._load_optional_context()
 
     def _load_optional_context(self) -> None:
         create = getattr(self._dll, "vf_context_create", None)

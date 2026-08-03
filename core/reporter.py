@@ -13,13 +13,22 @@ from typing import TYPE_CHECKING
 import cv2
 
 from core.logging_system import LogMixin
+from core.report_writers import ReportCoordinator, ReportWriteContext
+from detectors.detector_900_renderer import DetectorDebugRendererRegistry, clipped_local_bbox
 
 if TYPE_CHECKING:
     from core.performance import PipelineProfiler
 
 
 class Reporter(LogMixin):
-    def __init__(self, output_dir: Path, output_config: dict, profiler: PipelineProfiler | None = None):
+    def __init__(
+        self,
+        output_dir: Path,
+        output_config: dict,
+        profiler: PipelineProfiler | None = None,
+        coordinator: ReportCoordinator | None = None,
+        debug_renderers: DetectorDebugRendererRegistry | None = None,
+    ):
         self.output_dir = Path(output_dir)
         self.output_config = output_config or {}
         self.profiler = profiler
@@ -36,6 +45,8 @@ class Reporter(LogMixin):
         self.matrix_csv_dir = self.output_dir / "matrix_csv"
         self.json_dir = self.output_dir / "json"
         self.debug_dir = self.output_dir / "debug"
+        self._coordinator = coordinator or ReportCoordinator()
+        self._debug_renderers = debug_renderers or DetectorDebugRendererRegistry()
         for directory in (self.overlay_dir, self.ng_tiles_dir, self.csv_dir, self.matrix_csv_dir, self.json_dir):
             directory.mkdir(parents=True, exist_ok=True)
 
@@ -43,49 +54,8 @@ class Reporter(LogMixin):
         stem = Path(result["image_name"]).stem
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         base_name = f"{stem}_{result['recipe_name']}_{timestamp}_{uuid.uuid4().hex[:8]}"
-        outputs: dict[str, object] = {}
         self.logger.info("Writing report outputs: image=%s base=%s", result.get("image_name"), base_name)
-
-        if self.output_config.get("save_overlay", True):
-            with self._measure("overlay"):
-                overlay = self._maybe_downscale_overlay(self._make_overlay(image, result))
-                overlay_path = self.overlay_dir / f"{base_name}_overlay.{self._overlay_ext}"
-                self._write_overlay_image(overlay_path, overlay)
-                outputs["overlay"] = str(overlay_path)
-
-        if self.output_config.get("save_ng_tiles", True):
-            with self._measure("ng_tiles"):
-                sidecars = self._write_ng_tiles(result, base_name)
-                outputs["ng_tiles_dir"] = str(self.ng_tiles_dir)
-                outputs["ng_tile_sidecars"] = sidecars
-
-        if self.output_config.get("save_csv", True):
-            with self._measure("csv"):
-                csv_path = self.csv_dir / f"{base_name}.csv"
-                self._write_csv(csv_path, result)
-                outputs["csv"] = str(csv_path)
-
-        if self.output_config.get("save_matrix_csv", True):
-            with self._measure("matrix_csv"):
-                matrix_csv_path = self.matrix_csv_dir / f"{base_name}_matrix.csv"
-                self._write_matrix_csv(matrix_csv_path, result)
-                outputs["matrix_csv"] = str(matrix_csv_path)
-
-        if self.output_config.get("save_debug_images", False):
-            with self._measure("debug_images"):
-                debug_paths = self._write_debug_images(result, base_name)
-                if debug_paths:
-                    outputs["debug_images"] = debug_paths
-
-        if self.output_config.get("save_json", True):
-            if self.profiler is not None:
-                result.setdefault("execution", {})["performance"] = self.profiler.snapshot()
-            with self._measure("json"):
-                json_path = self.json_dir / f"{base_name}.json"
-                with json_path.open("w", encoding="utf-8") as handle:
-                    json.dump(self._json_safe_result(result, outputs), handle, ensure_ascii=False, indent=2)
-                outputs["json"] = str(json_path)
-
+        outputs = self._coordinator.write(ReportWriteContext(self, image, result, base_name))
         self.logger.info("Report outputs written: outputs=%s", outputs)
         return outputs
 
@@ -262,16 +232,16 @@ class Reporter(LogMixin):
             },
         }
 
-    @staticmethod
-    def _make_ng_tile_overlay(tile_image, tile_result: dict):
+    def _make_ng_tile_overlay(self, tile_image, tile_result: dict):
         annotated = tile_image.copy()
         line_width = Reporter._ng_tile_line_width(annotated)
         for detector_result in tile_result.get("detectors", []):
             for defect in detector_result.get("defects", []):
-                if detector_result.get("detector_id") == "900":
-                    Reporter._draw_detector_900_ng_tile_debug(annotated, defect, line_width)
+                if self._debug_renderers.render(
+                    detector_result.get("detector_id", ""), annotated, defect, line_width
+                ):
                     continue
-                bbox = Reporter._clipped_local_bbox(defect.get("bbox_local"), annotated)
+                bbox = clipped_local_bbox(defect.get("bbox_local"), annotated)
                 if bbox is None:
                     continue
                 x, y, width, height = bbox

@@ -14,13 +14,10 @@ from core.gpu_runtime import GpuRuntime, GpuRuntimeError
 from core.gpu_session import GpuExecutionSession
 from core.logging_system import LogMixin
 from core.performance import PipelineProfiler
-from core.preprocess_cache import TilePreprocessCache
-from core.provenance import inspection_provenance
 from core.recipe_manager import RecipeManager
-from core.recipe_builder import RecipeTemplatePathSync
 from core.reporter import Reporter
 from core.result_types import InspectionResult
-from core.result_mapper import map_tile_result_to_global
+from core.pipeline_stages import InspectionResultAssembler, RecipeRuntimePreparation, TileInspector
 from core.tiler import create_tiler
 
 
@@ -69,29 +66,21 @@ class AOIPipeline(LogMixin):
         )
         self._progress(0, "Starting inspection")
         with profiler.measure("recipe_setup"):
-            recipe = self.recipe_manager.load(self.recipe_path)
-            if self.output_overrides:
-                recipe["output"] = {**recipe.get("output", {}), **self.output_overrides}
-            recipe = RecipeTemplatePathSync.from_recipe(recipe).apply(recipe)
-            provenance = inspection_provenance(self.recipe_path, recipe)
-            gpu_config = recipe.get("gpu", {}) or {}
-            detector_configs = self.recipe_manager.enabled_detectors(recipe)
-            gpu_mode = self.recipe_manager.gpu_mode(gpu_config)
-            self.detector_manager.configure_ai_policy(
-                gpu_mode=gpu_mode,
-                fallback_to_cpu=self.recipe_manager.gpu_fallback_enabled(gpu_config),
-            )
-            tiling_gpu_requested = self.recipe_manager.gpu_feature_requested(gpu_config, "tiling")
-            detector_gpu_allowed = gpu_mode != "cpu"
-            gpu_requested = tiling_gpu_requested or (
-                detector_gpu_allowed
-                and any(
-                    bool(config.get("use_gpu", False))
-                    and self.detector_manager.uses_native_cuda_runtime(detector_id)
-                    for detector_id, config in detector_configs.items()
-                )
-            )
-            gpu_runtime = self._build_gpu_runtime(gpu_config, gpu_requested)
+            prepared = RecipeRuntimePreparation(
+                self.recipe_manager,
+                self.detector_manager,
+                self._build_gpu_runtime,
+                self.output_overrides,
+            ).prepare(self.recipe_path)
+            recipe = prepared.recipe
+            provenance = prepared.provenance
+            gpu_config = prepared.gpu_config
+            detector_configs = prepared.detector_configs
+            gpu_mode = prepared.gpu_mode
+            tiling_gpu_requested = prepared.tiling_gpu_requested
+            detector_gpu_allowed = prepared.detector_gpu_allowed
+            gpu_requested = prepared.gpu_requested
+            gpu_runtime = prepared.gpu_runtime
         if gpu_requested and not gpu_runtime.available and not gpu_runtime.fallback_to_cpu:
             raise GpuRuntimeError(gpu_runtime.unavailable_reason)
         if gpu_requested and gpu_runtime.available:
@@ -197,62 +186,22 @@ class AOIPipeline(LogMixin):
         self._progress(85, f"Aggregating PASS / NG result{fallback_message}")
         with profiler.measure("aggregation"):
             aggregate = Aggregator(recipe["decision"]).aggregate(tile_results)
-        result = {
-            "image_name": Path(image_path).name,
-            "recipe_name": recipe["recipe_name"],
-            "machine_id": recipe["machine_id"],
-            "product_id": recipe["product_id"],
-            "recipe_version": recipe["version"],
-            "provenance": provenance,
-            "final_result": aggregate["final_result"],
-            "summary": aggregate["summary"],
-            "tiles": tile_results,
-            "outputs": {},
-            "duration_sec": round(time.perf_counter() - started, 3),
-            "execution": {
-                "ai": self.detector_manager._ai_manager().performance_stats(),
-                "gpu": {
-                    "mode": gpu_mode,
-                    "resident_image": {
-                        "active": resident_image is not None,
-                        "generation": resident_image.generation if resident_image is not None else 0,
-                        "shape": (
-                            [resident_image.height, resident_image.width, resident_image.channels]
-                            if resident_image is not None else []
-                        ),
-                    },
-                    "tiling": gpu_runtime.status(tiling_gpu_requested),
-                    "display_requested": self.recipe_manager.gpu_feature_requested(gpu_config, "display"),
-                    "detectors": {
-                        detector.detector_id: {
-                            "requested": getattr(
-                                detector, "gpu_requested", detector.use_gpu
-                            ),
-                            "active": detector.gpu_active,
-                            "backend": getattr(
-                                detector,
-                                "actual_backend",
-                                "cuda_dll" if detector.gpu_active else "cpu",
-                            ),
-                            "device_name": (
-                                (
-                                    getattr(detector, "_ai_execution", {}).get(
-                                        "device", ""
-                                    )
-                                    or gpu_runtime.device_name
-                                )
-                                if detector.gpu_active
-                                else ""
-                            ),
-                            "fallback_reason": detector.gpu_fallback_reason,
-                        }
-                        for detector in detectors
-                    },
-                    "metrics": gpu_runtime.performance_stats(),
-                },
-                "performance": profiler.snapshot(),
-            },
-        }
+        result = InspectionResultAssembler.build(
+            image_path=image_path,
+            started=started,
+            recipe=recipe,
+            provenance=provenance,
+            aggregate=aggregate,
+            tile_results=tile_results,
+            detector_manager=self.detector_manager,
+            detectors=detectors,
+            gpu_runtime=gpu_runtime,
+            gpu_mode=gpu_mode,
+            tiling_gpu_requested=tiling_gpu_requested,
+            display_requested=self.recipe_manager.gpu_feature_requested(gpu_config, "display"),
+            resident_image=resident_image,
+            profiler=profiler,
+        )
 
         serializable_result = self._without_runtime_images(result)
         self._progress(92, "Writing overlay, CSV, and JSON")
@@ -290,43 +239,7 @@ class AOIPipeline(LogMixin):
         )
 
     def _inspect_tile(self, tile, detectors) -> tuple[dict, list]:
-        detector_results = []
-        timings = []
-        debug_images: dict = {}
-        preprocess_cache = TilePreprocessCache(tile.image)
-        for detector in detectors:
-            started = time.perf_counter()
-            detector_result = detector.run(
-                tile.image,
-                device_roi=tile.device_roi,
-                preprocess_cache=preprocess_cache,
-            )
-            detector_results.append(map_tile_result_to_global(tile, detector_result))
-            stages = (
-                detector_result.get("execution", {})
-                .get("performance", {})
-                .get("stages_sec", {})
-            )
-            timings.append((detector.detector_id, time.perf_counter() - started, dict(stages)))
-            if detector.export_debug_images and detector.debug_images:
-                debug_images[detector.detector_id] = dict(detector.debug_images)
-        tile_result = {
-            "tile": {
-                "tile_id": tile.tile_id,
-                "x": tile.x,
-                "y": tile.y,
-                "width": tile.width,
-                "height": tile.height,
-                "row": tile.row,
-                "col": tile.col,
-                "metadata": tile.metadata or {},
-            },
-            "detectors": detector_results,
-            "_tile_image": tile.image,
-        }
-        if debug_images:
-            tile_result["_debug_images"] = debug_images
-        return tile_result, timings
+        return TileInspector.inspect(tile, detectors)
 
     @staticmethod
     def _record_tile_timings(profiler, timings) -> None:

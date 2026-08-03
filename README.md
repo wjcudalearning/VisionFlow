@@ -125,6 +125,7 @@ AOI_CVbased/
 |-- .github/workflows/              # Windows CI 與 RTX 3090 runtime workflow
 |-- core/
 |   |-- pipeline.py                 # 檢測流程協調
+|   |-- pipeline_stages.py          # Recipe/runtime、Tile 與結果組裝階段
 |   |-- ai_runtime.py               # YOLOX model registry、CPU session 與前後處理
 |   |-- recipe_manager.py           # 配方載入與驗證
 |   |-- recipe_builder.py           # GUI 配方建立
@@ -133,11 +134,14 @@ AOI_CVbased/
 |   |-- detector_manager.py         # Detector registry／factory
 |   |-- preprocess_plan.py          # CPU／CUDA 共用前處理描述與 executor
 |   |-- gpu_runtime.py              # CUDA DLL bridge、能力偵測與 fallback
+|   |-- gpu_runtime_components.py   # DLL binding、能力探測、handle/cache 生命週期
+|   |-- gpu_plan_descriptors.py     # Native linear／DAG plan ABI descriptor
 |   |-- gpu_session.py              # batch／monitor 共用 GPU runtime/context
 |   |-- aggregator.py               # Tile 與整張影像 PASS／NG 彙總
 |   |-- result_mapper.py            # 區域座標映射至原圖座標
 |   |-- result_compactor.py         # 長時間工作使用的結果壓縮
-|   |-- reporter.py                 # PNG、CSV、JSON 報告
+|   |-- reporter.py                 # 輸出 façade／coordinator
+|   |-- report_writers.py           # Overlay、NG Tile、CSV、JSON output strategies
 |   |-- performance.py              # 效能與 GPU 傳輸觀測
 |   |-- batch_dashboard.py          # 批次與監控統計模型
 |   |-- batch_processor.py          # 平行批次處理
@@ -148,10 +152,15 @@ AOI_CVbased/
 |   |-- detector_401_1.py
 |   |-- detector_401_2.py
 |   |-- detector_900.py
+|   |-- detector_900_domain.py      # 900 typed config、candidate 與 geometry
+|   |-- detector_900_renderer.py    # 900 專屬 NG debug overlay
 |   `-- detector_yolox.py
 |-- models/yolox/                   # YOLOX model registry 與 checksum 保護的模型
 |-- gui/
 |   |-- main_window.py
+|   |-- workflow_controllers.py     # Batch／Monitor／Preview／Inspection thread lifecycle
+|   |-- designer_model.py           # Designer state、recipe mapper 與 validator
+|   |-- designer_panels.py          # 可獨立組合的 Designer panels
 |   |-- workers.py                  # Qt 背景工作執行緒
 |   |-- image_viewer.py
 |   |-- screens/                    # Run、Results、Designer、Monitor、Dashboard
@@ -171,6 +180,8 @@ AOI_CVbased/
 |-- outputs/                        # 正式執行輸出
 `-- outputs_validation/             # 本機驗證輸出，不納入版本控制
 ```
+
+`AOIPipeline`、`GpuRuntime`、`Reporter` 與 `MainWindow` 保留為對外相容 façade／composition root；細節分別由 stage、runtime component、writer strategy 與 workflow controller 組合。Detector900 的演算法內部使用 typed value objects，只有在公開結果邊界轉回既有 dict schema，因此 recipe、PASS／NG、metadata、輸出格式與 ABI v1 不因這次責任拆分而改變。
 
 ## 系統流程
 

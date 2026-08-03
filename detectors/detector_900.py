@@ -13,6 +13,13 @@ from core.preprocess_plan import (
 )
 from core.parameter_schema import specs_from_defaults
 from detectors.base_detector import BaseDetector
+from detectors.detector_900_domain import (
+    CandidateAnalyzer,
+    Detector900Config,
+    Detector900MaskPreprocessor,
+    Detector900ResultAssembler,
+    PairGeometry,
+)
 
 
 class Detector900(BaseDetector):
@@ -58,113 +65,31 @@ class Detector900(BaseDetector):
         return image if self.gpu_active else self.shared_gray(image)
 
     def detect(self, image) -> list[dict]:
+        config = Detector900Config.from_params(self.params)
         roi, offset_x, offset_y = self._roi_image(image)
         with self.measure_detection_stage("preprocess"):
             masks = self._make_masks(roi, offset_x, offset_y)
-        outer_mask = masks["outer_mask"]
-        inner_mask = masks["inner_mask"]
-
+        analyzer = CandidateAnalyzer()
         with self.measure_detection_stage("find_contours"):
-            outer_all_candidates = self._collect_candidates(
-                outer_mask,
-                mode_param="outer_contour_mode",
+            outer_candidates = analyzer.analyze(
+                masks["outer_mask"], config.outer_contour_mode, config.outer_rule
             )
-            inner_all_candidates = self._collect_candidates(
-                inner_mask,
-                mode_param="inner_contour_mode",
+            inner_candidates = analyzer.analyze(
+                masks["inner_mask"], config.inner_contour_mode, config.inner_rule
             )
         geometry_started = time.perf_counter()
-        outer_candidates = self._filter_candidates(
-            outer_all_candidates,
-            target_width_param="outer_target_width",
-            width_tolerance_param="outer_width_tolerance",
-            target_height_param="outer_target_height",
-            height_tolerance_param="outer_height_tolerance",
+        match = PairGeometry().find_valid_pair(
+            outer_candidates.accepted, inner_candidates.accepted, config.max_edge_gap
         )
-        inner_candidates = self._filter_candidates(
-            inner_all_candidates,
-            target_width_param="inner_target_width",
-            width_tolerance_param="inner_width_tolerance",
-            target_height_param="inner_target_height",
-            height_tolerance_param="inner_height_tolerance",
-        )
-
-        match = self._find_valid_pair(outer_candidates, inner_candidates)
         self._detection_stage_durations["geometry_analysis"] = time.perf_counter() - geometry_started
         if match is not None:
             return []
-
-        failure_bbox = self._failure_bbox(outer_candidates, inner_candidates, image.shape[:2], offset_x, offset_y)
-        reason = self._failure_reason(outer_candidates, inner_candidates)
-        debug_outer = self._offset_candidates(outer_candidates[:5], offset_x, offset_y)
-        debug_inner = self._offset_candidates(inner_candidates[:5], offset_x, offset_y)
-        debug_outer_rejected = self._offset_candidates(
-            self._rejected_candidates(
-                outer_all_candidates,
-                "outer_target_width",
-                "outer_width_tolerance",
-                "outer_target_height",
-                "outer_height_tolerance",
-            )[:5],
-            offset_x,
-            offset_y,
+        return Detector900ResultAssembler().assemble(
+            config, outer_candidates, inner_candidates, image.shape[:2], offset_x, offset_y
         )
-        debug_inner_rejected = self._offset_candidates(
-            self._rejected_candidates(
-                inner_all_candidates,
-                "inner_target_width",
-                "inner_width_tolerance",
-                "inner_target_height",
-                "inner_height_tolerance",
-            )[:5],
-            offset_x,
-            offset_y,
-        )
-        debug_pair = self._debug_pair(outer_candidates, inner_candidates, offset_x, offset_y)
-        return [
-            {
-                "type": "900_frame_spacing_ng",
-                "bbox_local": failure_bbox,
-                "area": float(np.round(self._bbox_area(failure_bbox), 3)),
-                "confidence": 1.0,
-                "metadata": {
-                    "reason": reason,
-                    "outer_candidate_count": len(outer_candidates),
-                    "outer_raw_candidate_count": len(outer_all_candidates),
-                    "outer_rejected_candidate_count": len(outer_all_candidates) - len(outer_candidates),
-                    "inner_candidate_count": len(inner_candidates),
-                    "inner_raw_candidate_count": len(inner_all_candidates),
-                    "inner_rejected_candidate_count": len(inner_all_candidates) - len(inner_candidates),
-                    "outer_threshold": int(self.params.get("outer_threshold", 160)),
-                    "outer_contour_mode": str(self.params.get("outer_contour_mode", "list")),
-                    "outer_target_width": int(self.params.get("outer_target_width", 1033)),
-                    "outer_width_tolerance": int(self.params.get("outer_width_tolerance", 33)),
-                    "outer_target_height": int(self.params.get("outer_target_height", 1211)),
-                    "outer_height_tolerance": int(self.params.get("outer_height_tolerance", 33)),
-                    "inner_threshold_method": "adaptive_mean",
-                    "inner_adaptive_block_size": int(self.params.get("inner_adaptive_block_size", 11)),
-                    "inner_adaptive_c": float(self.params.get("inner_adaptive_c", 0.0)),
-                    "inner_contour_mode": str(self.params.get("inner_contour_mode", "list")),
-                    "inner_target_width": int(self.params.get("inner_target_width", 998)),
-                    "inner_width_tolerance": int(self.params.get("inner_width_tolerance", 33)),
-                    "inner_target_height": int(self.params.get("inner_target_height", 1164)),
-                    "inner_height_tolerance": int(self.params.get("inner_height_tolerance", 33)),
-                    "max_edge_gap": int(self.params.get("max_edge_gap", 31)),
-                    "roi_inset_px": int(self.params.get("roi_inset_px", 0)),
-                    "roi_offset_local": [int(offset_x), int(offset_y)],
-                    "best_outer": self._offset_candidate(self._largest_candidate(outer_candidates), offset_x, offset_y),
-                    "best_inner": self._offset_candidate(self._largest_candidate(inner_candidates), offset_x, offset_y),
-                    "debug_outer_candidates": debug_outer,
-                    "debug_inner_candidates": debug_inner,
-                    "debug_pair": debug_pair,
-                    "debug_outer_rejected_candidates": debug_outer_rejected,
-                    "debug_inner_rejected_candidates": debug_inner_rejected,
-                },
-            }
-        ]
 
     def _roi_image(self, image):
-        inset = max(0, int(self.params.get("roi_inset_px", 0)))
+        inset = Detector900Config.from_params(self.params).roi_inset_px
         if inset <= 0:
             return image, 0, 0
 
@@ -175,46 +100,11 @@ class Detector900(BaseDetector):
         return image[inset : height - inset, inset : width - inset], inset, inset
 
     def _make_masks(self, image, offset_x: int = 0, offset_y: int = 0) -> dict[str, np.ndarray]:
-        block_size = self._odd_at_least(int(self.params.get("inner_adaptive_block_size", 11)), 3)
-        max_value = int(self.params.get("max_value", 255))
-        signature = (
-            "900_dual_masks",
-            int(self.params.get("outer_threshold", 160)),
-            bool(self.params.get("outer_invert", False)),
-            block_size,
-            float(self.params.get("inner_adaptive_c", 0.0)),
-            bool(self.params.get("inner_invert", False)),
-            max_value,
-        )
+        preprocessor = Detector900MaskPreprocessor(Detector900Config.from_params(self.params))
         plan = self.cached_preprocess_plan(
             image,
-            signature,
-            lambda: PreprocessDagPlan(
-                name="900_shared_gray_dual_masks",
-                nodes=(
-                    PreprocessDagNode("gray", "root", Gray()),
-                    PreprocessDagNode(
-                        "outer_mask",
-                        "gray",
-                        Threshold(
-                            int(self.params.get("outer_threshold", 160)),
-                            max_value,
-                            bool(self.params.get("outer_invert", False)),
-                        ),
-                    ),
-                    PreprocessDagNode(
-                        "inner_mask",
-                        "gray",
-                        AdaptiveMean(
-                            block_size,
-                            float(self.params.get("inner_adaptive_c", 0.0)),
-                            max_value,
-                            bool(self.params.get("inner_invert", False)),
-                        ),
-                    ),
-                ),
-                outputs=("outer_mask", "inner_mask"),
-            ),
+            preprocessor.signature,
+            preprocessor.plan,
         )
         return self.execute_preprocess_dag(image, plan, (offset_x, offset_y))
 

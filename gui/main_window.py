@@ -38,6 +38,13 @@ from gui.widgets.common import InlineNotice, Toggle
 from gui.widgets.drawer import Drawer
 from gui.widgets.rail import NavRail
 from gui.widgets.topbar import TopBar
+from gui.workflow_controllers import (
+    BatchWorkflowController,
+    InspectionWorkflowController,
+    MonitorWorkflowController,
+    PreviewWorkflowController,
+    TilePreviewWorkflowController,
+)
 from gui.workers import BatchInspectionWorker, FolderMonitorWorker, ImagePreviewWorker, InspectionWorker, TilePreviewWorker
 
 # ============================================================
@@ -181,6 +188,12 @@ class MainWindow(QMainWindow, LogMixin):
         self._run_started_at: float | None = None
         self._batch_started_at: datetime.datetime | None = None
 
+        self._preview_controller = PreviewWorkflowController(self)
+        self._inspection_controller = InspectionWorkflowController(self)
+        self._batch_controller = BatchWorkflowController(self)
+        self._monitor_controller = MonitorWorkflowController(self)
+        self._tile_preview_controller = TilePreviewWorkflowController(self)
+
         self._preview_thread: QThread | None = None
         self._preview_worker: ImagePreviewWorker | None = None
         self._preview_updates_current_image = False
@@ -209,6 +222,86 @@ class MainWindow(QMainWindow, LogMixin):
         self._refresh_image_chip()
         self._update_run_ready()
         self.statusBar().showMessage("就緒")
+
+    @property
+    def _preview_thread(self):
+        return self._preview_controller.thread
+
+    @_preview_thread.setter
+    def _preview_thread(self, value) -> None:
+        self._preview_controller.thread = value
+
+    @property
+    def _preview_worker(self):
+        return self._preview_controller.worker
+
+    @_preview_worker.setter
+    def _preview_worker(self, value) -> None:
+        self._preview_controller.worker = value
+
+    @property
+    def _inspection_thread(self):
+        return self._inspection_controller.thread
+
+    @_inspection_thread.setter
+    def _inspection_thread(self, value) -> None:
+        self._inspection_controller.thread = value
+
+    @property
+    def _inspection_worker(self):
+        return self._inspection_controller.worker
+
+    @_inspection_worker.setter
+    def _inspection_worker(self, value) -> None:
+        self._inspection_controller.worker = value
+
+    @property
+    def _batch_thread(self):
+        return self._batch_controller.thread
+
+    @_batch_thread.setter
+    def _batch_thread(self, value) -> None:
+        self._batch_controller.thread = value
+
+    @property
+    def _batch_worker(self):
+        return self._batch_controller.worker
+
+    @_batch_worker.setter
+    def _batch_worker(self, value) -> None:
+        self._batch_controller.worker = value
+
+    @property
+    def _monitor_thread(self):
+        return self._monitor_controller.thread
+
+    @_monitor_thread.setter
+    def _monitor_thread(self, value) -> None:
+        self._monitor_controller.thread = value
+
+    @property
+    def _monitor_worker(self):
+        return self._monitor_controller.worker
+
+    @_monitor_worker.setter
+    def _monitor_worker(self, value) -> None:
+        self._monitor_controller.worker = value
+
+    @property
+    def _tile_preview_thread(self):
+        return self._tile_preview_controller.thread
+
+    @_tile_preview_thread.setter
+    def _tile_preview_thread(self, value) -> None:
+        self._tile_preview_controller.thread = value
+
+    @property
+    def _tile_preview_worker(self):
+        return self._tile_preview_controller.worker
+
+    @_tile_preview_worker.setter
+    def _tile_preview_worker(self, value) -> None:
+        self._tile_preview_controller.worker = value
 
     # ------------------------------------------------------------------
     # UI construction
@@ -560,24 +653,23 @@ class MainWindow(QMainWindow, LogMixin):
         self.topbar.set_running(True, 0)
         self.statusBar().showMessage("批量檢測中")
 
-        self._batch_thread = QThread(self)
-        self._batch_worker = BatchInspectionWorker(
+        worker = BatchInspectionWorker(
             input_dir=self.batch_dir,
             recipe_path=self.recipe_path,
             output_dir=Path(self.output_dir or "outputs"),
             output_overrides=dict(self.output_opts),
             recursive=self.run_screen.batch_recursive(),
         )
-        self._batch_worker.moveToThread(self._batch_thread)
-        self._batch_thread.started.connect(self._batch_worker.run)
-        self._batch_worker.progress.connect(self._on_batch_progress)
-        self._batch_worker.finished.connect(self._on_batch_finished)
-        self._batch_worker.failed.connect(self._on_batch_failed)
-        self._batch_worker.finished.connect(self._batch_thread.quit)
-        self._batch_worker.failed.connect(self._batch_thread.quit)
-        self._batch_thread.finished.connect(self._batch_worker.deleteLater)
-        self._batch_thread.finished.connect(self._on_batch_thread_finished)
-        self._batch_thread.start()
+        self._batch_controller.start(
+            worker,
+            signal_handlers=(
+                (worker.progress, self._on_batch_progress),
+                (worker.finished, self._on_batch_finished),
+                (worker.failed, self._on_batch_failed),
+            ),
+            terminal_signals=(worker.finished, worker.failed),
+            on_thread_finished=self._on_batch_thread_finished,
+        )
 
     def _on_batch_progress(self, percent: int, message: str) -> None:
         percent = max(0, min(100, int(percent)))
@@ -609,8 +701,7 @@ class MainWindow(QMainWindow, LogMixin):
 
     def _on_batch_thread_finished(self) -> None:
         self.batch_running = False
-        self._batch_thread = None
-        self._batch_worker = None
+        self._batch_controller.clear()
         self.topbar.set_running(False, 0)
         self._update_batch_ready()
 
@@ -667,29 +758,27 @@ class MainWindow(QMainWindow, LogMixin):
         self.topbar.set_running(True, 0)
         self.statusBar().showMessage("監控模式中")
 
-        self._monitor_thread = QThread(self)
-        self._monitor_worker = FolderMonitorWorker(
+        worker = FolderMonitorWorker(
             input_dir=self.monitor_dir,
             recipe_path=self.recipe_path,
             output_dir=Path(self.output_dir or "outputs"),
             output_overrides=dict(self.output_opts),
             processed_move_dir=self.monitor_move_dir,
         )
-        self._monitor_worker.moveToThread(self._monitor_thread)
-        self._monitor_thread.started.connect(self._monitor_worker.run)
-        self._monitor_worker.progress.connect(self._on_monitor_progress)
-        self._monitor_worker.image_processed.connect(self._on_monitor_image_processed)
-        self._monitor_worker.finished.connect(self._on_monitor_finished)
-        self._monitor_worker.failed.connect(self._on_monitor_failed)
-        self._monitor_worker.finished.connect(self._monitor_thread.quit)
-        self._monitor_worker.failed.connect(self._monitor_thread.quit)
-        self._monitor_thread.finished.connect(self._monitor_worker.deleteLater)
-        self._monitor_thread.finished.connect(self._on_monitor_thread_finished)
-        self._monitor_thread.start()
+        self._monitor_controller.start(
+            worker,
+            signal_handlers=(
+                (worker.progress, self._on_monitor_progress),
+                (worker.image_processed, self._on_monitor_image_processed),
+                (worker.finished, self._on_monitor_finished),
+                (worker.failed, self._on_monitor_failed),
+            ),
+            terminal_signals=(worker.finished, worker.failed),
+            on_thread_finished=self._on_monitor_thread_finished,
+        )
 
     def _stop_monitoring(self) -> None:
-        if self._monitor_worker is not None:
-            self._monitor_worker.stop()
+        self._monitor_controller.stop()
         self.monitor_screen.set_progress(0, "正在停止監控")
         self.statusBar().showMessage("停止監控中")
 
@@ -727,8 +816,7 @@ class MainWindow(QMainWindow, LogMixin):
 
     def _on_monitor_thread_finished(self) -> None:
         self.monitor_running = False
-        self._monitor_thread = None
-        self._monitor_worker = None
+        self._monitor_controller.clear()
         self.topbar.set_running(False, 0)
         self._update_monitor_ready()
 
@@ -760,19 +848,18 @@ class MainWindow(QMainWindow, LogMixin):
         if update_current_image:
             self.topbar.image_chip.set_value("", loading=True)
         self.statusBar().showMessage(f"影像載入中：{path}")
-        self._preview_thread = QThread(self)
         gpu_config = (self.recipe or {}).get("gpu", {}) if self.recipe else {}
-        self._preview_worker = ImagePreviewWorker(path, gpu_config=gpu_config)
-        self._preview_worker.moveToThread(self._preview_thread)
-        self._preview_thread.started.connect(self._preview_worker.run)
-        self._preview_worker.progress.connect(self._on_status_progress)
-        self._preview_worker.loaded.connect(self._on_preview_loaded)
-        self._preview_worker.failed.connect(self._on_preview_failed)
-        self._preview_worker.loaded.connect(self._preview_thread.quit)
-        self._preview_worker.failed.connect(self._preview_thread.quit)
-        self._preview_thread.finished.connect(self._preview_worker.deleteLater)
-        self._preview_thread.finished.connect(self._on_preview_thread_finished)
-        self._preview_thread.start()
+        worker = ImagePreviewWorker(path, gpu_config=gpu_config)
+        self._preview_controller.start(
+            worker,
+            signal_handlers=(
+                (worker.progress, self._on_status_progress),
+                (worker.loaded, self._on_preview_loaded),
+                (worker.failed, self._on_preview_failed),
+            ),
+            terminal_signals=(worker.loaded, worker.failed),
+            on_thread_finished=self._on_preview_thread_finished,
+        )
 
     def _on_preview_loaded(self, path: Path, image, backend_status: dict) -> None:
         viewer_performance = self.run_screen.image_viewer.set_qimage(image, name=Path(path).name)
@@ -808,8 +895,7 @@ class MainWindow(QMainWindow, LogMixin):
     def _on_preview_thread_finished(self) -> None:
         self._preview_updates_current_image = False
         self._preview_started_at = None
-        self._preview_thread = None
-        self._preview_worker = None
+        self._preview_controller.clear()
         self._refresh_image_chip()
 
     def _refresh_image_chip(self) -> None:
@@ -884,24 +970,23 @@ class MainWindow(QMainWindow, LogMixin):
         self._set_inspection_running(True)
         self._run_started_at = time.perf_counter()
         self.statusBar().showMessage("檢測執行中...")
-        self._inspection_thread = QThread(self)
-        self._inspection_worker = InspectionWorker(
+        worker = InspectionWorker(
             image_path=self.image_path,
             recipe_path=self.recipe_path,
             output_dir=Path(self.output_dir or "outputs"),
             output_overrides=dict(self.output_opts),
             gpu_session_cache=self._inspection_gpu_sessions,
         )
-        self._inspection_worker.moveToThread(self._inspection_thread)
-        self._inspection_thread.started.connect(self._inspection_worker.run)
-        self._inspection_worker.progress.connect(self._on_inspection_progress)
-        self._inspection_worker.finished.connect(self._on_inspection_finished)
-        self._inspection_worker.failed.connect(self._on_inspection_failed)
-        self._inspection_worker.finished.connect(self._inspection_thread.quit)
-        self._inspection_worker.failed.connect(self._inspection_thread.quit)
-        self._inspection_thread.finished.connect(self._inspection_worker.deleteLater)
-        self._inspection_thread.finished.connect(self._on_inspection_thread_finished)
-        self._inspection_thread.start()
+        self._inspection_controller.start(
+            worker,
+            signal_handlers=(
+                (worker.progress, self._on_inspection_progress),
+                (worker.finished, self._on_inspection_finished),
+                (worker.failed, self._on_inspection_failed),
+            ),
+            terminal_signals=(worker.finished, worker.failed),
+            on_thread_finished=self._on_inspection_thread_finished,
+        )
 
     def _on_inspection_progress(self, percent: int, message: str) -> None:
         percent = max(0, min(100, int(percent)))
@@ -958,8 +1043,7 @@ class MainWindow(QMainWindow, LogMixin):
 
     def _on_inspection_thread_finished(self) -> None:
         self._set_inspection_running(False)
-        self._inspection_thread = None
-        self._inspection_worker = None
+        self._inspection_controller.clear()
         self._run_started_at = None
         self._update_run_ready()
         self.run_screen.run_control_panel.set_progress(False, self.result is not None, 0, "")
@@ -986,19 +1070,19 @@ class MainWindow(QMainWindow, LogMixin):
 
         self.designer_screen.set_preview_running(True)
         self.statusBar().showMessage("切圖預覽中...")
-        self._tile_preview_thread = QThread(self)
         tile_config = preview_config.get("tile", preview_config)
         gpu_config = preview_config.get("gpu", {})
-        self._tile_preview_worker = TilePreviewWorker(self.image_path, tile_config, gpu_config=gpu_config)
-        self._tile_preview_worker.moveToThread(self._tile_preview_thread)
-        self._tile_preview_thread.started.connect(self._tile_preview_worker.run)
-        self._tile_preview_worker.progress.connect(self._on_status_progress)
-        self._tile_preview_worker.finished.connect(self._on_tile_preview_finished)
-        self._tile_preview_worker.failed.connect(self._on_tile_preview_failed)
-        self._tile_preview_worker.finished.connect(self._tile_preview_thread.quit)
-        self._tile_preview_worker.failed.connect(self._tile_preview_thread.quit)
-        self._tile_preview_thread.finished.connect(self._on_tile_preview_thread_finished)
-        self._tile_preview_thread.start()
+        worker = TilePreviewWorker(self.image_path, tile_config, gpu_config=gpu_config)
+        self._tile_preview_controller.start(
+            worker,
+            signal_handlers=(
+                (worker.progress, self._on_status_progress),
+                (worker.finished, self._on_tile_preview_finished),
+                (worker.failed, self._on_tile_preview_failed),
+            ),
+            terminal_signals=(worker.finished, worker.failed),
+            on_thread_finished=self._on_tile_preview_thread_finished,
+        )
 
     def _on_tile_preview_finished(
         self,
@@ -1018,8 +1102,7 @@ class MainWindow(QMainWindow, LogMixin):
 
     def _on_tile_preview_thread_finished(self) -> None:
         self.designer_screen.set_preview_running(False)
-        self._tile_preview_thread = None
-        self._tile_preview_worker = None
+        self._tile_preview_controller.clear()
 
     # ------------------------------------------------------------------
     # lifecycle
