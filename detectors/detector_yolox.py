@@ -129,6 +129,12 @@ class DetectorYolox(BaseDetector):
     def actual_backend(self) -> str:
         return str(self._ai_execution.get("actual_backend") or "onnxruntime_cpu")
 
+    @property
+    def device_name(self) -> str:
+        if not self.gpu_active:
+            return ""
+        return str(self._ai_execution.get("device") or "")
+
     @staticmethod
     def validate_parameters(params: dict, registry) -> None:
         merged = deepcopy(DetectorYolox.default_params)

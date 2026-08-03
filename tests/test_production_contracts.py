@@ -15,7 +15,7 @@ from core.detector_manager import DetectorManager
 from core.pipeline import AOIPipeline
 from core.provenance import canonical_sha256, inspection_provenance, sha256_bytes
 from core.recipe_manager import RecipeError, RecipeManager
-from core.reporter import Reporter
+from core.report_artifacts import CsvExporter
 from gpu.benchmark_gate import compare_p95
 
 
@@ -105,7 +105,7 @@ class ReporterAreaCalibrationTests(unittest.TestCase):
     def test_csv_converts_pixel_area_to_square_micrometers(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "converted.csv"
-            Reporter(Path(temporary), {"pixel_size_um_per_px": 4.0})._write_csv(path, self.RESULT)
+            CsvExporter({"pixel_size_um_per_px": 4.0}).write_csv(path, self.RESULT)
             with path.open(encoding="utf-8-sig", newline="") as handle:
                 row = next(csv.DictReader(handle))
 
@@ -115,7 +115,7 @@ class ReporterAreaCalibrationTests(unittest.TestCase):
     def test_csv_keeps_pixel_area_when_precision_is_missing(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "pixels.csv"
-            Reporter(Path(temporary), {})._write_csv(path, self.RESULT)
+            CsvExporter({}).write_csv(path, self.RESULT)
             with path.open(encoding="utf-8-sig", newline="") as handle:
                 row = next(csv.DictReader(handle))
 

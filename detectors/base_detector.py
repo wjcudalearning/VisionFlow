@@ -71,6 +71,12 @@ class BaseDetector:
     def gpu_active(self) -> bool:
         return bool(self.use_gpu and self.gpu_runtime is not None and self.gpu_runtime.available and not self.gpu_fallback_reason)
 
+    @property
+    def device_name(self) -> str:
+        if not self.gpu_active or self.gpu_runtime is None:
+            return ""
+        return str(getattr(self.gpu_runtime, "device_name", "") or "")
+
     def preprocess(self, image):
         return image
 

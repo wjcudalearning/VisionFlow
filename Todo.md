@@ -228,6 +228,10 @@
 - [x] 將 `GpuRuntime` 保留為相容 façade，拆出 DLL bindings/capability、native plan descriptor/cache、resident image/ROI batch resource 與 metrics/lifecycle 協作者；舊 DLL optional probing、thread safety 與完整 detector CPU fallback 不變。
 - [x] 將 `AOIPipeline._run()` 拆為明確的 recipe/runtime preparation、tile inspection、execution metadata/result assembly 階段，`AOIPipeline.run()` 保持單一 orchestration 入口。
 - [x] 完成全部 unit tests、compileall、CUDA preflight、CLI synthetic smoke、GUI offscreen smoke 與 `git diff --check`，並記錄無法在本機執行的 RTX／實體 GPU 驗收。
+- [x] 移除 `Detector900` domain 遷移後殘留的 16 個舊演算法方法，以及 `Reporter` renderer registry 遷移後殘留的 Detector900 debug renderer／格式化死碼；保留仍使用的通用 NG tile line-width helper。
+- [x] 以 `DetectorManager.ai_performance_stats()` 與 detector 共用的 public `device_name` contract 取代 pipeline 對 `_ai_manager()`／YOLOX `_ai_execution` 的跨模組私有存取。
+- [x] 完成 Reporter writer 責任反轉：`ReportWriteContext` 僅攜帶明確的公開設定、路徑、profiler 與輸出服務，writers 不得持有整個 `Reporter` 或呼叫其私有成員。
+- [x] 增加 OOP 架構邊界與輸出回歸測試，並重跑全部 unit tests、compileall、CUDA preflight、CLI synthetic smoke 與 `git diff --check`。
 
 ## RTX 3090 編譯與實機驗收
 
@@ -346,6 +350,7 @@
 
 ## 完成紀錄
 
+- [x] 2026-08-03：完成 P10 OOP 收尾。移除 Detector900 的 16 個舊演算法方法與 Reporter 的 Detector900 renderer／格式化死碼；Reporter 縮為 68 行 composition root，輸出行為拆為 image encoder、overlay renderer、NG tile、CSV、Matrix CSV、Debug Image、JSON 七個單一責任協作者，writers 僅依賴明確的 paths/config/profiler/public services。新增 `DetectorManager.ai_performance_stats()` 與 detector `device_name` contract，pipeline 不再跨模組存取 `_ai_manager()`／YOLOX `_ai_execution`；架構測試固定上述邊界與死碼不得回流。完整 207 tests、compileall、CUDA preflight、CPU CLI synthetic NG smoke（9 tiles、12 defects、7 sidecars）與 `git diff --check` 均通過；未變更 CUDA header/source/DLL，故無需重編 DLL 或新增 RTX runtime 驗收結論。
 - [x] 2026-08-03：完成 P10 OOP 責任邊界重構。Reporter 改由 output strategy coordinator 組合並註冊 Detector900 專屬 debug renderer；Designer 抽出 editor state、recipe mapper／validator 與主要 panels；MainWindow 以五個 workflow controllers 管理 Qt worker/thread lifecycle；Detector900 以 typed config、candidate、pair geometry、mask preprocessor 與 result assembler 保持既有 metadata；GpuRuntime 保留 façade 並抽出 ABI bindings、capability、plan descriptor/cache、handle lifecycle；AOIPipeline 抽出 recipe/runtime preparation、tile inspection 與 result assembly。同步擴充 CUDA preflight 的 Python bridge source manifest與 4 項 OOP boundary contracts。完整 204 tests、compileall、CUDA preflight、GUI offscreen smoke、CPU CLI synthetic NG smoke（9 tiles、12 defects）與 `git diff --check` 均通過；未變更 CUDA header/source/DLL，故本次未重編 DLL 或新增 RTX runtime 驗收結論。
 - [x] 2026-07-30：完成 RTX 3090 CUDA blocker 修復與本機實機驗收。GitHub artifact/repository 工具已改為 repo-local manifest 與受控發布；BGR→Gray 採 OpenCV 15-bit fixed-point 係數，Gaussian 3–127 採 OpenCV 8-bit bit-exact kernel、reflect101 與兩階段 fixed-point rounding。以 CUDA 13.3、MSVC 19.51、`sm_86` 重編 DLL/LIB/EXE，C++ smoke 確認 RTX 3090 compute capability 8.6、ABI/plan/DAG/resident ROI/batch 全通過；正式 validator 三次均以零失敗完成全部 correctness、4K benchmark、crossover、morphology profile 與 10/100/1000 stress，1000 checkpoint 的 allocation count 固定 25、reserved bytes 固定 222,435,236、free VRAM 不變。五份 production recipes 以合成影像執行 CPU/GPU pipeline 結果完全一致；完整 unit tests、compileall、preflight 與 diff check 通過。
 - [x] 2026-07-24：YOLOX 已接入既有 RTX 3090 workflow：先將 CPU 版 ONNX Runtime 換成 `onnxruntime-gpu==1.27.0`，執行 M3 CPU/CUDA raw/NMS 等價與 CUDA warm-up 5＋1000 次 stability，並接受可選 `yolox_acceptance_manifest` 產生 CPU/CUDA production 指標；所有 JSON 納入 artifact。最新 RTX job `30037233901` 仍因 self-hosted runner 離線而 queued，heartbeat `30041558647` 失敗，故硬體項目保持未勾選。

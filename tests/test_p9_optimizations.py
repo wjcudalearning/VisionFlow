@@ -14,7 +14,7 @@ import core.recipe_manager as recipe_manager
 from core.batch_processor import BatchInspectionProcessor
 from core.pipeline import AOIPipeline
 from core.recipe_manager import RecipeManager
-from core.reporter import Reporter
+from core.report_artifacts import ReportImageEncoder
 from core.result_types import ExecutionBlock, GpuExecution, InspectionResult, InspectionSummary, required_keys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -143,15 +143,15 @@ class WorkerAndGcPolicyTests(unittest.TestCase):
 
 class ReporterParameterTests(unittest.TestCase):
     def test_png_compression_clamps_and_invalid_uses_default(self):
-        self.assertEqual(Reporter._resolve_png_params({}), [])
-        self.assertEqual(Reporter._resolve_png_params({"png_compression": 42})[1], 9)
-        self.assertEqual(Reporter._resolve_png_params({"png_compression": "bad"}), [])
+        self.assertEqual(ReportImageEncoder.resolve_png_params({}), [])
+        self.assertEqual(ReportImageEncoder.resolve_png_params({"png_compression": 42})[1], 9)
+        self.assertEqual(ReportImageEncoder.resolve_png_params({"png_compression": "bad"}), [])
 
     def test_overlay_parameters_clamp_and_invalid_use_defaults(self):
-        self.assertEqual(Reporter._resolve_overlay_params({}), ("png", "png", 90, None))
-        self.assertEqual(Reporter._resolve_overlay_params({"overlay_format": "jpeg"})[:2], ("jpg", "jpg"))
-        self.assertEqual(Reporter._resolve_overlay_params({"overlay_jpeg_quality": 200})[2], 100)
-        self.assertEqual(Reporter._resolve_overlay_params({"overlay_jpeg_quality": "bad"})[2], 90)
+        self.assertEqual(ReportImageEncoder.resolve_overlay_params({}), ("png", "png", 90, None))
+        self.assertEqual(ReportImageEncoder.resolve_overlay_params({"overlay_format": "jpeg"})[:2], ("jpg", "jpg"))
+        self.assertEqual(ReportImageEncoder.resolve_overlay_params({"overlay_jpeg_quality": 200})[2], 100)
+        self.assertEqual(ReportImageEncoder.resolve_overlay_params({"overlay_jpeg_quality": "bad"})[2], 90)
 
 
 class PipelineOutputTests(unittest.TestCase):

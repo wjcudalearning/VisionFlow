@@ -128,6 +128,9 @@ class DetectorManager:
     def ai_available_providers(self) -> tuple[str, ...]:
         return self._ai_manager().available_providers()
 
+    def ai_performance_stats(self) -> dict:
+        return self._ai_manager().performance_stats()
+
     def set_yolox_model_directory(self, directory: Path) -> YoloXModelRegistry:
         registry = YoloXModelRegistry(Path(directory))
         model_ids = registry.model_ids()

@@ -6,10 +6,14 @@ from pathlib import Path
 
 import numpy as np
 
+from core.detector_manager import DetectorManager
 from core.gpu_runtime_components import GpuLibraryBindings, GpuResourceRegistry
-from core.report_writers import ReportCoordinator, ReportWriteContext
+from core.report_artifacts import ReportArtifactService
+from core.report_writers import ReportCoordinator, ReportPaths, ReportWriteContext
 from detectors.detector_900_domain import Candidate, PairGeometry
 from gui.designer_model import DesignerRecipeMapper, RecipeDraft
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class _Writer:
@@ -31,20 +35,86 @@ class _Measure:
         return None
 
 
-class _Reporter:
-    def __init__(self):
-        self.output_config = {"save_second": False}
-
+class _Profiler:
     @staticmethod
-    def _measure(_name):
+    def measure(_name):
         return _Measure()
+
+
+class _AiManager:
+    @staticmethod
+    def performance_stats() -> dict:
+        return {"sessions": 2}
 
 
 class OopBoundaryContractTests(unittest.TestCase):
     def test_report_coordinator_preserves_strategy_order_and_enablement(self):
-        coordinator = ReportCoordinator((_Writer("first"), _Writer("second"), _Writer("third")))
-        context = ReportWriteContext(_Reporter(), np.zeros((1, 1), dtype=np.uint8), {}, "base")
-        self.assertEqual(coordinator.write(context), {"first": "first", "third": "third"})
+        coordinator = ReportCoordinator(
+            (_Writer("first"), _Writer("second"), _Writer("third"))
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            context = ReportWriteContext(
+                image=np.zeros((1, 1), dtype=np.uint8),
+                result={},
+                base_name="base",
+                output_config={"save_second": False},
+                paths=ReportPaths.from_output_dir(Path(directory)),
+                artifacts=ReportArtifactService.from_config({}),
+                profiler=_Profiler(),
+            )
+            self.assertEqual(coordinator.write(context), {"first": "first", "third": "third"})
+
+    def test_pipeline_and_report_writers_only_use_public_collaborator_apis(self):
+        pipeline_source = "\n".join(
+            (ROOT / path).read_text(encoding="utf-8")
+            for path in ("core/pipeline.py", "core/pipeline_stages.py")
+        )
+        self.assertNotIn("._ai_manager(", pipeline_source)
+        self.assertNotIn("._ai_execution", pipeline_source)
+
+        writer_source = (ROOT / "core/report_writers.py").read_text(encoding="utf-8")
+        self.assertNotIn("context.reporter", writer_source)
+        self.assertNotIn("context.artifacts._", writer_source)
+
+    def test_migrated_detector_and_renderer_dead_methods_stay_removed(self):
+        detector_source = (ROOT / "detectors/detector_900.py").read_text(
+            encoding="utf-8"
+        )
+        reporter_source = (ROOT / "core/reporter.py").read_text(encoding="utf-8")
+        for method in (
+            "_collect_candidates",
+            "_filter_candidates",
+            "_rejected_candidates",
+            "_passes_size",
+            "_size_reject_reason",
+            "_find_valid_pair",
+            "_edge_gaps",
+            "_failure_reason",
+            "_failure_bbox",
+            "_debug_pair",
+            "_largest_candidate",
+            "_offset_candidate",
+            "_offset_candidates",
+            "_bbox_area",
+            "_contour_mode",
+            "_odd_at_least",
+        ):
+            self.assertNotIn(f"def {method}(", detector_source)
+        for method in (
+            "_draw_detector_900_ng_tile_debug",
+            "_draw_900_candidate_group",
+            "_draw_900_edge_gaps",
+            "_detector_900_debug_lines",
+            "_draw_text_panel",
+            "_draw_label",
+            "_clipped_local_bbox",
+            "_fmt_num",
+        ):
+            self.assertNotIn(f"def {method}(", reporter_source)
+
+    def test_detector_manager_exposes_ai_metrics_facade(self):
+        manager = DetectorManager(ai_session_manager=_AiManager())
+        self.assertEqual(manager.ai_performance_stats(), {"sessions": 2})
 
     def test_designer_mapper_builds_stable_recipe_schema_without_qt(self):
         recipe = DesignerRecipeMapper.build(

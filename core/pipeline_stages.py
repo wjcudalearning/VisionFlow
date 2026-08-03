@@ -140,7 +140,7 @@ class InspectionResultAssembler:
             "outputs": {},
             "duration_sec": round(time.perf_counter() - started, 3),
             "execution": {
-                "ai": detector_manager._ai_manager().performance_stats(),
+                "ai": detector_manager.ai_performance_stats(),
                 "gpu": {
                     "mode": gpu_mode,
                     "resident_image": {
@@ -163,7 +163,7 @@ class InspectionResultAssembler:
                                 "cuda_dll" if detector.gpu_active else "cpu",
                             ),
                             "device_name": (
-                                (getattr(detector, "_ai_execution", {}).get("device", "") or gpu_runtime.device_name)
+                                (getattr(detector, "device_name", "") or gpu_runtime.device_name)
                                 if detector.gpu_active
                                 else ""
                             ),
