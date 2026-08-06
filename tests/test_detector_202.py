@@ -102,8 +102,14 @@ class _DeviceRoi:
 class Detector202ContractTests(unittest.TestCase):
     def test_defaults_registration_and_recipe_schema_match_requested_contract(self):
         expected = {
+            "center_mask_enabled": True,
+            "center_mask_use_image_center": True,
+            "center_mask_x": 0,
+            "center_mask_y": 0,
             "center_mask_width": 100,
             "center_mask_height": 630,
+            "edge_mask_enabled": True,
+            "edge_inset_all": 0,
             "edge_inset_left": 15,
             "edge_inset_right": 26,
             "edge_inset_top": 50,
@@ -118,6 +124,7 @@ class Detector202ContractTests(unittest.TestCase):
             "max_area": 1000.0,
             "approx_epsilon_ratio": 0.02,
             "min_vertices": 3,
+            "max_vertices": 12,
             "convex_only": True,
         }
         manager = DetectorManager()
@@ -153,8 +160,8 @@ class Detector202ContractTests(unittest.TestCase):
                 "edge_inset_right": 3,
                 "edge_inset_top": 1,
                 "edge_inset_bottom": 2,
-                "center_mask_width": 4,
-                "center_mask_height": 4,
+                "center_mask_width": 2,
+                "center_mask_height": 2,
             }
         )
         binary = np.full((10, 12), 255, dtype=np.uint8)
@@ -166,6 +173,40 @@ class Detector202ContractTests(unittest.TestCase):
         expected[3:7, 4:8] = 0
         np.testing.assert_array_equal(actual, expected)
         np.testing.assert_array_equal(binary, np.full((10, 12), 255, np.uint8))
+
+    def test_common_edge_inset_custom_center_and_enable_flags_match_tool(self):
+        binary = np.full((10, 12), 255, dtype=np.uint8)
+        detector = Detector202(
+            params={
+                "center_mask_enabled": True,
+                "center_mask_use_image_center": False,
+                "center_mask_x": 3,
+                "center_mask_y": 4,
+                "center_mask_width": 2,
+                "center_mask_height": 3,
+                "edge_mask_enabled": True,
+                "edge_inset_all": 2,
+                "edge_inset_left": 1,
+                "edge_inset_right": 3,
+                "edge_inset_top": 0,
+                "edge_inset_bottom": 1,
+            }
+        )
+
+        actual = detector._apply_exclusion_masks(binary)
+
+        expected = binary.copy()
+        expected[1:7, 1:5] = 0
+        expected[:2, :] = 0
+        expected[-2:, :] = 0
+        expected[:, :2] = 0
+        expected[:, -3:] = 0
+        np.testing.assert_array_equal(actual, expected)
+
+        disabled = Detector202(
+            params={"center_mask_enabled": False, "edge_mask_enabled": False}
+        )._apply_exclusion_masks(binary)
+        np.testing.assert_array_equal(disabled, binary)
 
     def test_oversized_masks_are_clipped_without_invalid_slices(self):
         detector = Detector202(
@@ -188,8 +229,8 @@ class Detector202PreprocessTests(unittest.TestCase):
     @staticmethod
     def _params():
         return {
-            "center_mask_width": 8,
-            "center_mask_height": 14,
+            "center_mask_width": 4,
+            "center_mask_height": 7,
             "edge_inset_left": 2,
             "edge_inset_right": 3,
             "edge_inset_top": 4,
@@ -213,16 +254,20 @@ class Detector202PreprocessTests(unittest.TestCase):
             5,
             1.5,
         )
-        height, width = binary.shape
-        masked = np.zeros_like(binary)
-        masked[4 : height - 5, 2 : width - 3] = binary[
-            4 : height - 5, 2 : width - 3
-        ]
-        center_x = (width - 8) // 2
-        center_y = (height - 14) // 2
-        masked[center_y : center_y + 14, center_x : center_x + 8] = 0
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        return cv2.morphologyEx(masked, cv2.MORPH_OPEN, kernel, iterations=2)
+        morphed = cv2.morphologyEx(
+            binary, cv2.MORPH_OPEN, kernel, iterations=2
+        )
+        height, width = binary.shape
+        masked = morphed.copy()
+        center_x = width // 2
+        center_y = height // 2
+        masked[center_y - 7 : center_y + 7, center_x - 4 : center_x + 4] = 0
+        masked[:4, :] = 0
+        masked[height - 5 :, :] = 0
+        masked[:, :2] = 0
+        masked[:, width - 3 :] = 0
+        return masked
 
     def test_shared_plans_match_direct_opencv_and_cache_by_parameters(self):
         image = np.random.default_rng(202).integers(
@@ -236,17 +281,17 @@ class Detector202PreprocessTests(unittest.TestCase):
             actual, self._opencv_reference(image, self._params())
         )
         self.assertEqual(detector.last_preprocess_capability["route"], "cpu")
-        self.assertEqual(detector.preprocess_plan_cache_size, 2)
+        self.assertEqual(detector.preprocess_plan_cache_size, 1)
         detector._make_binary(image.copy())
-        self.assertEqual(detector.preprocess_plan_cache_size, 2)
+        self.assertEqual(detector.preprocess_plan_cache_size, 1)
         detector.params["adaptive_c"] = 2.5
         detector._make_binary(image)
-        self.assertEqual(detector.preprocess_plan_cache_size, 3)
+        self.assertEqual(detector.preprocess_plan_cache_size, 2)
         detector.params["morph_iterations"] = 3
         detector._make_binary(image)
-        self.assertEqual(detector.preprocess_plan_cache_size, 4)
+        self.assertEqual(detector.preprocess_plan_cache_size, 3)
 
-    def test_native_plan_runs_both_shared_preprocess_sections(self):
+    def test_native_plan_runs_combined_shared_preprocess_before_mask(self):
         image = np.random.default_rng(203).integers(
             0, 256, size=(54, 68, 3), dtype=np.uint8
         )
@@ -258,15 +303,15 @@ class Detector202PreprocessTests(unittest.TestCase):
             params=params, use_gpu=True, gpu_runtime=runtime
         ).run(image)
 
-        self.assertEqual(runtime.calls, 2)
-        self.assertEqual(runtime.device_rois, [None, None])
+        self.assertEqual(runtime.calls, 1)
+        self.assertEqual(runtime.device_rois, [None])
         self.assertEqual(actual["defects"], expected["defects"])
         self.assertEqual(actual["pass"], expected["pass"])
         self.assertEqual(
             actual["execution"]["preprocess_capability"]["route"], "native_plan"
         )
 
-    def test_resident_source_is_used_only_before_cpu_exclusion_mask(self):
+    def test_resident_source_runs_full_preprocess_before_cpu_exclusion_mask(self):
         image = np.random.default_rng(206).integers(
             0, 256, size=(60, 74, 3), dtype=np.uint8
         )
@@ -279,7 +324,34 @@ class Detector202PreprocessTests(unittest.TestCase):
 
         self.assertEqual(device_roi.calls, [(0, 0, 74, 60)])
         self.assertIs(runtime.device_rois[0], device_roi.token)
-        self.assertIsNone(runtime.device_rois[1])
+
+    def test_exclusion_is_applied_after_morphology_at_crossing_boundary(self):
+        detector = Detector202(
+            params={
+                "center_mask_width": 10,
+                "center_mask_height": 30,
+                "edge_mask_enabled": False,
+                "morph_kernel": 3,
+                "morph_iterations": 6,
+            }
+        )
+        morphed = np.zeros((80, 80), dtype=np.uint8)
+        cv2.rectangle(morphed, (24, 20), (39, 60), 255, -1)
+        captured_operations = []
+
+        def execute(_image, plan, **_kwargs):
+            captured_operations.extend(type(item).__name__ for item in plan.operations)
+            return morphed.copy()
+
+        with patch.object(detector, "execute_preprocess_plan", side_effect=execute):
+            actual = detector._make_binary(np.zeros((80, 80, 3), np.uint8))
+
+        expected = morphed.copy()
+        expected[10:70, 30:50] = 0
+        np.testing.assert_array_equal(actual, expected)
+        self.assertEqual(
+            captured_operations, ["Gray", "AdaptiveMean", "Morphology"]
+        )
 
     def test_legacy_primitives_preserve_cpu_result(self):
         image = np.random.default_rng(204).integers(
@@ -331,12 +403,8 @@ class Detector202GeometryTests(unittest.TestCase):
     @staticmethod
     def _detector(**params):
         defaults = {
-            "center_mask_width": 0,
-            "center_mask_height": 0,
-            "edge_inset_left": 0,
-            "edge_inset_right": 0,
-            "edge_inset_top": 0,
-            "edge_inset_bottom": 0,
+            "center_mask_enabled": False,
+            "edge_mask_enabled": False,
         }
         defaults.update(params)
         return Detector202(params=defaults)
@@ -404,7 +472,36 @@ class Detector202GeometryTests(unittest.TestCase):
             self.assertTrue(metadata["is_convex"])
             self.assertEqual(metadata["approx_epsilon_ratio"], 0.02)
             self.assertEqual(metadata["min_vertices"], 3)
+            self.assertEqual(metadata["max_vertices"], 12)
             self.assertEqual(defect["confidence"], 1.0)
+
+    def test_polygon_above_maximum_vertex_count_is_rejected(self):
+        angles = np.linspace(0, 2 * np.pi, 13, endpoint=False)
+        points = np.stack(
+            [40 + 15 * np.cos(angles), 40 + 15 * np.sin(angles)], axis=1
+        )
+        contour = np.rint(points).astype(np.int32).reshape(-1, 1, 2)
+
+        rejected = self._detector(
+            approx_epsilon_ratio=0.0, max_vertices=12
+        )
+        accepted = self._detector(
+            approx_epsilon_ratio=0.0, max_vertices=13
+        )
+        with patch.object(
+            rejected, "_make_binary", return_value=np.zeros((80, 80), np.uint8)
+        ), patch(
+            "detectors.detector_202.cv2.findContours",
+            return_value=([contour], None),
+        ):
+            self.assertEqual(rejected.detect(np.zeros((80, 80), np.uint8)), [])
+        with patch.object(
+            accepted, "_make_binary", return_value=np.zeros((80, 80), np.uint8)
+        ), patch(
+            "detectors.detector_202.cv2.findContours",
+            return_value=([contour], None),
+        ):
+            self.assertEqual(len(accepted.detect(np.zeros((80, 80), np.uint8))), 1)
 
 
 if __name__ == "__main__":

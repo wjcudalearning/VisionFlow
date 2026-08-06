@@ -112,7 +112,7 @@
 - [x] 401-1 遷移到 cached 共用 plan：Gray → Resize(area) → Gaussian → AdaptiveMean → Morphology；CUDA 無法保持 area 語意時整個 detector CPU fallback。
 - [x] 401 遷移到 cached 共用 plan，保留 BGR Gaussian → Morphology → Gray → AdaptiveMean、threshold 與 contour 語意。
 - [x] 401-2 preprocessing 已遷移到共用 plan，並保留 fused/legacy/CPU 路徑。
-- [x] 新增 Detector 202：中心／四邊屏蔽、Adaptive Mean、Morphology Open、LIST contours 與凸多邊形面積／頂點／2% epsilon 篩選均採 cached 共用 plan 與 CPU reference；抓到即 NG。
+- [x] Detector 202 依調參小工具對齊：中心 X/Y 採由中心往兩側延伸的半徑語意，Adaptive Mean → Morphology Open 共用單一 cached plan，完成後才套中心／四邊屏蔽再找 LIST contours；共同內縮、屏蔽開關、自訂中心及頂點上限皆與小工具一致，抓到即 NG。
 - [x] 900 遷移成 cached CPU DAG plan，共用一次 gray 產生 outer global 與 inner adaptive masks。
 - [x] 900 DAG 接上 CUDA/native executor，共用 device gray 並只下載必要 masks。
 - [x] 401/401-1/401-2 的 `findContours` 與少量幾何分析暫留 CPU，只下載 binary mask。
@@ -351,6 +351,7 @@
 
 ## 完成紀錄
 
+- [x] 2026-08-06：修正 Detector 202 與排除屏蔽調參小工具的語意差異；中心 X=100／Y=630 現為半徑，實際屏蔽 200×1260，處理順序改為 Adaptive Mean → Open → 中心／四邊屏蔽 → LIST contours，新增共同內縮、屏蔽開關、自訂中心及最多 12 頂點。Gray／Adaptive Mean／Open 合併為單一共用 plan，保留 CPU correctness、CUDA native／primitive routing 與 full-detector fallback；三種合成影像逐像素對照小工具皆為 0 差異，完整 226 tests、compileall、CUDA source preflight、GUI offscreen smoke、Detector 202 CLI 合成 NG（1 筆缺陷，預期 exit 2）及 `git diff --check` 均通過。未修改 CUDA source／header／ABI，因此不需重編 DLL。
 - [x] 2026-08-06：準備 VisionFlow AOI v1.3.1 CUDA-enabled Windows x64 發行；GUI Pipeline 版本同步為 1.3.1，發行內容加入單張／批次分析完成及監控 Stop 後自動產生 `csv/summary.csv`。發行包只收錄針對同一 release commit 以 CUDA 13.3／`sm_86` 重編並在 RTX 3090 驗證的 `gpu/visionflow_cuda.dll`，不沿用 v1.3.0 舊二進位檔。
 - [x] 2026-08-06：新增逐圖缺陷 CSV 自動彙總；單張與批次分析完成後，以及監控模式按下 Stop、工作執行緒停止後，會將同一執行目錄 `csv/` 內的 CSV 合併為 UTF-8 BOM `summary.csv`。合併會排除舊 summary、採欄位聯集並原子覆寫，避免重複累加或留下半寫入檔案。完整 223 tests、compileall、CUDA source preflight、GUI offscreen smoke、實際 CLI 合成 NG（5 筆缺陷／summary 5 列，預期 exit 2）與 `git diff --check` 均通過。
 - [x] 2026-08-05：彙整 2026-07-30 至 2026-08-05 的 12 筆提交、69 個異動檔案、RTX 3090 CUDA 修復與實機驗收、VisionFlow AOI v1.2.0／Utility Tools v1.0.0 發布，以及 P10 OOP 責任邊界重構，新增 `WEEKLY_UPDATE_2026-07-30_to_2026-08-05.md` 流水帳報告；週報建立前 `main` 已與 `origin/main` 同步且工作目錄乾淨。
