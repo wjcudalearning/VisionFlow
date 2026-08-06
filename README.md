@@ -547,6 +547,7 @@ outputs/
 |-- ng_tiles/
 |-- debug/        # 僅在 output.save_debug_images 啟用時產生
 |-- csv/
+|   `-- summary.csv  # 單次／批次完成或監控停止後合併
 |-- matrix_csv/
 |-- json/
 `-- logs/
@@ -574,6 +575,8 @@ outputs/
 ### 缺陷 CSV
 
 包含影像、配方、機台、產品、最終結果、Detector、缺陷類型、全域／區域 bbox、Tile ID、分數與面積。檔案使用帶 BOM 的 UTF-8（`utf-8-sig`），方便 Excel 直接開啟。
+
+分析完成後，系統會將同一輸出目錄 `csv/` 內的逐圖 CSV 合併為 `csv/summary.csv`；批次模式在全部影像完成後建立，監控模式則在按下 Stop 且處理執行緒停止後建立。重新產生時會排除舊的 `summary.csv` 再覆寫，避免重複累加。
 
 Recipe Designer 的「精度 (µm/px)」會儲存在 `output.pixel_size_um_per_px`。填入 `n` 時，CSV 的 `area` 會以 `area_px × n²` 換算為 `um^2`；留空或舊 recipe 未含此欄位時維持像素面積。`area_unit` 欄會分別標示 `um^2` 或 `px^2`。Detector 的面積篩選參數仍使用 px²，因此不影響 PASS／NG 判定。
 

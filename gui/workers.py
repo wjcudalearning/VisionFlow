@@ -8,10 +8,11 @@ from PySide6.QtGui import QImage
 import cv2
 import numpy as np
 
-from core.image_loader import ImageLoader
+from core.batch_processor import BatchInspectionProcessor
+from core.csv_summary import CsvSummaryExporter
 from core.gpu_runtime import GpuRuntime, GpuRuntimeError
 from core.gpu_session import GpuExecutionSessionCache
-from core.batch_processor import BatchInspectionProcessor
+from core.image_loader import ImageLoader
 from core.logging_system import LogMixin
 from core.monitor_processor import FolderMonitorProcessor
 from core.performance import PipelineProfiler
@@ -121,6 +122,7 @@ class InspectionWorker(QObject, LogMixin):
                 gpu_session=gpu_session,
             )
             result = pipeline.run(self.image_path)
+            CsvSummaryExporter.finalize_result(self.output_dir, result)
         except Exception as exc:
             self.logger.exception("GUI inspection worker failed: image=%s recipe=%s", self.image_path, self.recipe_path)
             self.failed.emit(str(exc))

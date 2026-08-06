@@ -12,8 +12,9 @@ from typing import Callable
 
 import cv2
 
-from core.image_loader import SUPPORTED_EXTENSIONS
+from core.csv_summary import CsvSummaryExporter
 from core.gpu_session import GpuExecutionSession
+from core.image_loader import SUPPORTED_EXTENSIONS
 from core.logging_system import LogMixin
 from core.pipeline import AOIPipeline
 from core.result_compactor import compact_inspection_result
@@ -156,6 +157,9 @@ class BatchInspectionProcessor(LogMixin):
 
         results = [results_by_index[index] for index in range(total)]
         summary = self._build_summary(started_at, batch_output_dir, results)
+        csv_summary_path = CsvSummaryExporter.write_summary(batch_output_dir / "csv")
+        if csv_summary_path is not None:
+            summary["csv_summary"] = str(csv_summary_path)
         self.logger.info("Batch inspection completed: summary=%s", summary["summary"])
         return summary
 

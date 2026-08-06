@@ -8,8 +8,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from core.image_loader import SUPPORTED_EXTENSIONS
+from core.csv_summary import CsvSummaryExporter
 from core.gpu_session import GpuExecutionSession
+from core.image_loader import SUPPORTED_EXTENSIONS
 from core.logging_system import LogMixin
 from core.pipeline import AOIPipeline
 from core.result_compactor import compact_inspection_result
@@ -124,6 +125,9 @@ class FolderMonitorProcessor(LogMixin):
             "output_dir": str(monitor_output_dir),
             "processed": self._processed_count,
         }
+        csv_summary_path = CsvSummaryExporter.write_summary(monitor_output_dir / "csv")
+        if csv_summary_path is not None:
+            summary["csv_summary"] = str(csv_summary_path)
         self.logger.info("Folder monitor stopped: summary=%s", summary)
         return summary
 

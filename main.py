@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
+from core.csv_summary import CsvSummaryExporter
 from core.logging_system import configure_logging, get_logger
 from core.pipeline import AOIPipeline
 
@@ -43,6 +44,7 @@ def main() -> int:
         debug=args.debug,
     )
     result = pipeline.run(Path(args.image))
+    CsvSummaryExporter.finalize_result(Path(args.output), result)
 
     summary = {
         "image_name": result["image_name"],
