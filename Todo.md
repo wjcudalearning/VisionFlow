@@ -351,6 +351,7 @@
 
 ## 完成紀錄
 
+- [x] 2026-08-06：準備 VisionFlow AOI v1.3.1 CUDA-enabled Windows x64 發行；GUI Pipeline 版本同步為 1.3.1，發行內容加入單張／批次分析完成及監控 Stop 後自動產生 `csv/summary.csv`。發行包只收錄針對同一 release commit 以 CUDA 13.3／`sm_86` 重編並在 RTX 3090 驗證的 `gpu/visionflow_cuda.dll`，不沿用 v1.3.0 舊二進位檔。
 - [x] 2026-08-06：新增逐圖缺陷 CSV 自動彙總；單張與批次分析完成後，以及監控模式按下 Stop、工作執行緒停止後，會將同一執行目錄 `csv/` 內的 CSV 合併為 UTF-8 BOM `summary.csv`。合併會排除舊 summary、採欄位聯集並原子覆寫，避免重複累加或留下半寫入檔案。完整 223 tests、compileall、CUDA source preflight、GUI offscreen smoke、實際 CLI 合成 NG（5 筆缺陷／summary 5 列，預期 exit 2）與 `git diff --check` 均通過。
 - [x] 2026-08-05：彙整 2026-07-30 至 2026-08-05 的 12 筆提交、69 個異動檔案、RTX 3090 CUDA 修復與實機驗收、VisionFlow AOI v1.2.0／Utility Tools v1.0.0 發布，以及 P10 OOP 責任邊界重構，新增 `WEEKLY_UPDATE_2026-07-30_to_2026-08-05.md` 流水帳報告；週報建立前 `main` 已與 `origin/main` 同步且工作目錄乾淨。
 - [x] 2026-08-03：完成 P10 OOP 收尾。移除 Detector900 的 16 個舊演算法方法與 Reporter 的 Detector900 renderer／格式化死碼；Reporter 縮為 68 行 composition root，輸出行為拆為 image encoder、overlay renderer、NG tile、CSV、Matrix CSV、Debug Image、JSON 七個單一責任協作者，writers 僅依賴明確的 paths/config/profiler/public services。新增 `DetectorManager.ai_performance_stats()` 與 detector `device_name` contract，pipeline 不再跨模組存取 `_ai_manager()`／YOLOX `_ai_execution`；架構測試固定上述邊界與死碼不得回流。完整 207 tests、compileall、CUDA preflight、CPU CLI synthetic NG smoke（9 tiles、12 defects、7 sidecars）與 `git diff --check` 均通過；未變更 CUDA header/source/DLL，故無需重編 DLL 或新增 RTX runtime 驗收結論。
