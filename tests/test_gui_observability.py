@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import cv2
 import numpy as np
 from PySide6.QtGui import QImage
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QGraphicsView
 
 from gui.image_viewer import ImageViewer
 from gui.workers import ImagePreviewWorker
@@ -66,6 +66,42 @@ class GuiDisplayObservabilityTests(unittest.TestCase):
         self.assertIn("QImage worker", viewer.backend_label.toolTip())
         self.assertIn("QPixmap/viewer", viewer.backend_label.toolTip())
         self.assertIn("User wait", viewer.backend_label.toolTip())
+
+    def test_bulk_overlay_replacement_uses_reliable_bounded_repaint(self):
+        image = QImage(640, 480, QImage.Format.Format_RGB888)
+        image.fill(0)
+        viewer = ImageViewer()
+        viewer.resize(900, 640)
+        viewer.show()
+        viewer.set_qimage(image, name="overlay.png")
+        overlays = [
+            {
+                "id": index,
+                "tile_id": f"t{index}",
+                "type": "tile_status",
+                "bbox_global": [index % 600, index % 440, 20, 20],
+                "score": 1.0,
+                "status": "NG",
+                "overlay_role": "tile_status",
+            }
+            for index in range(350)
+        ]
+
+        viewer.set_defects(overlays)
+        self.app.processEvents()
+
+        self.assertEqual(
+            viewer.view.viewportUpdateMode(),
+            QGraphicsView.ViewportUpdateMode.BoundingRectViewportUpdate,
+        )
+        self.assertTrue(viewer.view.updatesEnabled())
+        self.assertEqual(len(viewer._defect_items), 350)
+        self.assertFalse(viewer.grab().isNull())
+
+        viewer.set_defects(overlays[:3])
+        self.app.processEvents()
+        self.assertEqual(len(viewer._defect_items), 3)
+        self.assertTrue(viewer.view.updatesEnabled())
 
 
 if __name__ == "__main__":

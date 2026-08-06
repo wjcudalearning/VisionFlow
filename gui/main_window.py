@@ -459,6 +459,8 @@ class MainWindow(QMainWindow, LogMixin):
         self.rail.set_active(screen_id)
         self.topbar.set_screen(screen_id)
         QTimer.singleShot(0, lambda active_screen=screen_id: self._apply_restored_splitter(active_screen))
+        if screen_id == "results":
+            QTimer.singleShot(0, self.results_screen.ensure_populated)
 
     def _apply_restored_splitter(self, screen_id: str) -> None:
         if screen_id == "monitor" and self._restored_monitor_splitter_sizes is not None:
@@ -1016,7 +1018,12 @@ class MainWindow(QMainWindow, LogMixin):
             duration = _format_duration(result.get("duration_sec"))
 
         self.run_screen.run_control_panel.show_result(result, duration)
-        self.results_screen.set_result(result, self._current_image, duration)
+        self.results_screen.set_result(
+            result,
+            self._current_image,
+            duration,
+            defer_population=True,
+        )
 
         final = result.get("final_result", "-")
         summary = result.get("summary", {})

@@ -350,6 +350,7 @@
 - [ ] 加速不得犧牲 GUI 回應、打包啟動、結果追溯、錯誤訊息或 CPU fallback。
 
 ## 完成紀錄
+- [x] 2026-08-06：修正單張檢測完成後 GUI 偶發向下延伸／殘影變形：`ImageViewer` 大量替換 overlay 時暫停逐項更新，改用 bounding-rect viewport update 並主動 invalidate／重繪；隱藏的 Results 頁延後到實際開啟時才建立內容，NG 縮圖改為每批 24 張。350／1000 個 overlay 的檢測完成 callback 由原先連同結果頁同步建構約 0.58／2.00 秒，降至約 0.033／0.076 秒；新增大量 overlay、延後結果頁及分批縮圖回歸測試，完整 228 tests、compileall、CUDA source preflight、GUI offscreen smoke 與 `git diff --check` 通過，未修改 CUDA source／header／ABI／DLL。
 
 - [x] 2026-08-06：修正 Detector 202 與排除屏蔽調參小工具的語意差異；中心 X=100／Y=630 現為半徑，實際屏蔽 200×1260，處理順序改為 Adaptive Mean → Open → 中心／四邊屏蔽 → LIST contours，新增共同內縮、屏蔽開關、自訂中心及最多 12 頂點。Gray／Adaptive Mean／Open 合併為單一共用 plan，保留 CPU correctness、CUDA native／primitive routing 與 full-detector fallback；三種合成影像逐像素對照小工具皆為 0 差異，完整 226 tests、compileall、CUDA source preflight、GUI offscreen smoke、Detector 202 CLI 合成 NG（1 筆缺陷，預期 exit 2）及 `git diff --check` 均通過。未修改 CUDA source／header／ABI，因此不需重編 DLL。
 - [x] 2026-08-06：準備 VisionFlow AOI v1.3.1 CUDA-enabled Windows x64 發行；GUI Pipeline 版本同步為 1.3.1，發行內容加入單張／批次分析完成及監控 Stop 後自動產生 `csv/summary.csv`。發行包只收錄針對同一 release commit 以 CUDA 13.3／`sm_86` 重編並在 RTX 3090 驗證的 `gpu/visionflow_cuda.dll`，不沿用 v1.3.0 舊二進位檔。

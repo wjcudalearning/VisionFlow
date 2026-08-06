@@ -161,6 +161,13 @@ class GuiWorkflowTests(unittest.TestCase):
 
         self.assertEqual(result["duration_sec"], 1.4)
         self.assertEqual(result["execution"]["performance"]["gui_user_wait_sec"], 3.0)
+        self.assertTrue(window.results_screen._content_dirty)
+        self.assertEqual(window.results_screen.defects_table.rowCount(), 0)
+
+        window.mode = "eng"
+        window._set_screen("results")
+        self.app.processEvents()
+        self.assertFalse(window.results_screen._content_dirty)
         window._inspection_gpu_sessions.close()
         window.deleteLater()
 
@@ -218,6 +225,50 @@ class GuiWorkflowTests(unittest.TestCase):
 
         self.assertEqual(selected, [1, 2])
         self.assertEqual(focused, [2])
+
+    def test_results_can_defer_hidden_content_and_batch_thumbnails(self):
+        screen = ResultsScreen()
+        image = QImage(640, 480, QImage.Format.Format_RGB888)
+        image.fill(0)
+        defects = [
+            {
+                "type": "scratch",
+                "bbox_global": [index % 600, index % 440, 12, 12],
+                "area": 144,
+                "confidence": 1.0,
+            }
+            for index in range(350)
+        ]
+        result = {
+            "final_result": "NG",
+            "summary": {"tile_count": 1, "ng_count": 1, "defect_count": 350},
+            "tiles": [
+                {
+                    "tile": {"tile_id": "T1"},
+                    "detectors": [
+                        {"detector_id": "scratch", "score": 1.0, "defects": defects}
+                    ],
+                }
+            ],
+            "outputs": {},
+        }
+
+        screen.set_result(result, image, defer_population=True)
+
+        self.assertTrue(screen._content_dirty)
+        self.assertEqual(screen.defects_table.rowCount(), 0)
+        self.assertEqual(len(screen._thumb_widgets), 0)
+
+        screen.ensure_populated()
+
+        self.assertFalse(screen._content_dirty)
+        self.assertEqual(screen.defects_table.rowCount(), 350)
+        self.assertEqual(len(screen._thumb_widgets), 24)
+        self.assertEqual(len(screen._pending_thumbnail_defects), 326)
+
+        while screen._pending_thumbnail_defects:
+            self.app.processEvents()
+        self.assertEqual(len(screen._thumb_widgets), 350)
 
     def test_designer_tracks_dirty_and_invalid_states(self):
         screen = DesignerScreen()

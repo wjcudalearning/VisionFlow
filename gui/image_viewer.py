@@ -113,6 +113,13 @@ class _GraphicsView(QGraphicsView):
         super().__init__(scene, parent)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        # Overlay results are replaced in large batches.  Bounding-rect updates
+        # avoid the stale strips that MinimalViewportUpdate can leave behind on
+        # Windows while remaining cheaper than repainting the whole view for
+        # every individual item change.
+        self.setViewportUpdateMode(
+            QGraphicsView.ViewportUpdateMode.BoundingRectViewportUpdate
+        )
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setMouseTracking(True)
         self.setStyleSheet(f"border: none; background: {COLORS['viewer_bg']};")
@@ -378,6 +385,7 @@ class ImageViewer(QWidget):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._position_running_label()
+        self.view.viewport().update()
 
     def _position_running_label(self) -> None:
         if self.running_label.parentWidget() is None:
@@ -392,20 +400,33 @@ class ImageViewer(QWidget):
     # defect overlay
     # ------------------------------------------------------------------
     def set_defects(self, defects: list[dict]) -> None:
-        self._clear_defects()
-        for defect in defects:
-            item = _DefectItem(defect, self._on_defect_clicked)
-            item.setVisible(self._show_overlay)
-            self._scene.addItem(item)
-            self._defect_items[item.defect_id] = item
-        if self._selected_defect_id is not None:
-            self.set_selected_defect(self._selected_defect_id)
+        self.view.setUpdatesEnabled(False)
+        try:
+            self._clear_defects(refresh=False)
+            for defect in defects:
+                item = _DefectItem(defect, self._on_defect_clicked)
+                item.setVisible(self._show_overlay)
+                self._scene.addItem(item)
+                self._defect_items[item.defect_id] = item
+            if self._selected_defect_id is not None:
+                self.set_selected_defect(self._selected_defect_id)
+        finally:
+            self.view.setUpdatesEnabled(True)
+        self.refresh_overlay_view()
 
-    def _clear_defects(self) -> None:
+    def _clear_defects(self, refresh: bool = True) -> None:
         for item in self._defect_items.values():
             self._scene.removeItem(item)
         self._defect_items.clear()
         self._selected_defect_id = None
+        if refresh:
+            self.refresh_overlay_view()
+
+    def refresh_overlay_view(self) -> None:
+        self._scene.invalidate(
+            self._scene.sceneRect(), QGraphicsScene.SceneLayer.AllLayers
+        )
+        self.view.viewport().update()
 
     def set_selected_defect(self, defect_id) -> None:
         self._selected_defect_id = defect_id
@@ -449,12 +470,14 @@ class ImageViewer(QWidget):
         self._apply_overlay_style(show)
         for item in self._defect_items.values():
             item.setVisible(show)
+        self.refresh_overlay_view()
 
     def _on_overlay_toggled(self, checked: bool) -> None:
         self._show_overlay = checked
         self._apply_overlay_style(checked)
         for item in self._defect_items.values():
             item.setVisible(checked)
+        self.refresh_overlay_view()
         self.overlay_toggled.emit(checked)
 
     def _apply_overlay_style(self, checked: bool) -> None:

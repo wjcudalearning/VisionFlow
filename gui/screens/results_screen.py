@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QIcon, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -159,6 +159,7 @@ def _make_thumb_pixmap(image: QImage, defect: dict, size: int = 104) -> QPixmap:
 
 
 _THUMB_SIZE = QSize(104, 104)
+THUMBNAIL_BATCH_SIZE = 24
 
 
 class DefectThumb(QPushButton):
@@ -200,6 +201,9 @@ class ResultsScreen(QWidget):
         self._selected_id: object | None = None
         self._row_index_by_id: dict[object, int] = {}
         self._thumb_widgets: dict[object, DefectThumb] = {}
+        self._content_dirty = False
+        self._thumbnail_generation = 0
+        self._pending_thumbnail_defects: list[dict] = []
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -350,12 +354,23 @@ class ResultsScreen(QWidget):
         return column
 
     # ------------------------------------------------------------------
-    def set_result(self, result: dict | None, image: QImage | None, duration: str = "") -> None:
+    def set_result(
+        self,
+        result: dict | None,
+        image: QImage | None,
+        duration: str = "",
+        *,
+        defer_population: bool = False,
+    ) -> None:
         self._result = result
         self._image = image
         self._selected_id = None
+        self._thumbnail_generation += 1
+        self._pending_thumbnail_defects = []
 
         if result is None:
+            self._content_dirty = False
+            self._defects = []
             self._stack.setCurrentWidget(self._empty_state)
             return
 
@@ -388,10 +403,18 @@ class ResultsScreen(QWidget):
         self._actions_layout.replaceWidget(old_filter, self.filter_segmented)
         old_filter.deleteLater()
 
+        self._content_dirty = True
+        if not defer_population:
+            self.ensure_populated()
+
+    def ensure_populated(self) -> None:
+        if not self._content_dirty:
+            return
         self._populate_table()
         self._populate_thumbnails()
         self._populate_outputs()
         self._update_navigation_state()
+        self._content_dirty = False
 
     def set_selected(self, defect_id: object | None) -> None:
         self._selected_id = defect_id
@@ -500,22 +523,39 @@ class ResultsScreen(QWidget):
         self.defect_selected.emit(new_id)
 
     def _populate_thumbnails(self) -> None:
+        self._thumbnail_generation += 1
+        generation = self._thumbnail_generation
         while self._ng_layout.count():
             item = self._ng_layout.takeAt(0)
             widget = item.widget()
             if widget:
                 widget.deleteLater()
         self._thumb_widgets.clear()
+        self._pending_thumbnail_defects = []
 
         if self._image is None:
             return
 
+        self._pending_thumbnail_defects = list(self._defects)
+        self._populate_thumbnail_batch(generation)
+
+    def _populate_thumbnail_batch(self, generation: int) -> None:
+        if generation != self._thumbnail_generation or self._image is None:
+            return
+        start = len(self._thumb_widgets)
+        batch = self._pending_thumbnail_defects[:THUMBNAIL_BATCH_SIZE]
+        del self._pending_thumbnail_defects[: len(batch)]
         columns = 2
-        for index, defect in enumerate(self._defects):
+        for offset, defect in enumerate(batch):
+            index = start + offset
             thumb = DefectThumb(defect, self._image)
             thumb.clicked.connect(lambda _checked, did=defect["id"]: self.view_requested.emit(did))
             self._ng_layout.addWidget(thumb, index // columns, index % columns)
             self._thumb_widgets[defect["id"]] = thumb
+        if self._pending_thumbnail_defects:
+            QTimer.singleShot(
+                0, lambda active_generation=generation: self._populate_thumbnail_batch(active_generation)
+            )
 
     def _populate_outputs(self) -> None:
         self.outputs_panel.clear_body()
