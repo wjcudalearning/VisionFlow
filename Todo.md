@@ -112,6 +112,7 @@
 - [x] 401-1 遷移到 cached 共用 plan：Gray → Resize(area) → Gaussian → AdaptiveMean → Morphology；CUDA 無法保持 area 語意時整個 detector CPU fallback。
 - [x] 401 遷移到 cached 共用 plan，保留 BGR Gaussian → Morphology → Gray → AdaptiveMean、threshold 與 contour 語意。
 - [x] 401-2 preprocessing 已遷移到共用 plan，並保留 fused/legacy/CPU 路徑。
+- [x] 新增 Detector 202：中心／四邊屏蔽、Adaptive Mean、Morphology Open、LIST contours 與凸多邊形面積／頂點／2% epsilon 篩選均採 cached 共用 plan 與 CPU reference；抓到即 NG。
 - [x] 900 遷移成 cached CPU DAG plan，共用一次 gray 產生 outer global 與 inner adaptive masks。
 - [x] 900 DAG 接上 CUDA/native executor，共用 device gray 並只下載必要 masks。
 - [x] 401/401-1/401-2 的 `findContours` 與少量幾何分析暫留 CPU，只下載 binary mask。
@@ -442,3 +443,4 @@
 - [x] 2026-07-31：修正新 repository 的 GitHub Actions：Windows CI 強制 UTF-8，避免 Pattern Grid 中文輸出在英文 runner 被 `charmap` 誤判為影像失敗；短路徑測試統一比較 resolved path，YOLOX model directory 在寫入環境變數前正規化；Windows compileall 補齊 GUI launcher 與 standalone exporters。同步將 Windows／weekly／RTX workflows 限縮為 `contents: read`、使用 lock-file cache／乾淨 venv，RTX guard 由舊 owner 改為精確的 `wjcudalearning/VisionFlow`，heartbeat 加入 5 分鐘 timeout。四份 workflow 通過 actionlint（自訂 RTX labels 除外），完整 197 tests、compileall、CUDA source preflight、GUI offscreen smoke 與 `git diff --check` 均通過；目前 repository 尚無可用 self-hosted runner，RTX runtime 仍待註冊後執行。
 - [x] 2026-07-31：手動執行 weekly packaging 後確認 windowed PyInstaller EXE 不會可靠更新 PowerShell `$LASTEXITCODE`，改以 `Start-Process -Wait -PassThru` 取得真實 smoke exit code；並依 GitHub Node 20 deprecation 警告，將 checkout／setup-python／upload-artifact／cache／github-script 更新至目前官方 Node 24 majors。
 - [x] 2026-07-31：將 NG Tile 面積分類、Pattern 固定網格切圖、矩陣 CSV 彙總與散點圖匯出四個小工具統一為各自可雙擊 GUI／命令列使用的 PyInstaller one-file EXE；矩陣與散點圖補上獨立 spec／建置腳本，四支工具皆提供版本與非互動 `--smoke-test`。新增具語意版本檢查、拒絕覆寫、CPU-only／無 CUDA／未簽章說明的工具合集 ZIP 流程；四支 packaged GUI smoke exit 0，實際資料驗證完成 NG 複製 1 張、矩陣彙總 1 列、散點圖 1 張與 Pattern 切圖 4 張，完整 200 tests、compileall、CUDA source preflight、主 GUI offscreen smoke、主程式 PyInstaller build／packaged smoke exit 0 及 `git diff --check` 均通過。使用者已明確選定首版工具合集 `utility-tools-v1.0.0`，本提交作為該 Release 的版本來源。
+- [x] 2026-08-06：新增 Detector 202 凸多邊形 NG 檢測；依小圖中心寬 100／高 630 屏蔽及左 15、右 26、上 50、下 20 內縮，使用 Adaptive Mean block 3／C 2、3×3 Morphology Open 6 次、LIST contours，僅接受面積 20～1000、2% epsilon、至少 3 頂點的凸多邊形。已整合 DetectorManager、Recipe Designer 繁中標籤、結果標籤、metadata、cached shared plans、resident ROI 安全路由與 CPU／primitive／native／fallback 測試；完整 218 tests、compileall、CUDA source preflight、GUI offscreen smoke、Detector 202 合成 CLI NG smoke（預期 exit 2）及 `git diff --check` 均通過。

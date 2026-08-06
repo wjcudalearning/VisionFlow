@@ -106,6 +106,7 @@ class BaseDetector:
         image,
         plan: PreprocessPlan,
         device_roi_offset: tuple[int, int] = (0, 0),
+        use_device_roi: bool = True,
     ):
         if self.gpu_active and self._cuda_preprocess_executor is not None:
             report = self._cuda_preprocess_executor.capability_report(plan, image).to_dict()
@@ -120,7 +121,11 @@ class BaseDetector:
             result = self._cuda_preprocess_executor.execute(
                 image,
                 plan,
-                device_roi=self._device_roi_for(image, device_roi_offset),
+                device_roi=(
+                    self._device_roi_for(image, device_roi_offset)
+                    if use_device_roi
+                    else None
+                ),
             )
             self._record_preprocess_result(plan, result)
             return result

@@ -10,7 +10,7 @@ VisionFlow AOI 不只是單一 Detector 範例，而是一套可實際延伸的�
 - PySide6 桌面 GUI。
 - YAML 配方載入、驗證、編輯與儲存。
 - 固定網格、模板定位網格、輪廓及模板比對四種切圖方式。
-- `401`、`401-1`、`401-2`、`900` 四個傳統電腦視覺 Detector，以及第一階段 ONNX Runtime CPU 版 `yolox` Detector。
+- `202`、`401`、`401-1`、`401-2`、`900` 五個傳統電腦視覺 Detector，以及第一階段 ONNX Runtime CPU 版 `yolox` Detector。
 - 單張檢測、批次資料夾檢測及新檔案監控。
 - OP、Engineer、Admin 三種 GUI 操作模式。
 - Overlay、NG 小圖、缺陷 CSV、矩陣 CSV、JSON 與輪替日誌。
@@ -398,6 +398,15 @@ tile:
 ## Detector
 
 所有 Detector 都繼承 `BaseDetector`，並輸出統一格式，包含 Detector ID、PASS／NG、分數、缺陷類型、區域座標、面積及 metadata。如此 Reporter、Aggregator 與 GUI 不需要知道個別演算法細節。
+
+### `202`：凸多邊形檢測
+
+- 檔案：`detectors/detector_202.py`
+- 用途：對小圖套用四邊內縮與中心矩形屏蔽，再以 Adaptive Mean、Morphology Open 及 contour list 找出指定面積內的凸多邊形；抓到任一符合輪廓即為 NG。
+- 預設屏蔽：中心寬 `100`／高 `630`；左 `15`、右 `26`、上 `50`、下 `20`。
+- 預設影像處理：Adaptive Mean block `3`、C `2`；Morphology Open kernel `3`、iterations `6`。
+- 多邊形條件：面積 `20`～`1000` px²、approx epsilon `2%`、至少 `3` 個頂點、只接受凸多邊形。
+- 缺陷類型：`202_convex_polygon_ng`
 
 ### `401`：負極旋轉矩形檢測
 
