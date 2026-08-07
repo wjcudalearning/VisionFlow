@@ -112,7 +112,7 @@
 - [x] 401-1 遷移到 cached 共用 plan：Gray → Resize(area) → Gaussian → AdaptiveMean → Morphology；CUDA 無法保持 area 語意時整個 detector CPU fallback。
 - [x] 401 遷移到 cached 共用 plan，保留 BGR Gaussian → Morphology → Gray → AdaptiveMean、threshold 與 contour 語意。
 - [x] 401-2 preprocessing 已遷移到共用 plan，並保留 fused/legacy/CPU 路徑。
-- [x] Detector 202 依調參小工具對齊：中心 X/Y 採由中心往兩側延伸的半徑語意，Adaptive Mean → Morphology Open 共用單一 cached plan，完成後才套中心／四邊屏蔽再找 LIST contours；共同內縮、屏蔽開關、自訂中心及頂點上限皆與小工具一致，抓到即 NG。
+- [x] Detector 202 依調參小工具對齊：中心 X/Y 採由中心往兩側延伸的半徑語意，Morphology Open → Adaptive Mean 共用單一 cached plan，完成後才套中心／四邊屏蔽再找 LIST contours；共同內縮、屏蔽開關、自訂中心及頂點上限皆與小工具一致，抓到即 NG。
 - [x] 900 遷移成 cached CPU DAG plan，共用一次 gray 產生 outer global 與 inner adaptive masks。
 - [x] 900 DAG 接上 CUDA/native executor，共用 device gray 並只下載必要 masks。
 - [x] 401/401-1/401-2 的 `findContours` 與少量幾何分析暫留 CPU，只下載 binary mask。
@@ -350,6 +350,7 @@
 - [ ] 加速不得犧牲 GUI 回應、打包啟動、結果追溯、錯誤訊息或 CPU fallback。
 
 ## 完成紀錄
+- [x] 2026-08-07：依排除屏蔽調參小工具的實際 recipe 順序修正 Detector 202，前處理改為 Gray → Morphology Open → Adaptive Mean → 中心／四邊屏蔽 → LIST contours；同一 400×1400 合成小圖直接呼叫小工具函式逐像素對照為 0 差異，中心 X/Y 半徑與共同內縮 0、左15／右26／上50／下20 亦完全一致。更新 OpenCV CPU reference、cached plan、native plan、resident ROI、舊 DLL primitives 與完整 detector CPU fallback 回歸；14 項 Detector 202 測試、完整 228 tests、CLI 合成 NG（1 筆缺陷，預期 exit 2）、compileall、CUDA source preflight 與 `git diff --check` 通過。未修改 CUDA source／header／ABI／DLL，依要求未打包。
 - [x] 2026-08-06：修正單張檢測完成後 GUI 偶發向下延伸／殘影變形：`ImageViewer` 大量替換 overlay 時暫停逐項更新，改用 bounding-rect viewport update 並主動 invalidate／重繪；隱藏的 Results 頁延後到實際開啟時才建立內容，NG 縮圖改為每批 24 張。350／1000 個 overlay 的檢測完成 callback 由原先連同結果頁同步建構約 0.58／2.00 秒，降至約 0.033／0.076 秒；新增大量 overlay、延後結果頁及分批縮圖回歸測試，完整 228 tests、compileall、CUDA source preflight、GUI offscreen smoke 與 `git diff --check` 通過，未修改 CUDA source／header／ABI／DLL。
 
 - [x] 2026-08-06：修正 Detector 202 與排除屏蔽調參小工具的語意差異；中心 X=100／Y=630 現為半徑，實際屏蔽 200×1260，處理順序改為 Adaptive Mean → Open → 中心／四邊屏蔽 → LIST contours，新增共同內縮、屏蔽開關、自訂中心及最多 12 頂點。Gray／Adaptive Mean／Open 合併為單一共用 plan，保留 CPU correctness、CUDA native／primitive routing 與 full-detector fallback；三種合成影像逐像素對照小工具皆為 0 差異，完整 226 tests、compileall、CUDA source preflight、GUI offscreen smoke、Detector 202 CLI 合成 NG（1 筆缺陷，預期 exit 2）及 `git diff --check` 均通過。未修改 CUDA source／header／ABI，因此不需重編 DLL。

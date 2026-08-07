@@ -246,20 +246,20 @@ class Detector202PreprocessTests(unittest.TestCase):
     @staticmethod
     def _opencv_reference(image, params):
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        morphed = cv2.morphologyEx(
+            gray, cv2.MORPH_OPEN, kernel, iterations=2
+        )
         binary = cv2.adaptiveThreshold(
-            gray,
+            morphed,
             255,
             cv2.ADAPTIVE_THRESH_MEAN_C,
             cv2.THRESH_BINARY,
             5,
             1.5,
         )
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        morphed = cv2.morphologyEx(
-            binary, cv2.MORPH_OPEN, kernel, iterations=2
-        )
         height, width = binary.shape
-        masked = morphed.copy()
+        masked = binary.copy()
         center_x = width // 2
         center_y = height // 2
         masked[center_y - 7 : center_y + 7, center_x - 4 : center_x + 4] = 0
@@ -280,6 +280,21 @@ class Detector202PreprocessTests(unittest.TestCase):
         np.testing.assert_array_equal(
             actual, self._opencv_reference(image, self._params())
         )
+        old_order = cv2.morphologyEx(
+            cv2.adaptiveThreshold(
+                cv2.cvtColor(image, cv2.COLOR_BGR2GRAY),
+                255,
+                cv2.ADAPTIVE_THRESH_MEAN_C,
+                cv2.THRESH_BINARY,
+                5,
+                1.5,
+            ),
+            cv2.MORPH_OPEN,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
+            iterations=2,
+        )
+        old_order = detector._apply_exclusion_masks(old_order)
+        self.assertGreater(np.count_nonzero(actual != old_order), 0)
         self.assertEqual(detector.last_preprocess_capability["route"], "cpu")
         self.assertEqual(detector.preprocess_plan_cache_size, 1)
         detector._make_binary(image.copy())
@@ -325,7 +340,7 @@ class Detector202PreprocessTests(unittest.TestCase):
         self.assertEqual(device_roi.calls, [(0, 0, 74, 60)])
         self.assertIs(runtime.device_rois[0], device_roi.token)
 
-    def test_exclusion_is_applied_after_morphology_at_crossing_boundary(self):
+    def test_exclusion_is_applied_after_morphology_and_threshold(self):
         detector = Detector202(
             params={
                 "center_mask_width": 10,
@@ -350,7 +365,7 @@ class Detector202PreprocessTests(unittest.TestCase):
         expected[10:70, 30:50] = 0
         np.testing.assert_array_equal(actual, expected)
         self.assertEqual(
-            captured_operations, ["Gray", "AdaptiveMean", "Morphology"]
+            captured_operations, ["Gray", "Morphology", "AdaptiveMean"]
         )
 
     def test_legacy_primitives_preserve_cpu_result(self):
@@ -365,7 +380,7 @@ class Detector202PreprocessTests(unittest.TestCase):
             params=params, use_gpu=True, gpu_runtime=runtime
         ).run(image)
 
-        self.assertEqual(runtime.calls, ["gray", "adaptive", "morphology"])
+        self.assertEqual(runtime.calls, ["gray", "morphology", "adaptive"])
         self.assertEqual(actual["defects"], expected["defects"])
         self.assertEqual(
             actual["execution"]["preprocess_capability"]["route"], "primitive"

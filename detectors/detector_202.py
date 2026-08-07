@@ -209,7 +209,7 @@ class Detector202(BaseDetector):
                         "effective_edge_insets": self._effective_edge_insets(
                             image_width, image_height
                         ),
-                        "mask_order": "threshold_morphology_exclusion_contours",
+                        "mask_order": "morphology_threshold_exclusion_contours",
                     },
                 }
             )
@@ -242,30 +242,30 @@ class Detector202(BaseDetector):
         )
         iterations = max(0, int(self.params.get("morph_iterations", 6)))
         preprocess_signature = (
-            "202_tool_equivalent_preprocess",
+            "202_tool_order_preprocess",
+            operation,
+            kernel_size,
+            iterations,
             block_size,
             adaptive_c,
             max_value,
             invert,
-            operation,
-            kernel_size,
-            iterations,
         )
         preprocess_plan = self.cached_preprocess_plan(
             image,
             preprocess_signature,
             lambda: PreprocessPlan(
-                name="202_tool_equivalent_preprocess",
+                name="202_tool_order_preprocess",
                 operations=(
                     Gray(),
-                    AdaptiveMean(block_size, adaptive_c, max_value, invert),
                     Morphology(operation, kernel_size, iterations),
+                    AdaptiveMean(block_size, adaptive_c, max_value, invert),
                 ),
             ),
         )
-        morphed = self.execute_preprocess_plan(image, preprocess_plan)
-        self._record_debug_image("202_morphology", morphed)
-        masked = self._apply_exclusion_masks(morphed)
+        binary = self.execute_preprocess_plan(image, preprocess_plan)
+        self._record_debug_image("202_adaptive_binary", binary)
+        masked = self._apply_exclusion_masks(binary)
         self._record_debug_image("202_masked_binary", masked)
         return masked
 
