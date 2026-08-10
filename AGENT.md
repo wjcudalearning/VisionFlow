@@ -12,6 +12,8 @@ Primary entry points:
 - GUI: `python main.py --gui`
 - Packaged GUI entry/smoke: `gui_launcher.py` and `VisionFlow AOI.exe --smoke-test`
 - Windows package build: `build_exe.ps1` using the tracked `VisionFlow AOI.spec`
+- Standalone utilities: `export_ng_tiles_by_area.py`, `export_pattern_grid_tiles.py`, `export_matrix_summary.py`, and `export_scatter_plots.py`
+- Utility bundle build: `build_utility_tools.ps1`; individual utility builds use their dedicated `build_*_exporter.ps1` or `build_ng_tile_area_tool.ps1` entry point
 - CUDA build: `gpu/build_cuda_dll.ps1`
 - CUDA validation: `gpu/validate_cuda_dll.py`
 - CUDA source/ABI preflight: `gpu/preflight_cuda_build.py`
@@ -34,7 +36,7 @@ The normal development machine may not have `nvcc`, CMake, or an NVIDIA GPU. Nev
 
 ## Module ownership
 
-- Top-level entry points: keep CLI orchestration in `main.py`, packaged startup/smoke in `gui_launcher.py`, packaging in `build_exe.ps1` and `VisionFlow AOI.spec`, and standalone exports in `export_*.py`.
+- Top-level entry points: keep CLI orchestration in `main.py`, packaged startup/smoke in `gui_launcher.py`, main packaging in `build_exe.ps1` and `VisionFlow AOI.spec`, and standalone utilities in `export_*.py` with their dedicated spec/build scripts.
 - `core/`: pipeline, recipe loading/building, tiling, aggregation, reporting, profiling, batch/monitor processing, result schemas/compaction, GPU sessions/bridge, preprocessing plans and executors.
 - `detectors/`: detector-specific feature extraction, geometry, filtering, and result metadata.
 - `gpu/`: CUDA C ABI, kernels, persistent contexts, build scripts, native smoke tests, and CPU/GPU validation.
@@ -85,6 +87,8 @@ Put behavior in the narrowest appropriate module. Do not duplicate pipeline or f
 - Recipe Designer changes must participate in dirty tracking and shared `RecipeManager` validation. Loading programmatic values must not create false dirty state.
 - Persist user working context through `GuiPreferences`/`QSettings`; ignore stale paths safely and keep tests isolated with injected temporary settings.
 - Batch and monitor histories use Qt model/view and bounded incremental updates. Keep status filtering proxy-based and sample oversized scatter data deterministically.
+- Replace large viewer overlay sets as one bounded update: suspend per-item viewport updates, invalidate the scene, and request a repaint after the batch. Preserve explicit repaint behavior when overlays are toggled or the viewer is resized; Windows must not retain stale strips or distorted content.
+- Keep hidden Results content lazy. Defer table/output population until the screen is opened and create large thumbnail collections in bounded event-loop batches so inspection completion remains responsive.
 - New operator-facing text is Traditional Chinese except established industrial abbreviations such as PASS, NG, ERROR, CPU, CUDA, ROI and DLL. Status must remain understandable without color alone and keyboard paths require tests.
 
 ## Future detector development contract
@@ -94,6 +98,7 @@ Put behavior in the narrowest appropriate module. Do not duplicate pipeline or f
 - `CpuPreprocessExecutor` is the correctness reference. Optional CUDA execution must use shared typed operators, capability reporting, and full-detector CPU restart on unsupported semantics or failure.
 - Do not add detector-specific CUDA workflows or exports for new detectors. When a reusable operation is missing, add a backend-neutral typed operator and its CPU reference first; temporary compatibility adapters require an explicit migration item in `Todo.md`.
 - A new traditional CV detector is not complete without tests for direct OpenCV/CPU equivalence, plan cache reuse and invalidation, missing/legacy/failing backend routing, PASS/NG, defect count, bbox, area, confidence, metadata, and deterministic ordering as applicable.
+- When detector behavior is defined by an external tuning or reference tool, preserve its exact operation order, border/channel semantics, masks, and parameter meaning. Add a direct pixel-level reference comparison that can distinguish the approved order from plausible but incorrect reorderings.
 - DL model inference, framework sessions, and TensorRT/ONNX Runtime execution are not required to fit inside `PreprocessPlan`. Reusable traditional CV preprocessing and postprocessing around the model should still use shared typed operators or an equivalent shared DL preprocessing abstraction.
 - DL detectors must share model/session lifecycle, GPU scheduling, VRAM budget, warm-up, capability metrics, error handling, and fallback policy. GUI, monitor, and batch workers must not each load an independent model copy.
 - A DL detector must preserve traceable preprocessing, model version, backend, input/output shape, thresholds, and fallback metadata, with CPU or approved reference-backend accuracy tests before GPU acceleration becomes a default.
@@ -118,7 +123,7 @@ Before finishing, always run:
 
 ```powershell
 .\env\Scripts\python.exe -m unittest discover -s tests -v
-.\env\Scripts\python.exe -m compileall main.py gui_launcher.py core detectors gui gpu
+.\env\Scripts\python.exe -m compileall main.py gui_launcher.py export_ng_tiles_by_area.py export_pattern_grid_tiles.py export_matrix_summary.py export_scatter_plots.py core detectors gui gpu
 .\env\Scripts\python.exe gpu\preflight_cuda_build.py
 git diff --check
 ```
@@ -133,6 +138,8 @@ $env:QT_QPA_PLATFORM='offscreen'
 ```
 
 For packaging, `gui_launcher.py`, or spec changes, build through `build_exe.ps1` and run the packaged `--smoke-test` when the local environment can support a package build. The smoke must cover bundled recipe/MainWindow startup, CPU-only execution, missing-DLL fallback equivalence with zero GPU calls, and explicit strict-CUDA failure.
+
+For standalone utility or utility spec/build changes, use the matching dedicated build script and run that utility's packaged `--smoke-test`. Keep utility bundle tags (`utility-tools-vX.Y.Z`) and the legacy NG Tile tool tag namespace separate from VisionFlow AOI application tags (`vX.Y.Z`).
 
 For CUDA header/source/API changes:
 

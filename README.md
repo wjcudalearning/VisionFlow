@@ -15,12 +15,12 @@ VisionFlow AOI 不只是單一 Detector 範例，而是一套可實際延伸的�
 - OP、Engineer、Admin 三種 GUI 操作模式。
 - Overlay、NG 小圖、缺陷 CSV、矩陣 CSV、JSON 與輪替日誌。
 - 批次統計 Dashboard 與散佈圖。
-- PyInstaller Windows 執行檔打包。
+- PyInstaller Windows 執行檔打包，以及四支可獨立攜帶的後處理／切圖工具。
 - 一般 Windows CI，以及隔離在 RTX 3090 self-hosted runner 的 CUDA runtime workflow。
 - 打包版非互動 smoke，涵蓋 bundled Recipe／MainWindow、CPU-only、缺少 DLL 時的安全 fallback、strict CUDA 失敗，以及 bundled YOLOX registry／ONNX Runtime CPU 推論。
 - 可選 CUDA DLL、CPU fallback、效能觀測及 CPU/GPU 前處理抽象層。
 
-目前仍待完成的重點包括：建立正式標註資料集、五份 production recipes 的完整 CPU/GPU 等價驗收、RTX 3090 實機編譯、長時間穩定度與效能測試，以及有 GPU 的打包版驗收。詳細進度以 [`Todo.md`](Todo.md) 為準。
+目前 CUDA DLL 已在 RTX 3090 完成既有 ABI／plan／runtime 驗證並用於 CUDA-enabled 發行包；仍待完成的重點包括：建立正式標註資料集、五份 production recipes 的完整 CPU/GPU 等價驗收、後續 CUDA 原始碼變更的 RTX 3090 重編與實測、長時間穩定度與可信效能 baseline，以及有 GPU 的打包版驗收。詳細進度以 [`Todo.md`](Todo.md) 為準。
 
 ## 設計目標
 
@@ -138,9 +138,12 @@ AOI_CVbased/
 |   |-- gpu_plan_descriptors.py     # Native linear／DAG plan ABI descriptor
 |   |-- gpu_session.py              # batch／monitor 共用 GPU runtime/context
 |   |-- aggregator.py               # Tile 與整張影像 PASS／NG 彙總
+|   |-- csv_summary.py              # 單張／批次／監控缺陷 CSV 合併
 |   |-- result_mapper.py            # 區域座標映射至原圖座標
 |   |-- result_compactor.py         # 長時間工作使用的結果壓縮
+|   |-- result_types.py             # Pipeline 公開結果型別
 |   |-- reporter.py                 # 輸出 façade／coordinator
+|   |-- report_artifacts.py         # Overlay／NG Tile 編碼與繪製
 |   |-- report_writers.py           # Overlay、NG Tile、CSV、JSON output strategies
 |   |-- performance.py              # 效能與 GPU 傳輸觀測
 |   |-- batch_dashboard.py          # 批次與監控統計模型
@@ -148,6 +151,7 @@ AOI_CVbased/
 |   `-- monitor_processor.py        # 資料夾監控
 |-- detectors/
 |   |-- base_detector.py            # Detector 共用介面
+|   |-- detector_202.py             # 凸多邊形 NG 檢測
 |   |-- detector_401.py
 |   |-- detector_401_1.py
 |   |-- detector_401_2.py
@@ -402,7 +406,7 @@ tile:
 ### `202`：凸多邊形檢測
 
 - 檔案：`detectors/detector_202.py`
-- 用途：依調參小工具的順序先執行 Adaptive Mean 與 Morphology Open，再套用中心／四邊排除屏蔽，最後以 contour list 找出指定面積內的凸多邊形；抓到任一符合輪廓即為 NG。
+- 用途：依排除屏蔽調參小工具的實際順序執行 Gray → Morphology Open → Adaptive Mean，再套用中心／四邊排除屏蔽，最後以 `RETR_LIST` contours 找出指定面積內的凸多邊形；抓到任一符合輪廓即為 NG。
 - 預設中心屏蔽：由影像中心往左右各擴 `100`、往上下各擴 `630`，未受影像邊界裁切時實際矩形為 `200 × 1260`；亦可停用或改用自訂中心座標。
 - 預設邊緣屏蔽：共同內縮 `0`，左 `15`、右 `26`、上 `50`、下 `20`；各邊實際值為共同內縮與個別值兩者的較大值。
 - 預設影像處理：Adaptive Mean block `3`、C `2`；Morphology Open kernel `3`、iterations `6`。
@@ -506,6 +510,7 @@ GUI 每次啟動都會先進入 OP 模式。切換至 Engineer 或 Admin 時必�
 - 可恢復的提示與錯誤會顯示在畫面內；只有背景作業阻止關閉、未儲存 Recipe 離開確認等必要情況使用對話框。
 - Recipe Designer 會標示「已儲存」、「未儲存」或「驗證失敗」，只有內容實際變更時才在切換配方或關閉視窗前詢問。
 - 檢測結果可用「上一個／下一個」或 `K`／`J` 切換 NG，按 `Enter` 回到影像並聚焦所選 bbox；表格、縮圖與 viewer 選取保持同步。
+- 單張結果有大量 Tile／缺陷 Overlay 時，viewer 會批次替換並主動重繪；尚未開啟的 Results 頁延後建立表格與輸出內容，NG 縮圖每批載入 24 張，避免分析完成瞬間阻塞或留下畫面殘影。
 - 批次與監控表格可依 PASS／NG／ERROR 篩選。大量散佈點超過 1000 點時會採固定規則取樣，確保相同輸入得到相同視圖。
 - 程式關閉時會保存上次配方、影像與資料夾、輸出設定、最後畫面、視窗位置、viewer zoom 與主要 splitter 比例；重新啟動時已不存在的路徑會安全忽略。
 

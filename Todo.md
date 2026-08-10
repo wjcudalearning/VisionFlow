@@ -350,6 +350,8 @@
 - [ ] 加速不得犧牲 GUI 回應、打包啟動、結果追溯、錯誤訊息或 CPU fallback。
 
 ## 完成紀錄
+- [x] 2026-08-10：同步更新 `README.md` 與 `AGENT.md` 至目前實作：修正 Detector 202 為 Gray → Morphology Open → Adaptive Mean → 排除屏蔽 → LIST contours，記錄大量 Overlay 的批次重繪、Results 延後建立及每批 24 張 NG 縮圖行為，補齊 CSV summary／report artifacts／Detector 202 與四支獨立工具的文件結構；維護規範新增外部調參工具逐像素等價、GUI 大量繪製、獨立工具打包 smoke 與完整 compileall 範圍。完整 228 tests、擴充後 compileall、CUDA source/ABI preflight 與 `git diff --check` 通過；本次未變更 runtime、Recipe、CUDA source／header／ABI／DLL，也未勾選硬體或 production 驗收項目。
+
 - [x] 2026-08-07：依排除屏蔽調參小工具的實際 recipe 順序修正 Detector 202，前處理改為 Gray → Morphology Open → Adaptive Mean → 中心／四邊屏蔽 → LIST contours；同一 400×1400 合成小圖直接呼叫小工具函式逐像素對照為 0 差異，中心 X/Y 半徑與共同內縮 0、左15／右26／上50／下20 亦完全一致。更新 OpenCV CPU reference、cached plan、native plan、resident ROI、舊 DLL primitives 與完整 detector CPU fallback 回歸；14 項 Detector 202 測試、完整 228 tests、CLI 合成 NG（1 筆缺陷，預期 exit 2）、compileall、CUDA source preflight 與 `git diff --check` 通過。未修改 CUDA source／header／ABI／DLL，依要求未打包。
 - [x] 2026-08-06：修正單張檢測完成後 GUI 偶發向下延伸／殘影變形：`ImageViewer` 大量替換 overlay 時暫停逐項更新，改用 bounding-rect viewport update 並主動 invalidate／重繪；隱藏的 Results 頁延後到實際開啟時才建立內容，NG 縮圖改為每批 24 張。350／1000 個 overlay 的檢測完成 callback 由原先連同結果頁同步建構約 0.58／2.00 秒，降至約 0.033／0.076 秒；新增大量 overlay、延後結果頁及分批縮圖回歸測試，完整 228 tests、compileall、CUDA source preflight、GUI offscreen smoke 與 `git diff --check` 通過，未修改 CUDA source／header／ABI／DLL。
 
