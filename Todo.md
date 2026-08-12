@@ -350,6 +350,8 @@
 - [ ] 加速不得犧牲 GUI 回應、打包啟動、結果追溯、錯誤訊息或 CPU fallback。
 
 ## 完成紀錄
+- [x] 2026-08-12：彙整 2026-08-06 至 2026-08-12 的 8 筆功能／文件提交、22 個異動檔案、Detector 202 與調參工具逐像素等價、CSV summary 自動彙總、GUI 大量 Overlay／Results 延後載入、VisionFlow AOI v1.3.0／v1.3.1 發布及 228 項測試證據，新增 `WEEKLY_UPDATE_2026-08-06_to_2026-08-12.md` 流水帳報告；另明確記錄 v1.3.0／v1.3.1 tags 早於 Detector 202 最終語意修正，正式使用前應準備後續發行版。週報建立前 `main` 已與 `origin/main` 同步且工作目錄乾淨。
+
 - [x] 2026-08-10：同步更新 `README.md` 與 `AGENT.md` 至目前實作：修正 Detector 202 為 Gray → Morphology Open → Adaptive Mean → 排除屏蔽 → LIST contours，記錄大量 Overlay 的批次重繪、Results 延後建立及每批 24 張 NG 縮圖行為，補齊 CSV summary／report artifacts／Detector 202 與四支獨立工具的文件結構；維護規範新增外部調參工具逐像素等價、GUI 大量繪製、獨立工具打包 smoke 與完整 compileall 範圍。完整 228 tests、擴充後 compileall、CUDA source/ABI preflight 與 `git diff --check` 通過；本次未變更 runtime、Recipe、CUDA source／header／ABI／DLL，也未勾選硬體或 production 驗收項目。
 
 - [x] 2026-08-07：依排除屏蔽調參小工具的實際 recipe 順序修正 Detector 202，前處理改為 Gray → Morphology Open → Adaptive Mean → 中心／四邊屏蔽 → LIST contours；同一 400×1400 合成小圖直接呼叫小工具函式逐像素對照為 0 差異，中心 X/Y 半徑與共同內縮 0、左15／右26／上50／下20 亦完全一致。更新 OpenCV CPU reference、cached plan、native plan、resident ROI、舊 DLL primitives 與完整 detector CPU fallback 回歸；14 項 Detector 202 測試、完整 228 tests、CLI 合成 NG（1 筆缺陷，預期 exit 2）、compileall、CUDA source preflight 與 `git diff --check` 通過。未修改 CUDA source／header／ABI／DLL，依要求未打包。
