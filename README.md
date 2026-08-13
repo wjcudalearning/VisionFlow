@@ -152,6 +152,7 @@ AOI_CVbased/
 |-- detectors/
 |   |-- base_detector.py            # Detector 共用介面
 |   |-- detector_202.py             # 一般二值化四邊形 NG 檢測
+|   |-- detector_202_1.py           # 自動 CNR 候選缺陷檢測
 |   |-- detector_401.py
 |   |-- detector_401_1.py
 |   |-- detector_401_2.py
@@ -413,6 +414,17 @@ tile:
 - 四邊形條件：面積 `5`～`100` px²、approx epsilon 固定 `2%`、近似後必須剛好 `4` 個頂點，不限制凸／凹。
 - 舊 Recipe 的 Adaptive Mean、Morphology、contour mode、頂點範圍與凸性欄位仍可載入，但已從 Designer 隱藏且完全不參與 Detector 202 運算。
 - 缺陷類型：`202_quadrilateral_ng`
+
+### `202-1`：自動 CNR 候選缺陷檢測
+
+- 檔案：`detectors/detector_202_1.py`
+- 參考實作：[Wwjyun/AcceptanceChecker `DefectDetector`](https://github.com/Wwjyun/AcceptanceChecker/blob/117fce477744188b97659a035b031fe3bf874260/acceptance_checker/core/detector.py)
+- 用途：以大範圍 Gaussian blur 估背景，計算原灰階與背景的 residual，再以 MAD 估 robust noise sigma；使用 `max(8, 3 × sigma)` 建立異常 mask，執行 `3 × 3` Morphology Open 一次後套用中心／四邊屏蔽，最後用 8-connectivity connected components 取得候選。
+- CNR：每個 component 的缺陷平均值與周圍背景 ring 平均值之差，除以 ring 的灰階標準差；候選依 CNR 由高到低輸出，抓到任一候選即為 NG。
+- 自動面積：最小值為 `max(5, int(0.000001 × H × W))`，最大值為 `int(0.05 × H × W)`；沿用參考實作，Recipe 不另提供固定面積欄位。
+- 屏蔽：完全沿用 Detector 202 的中心半寬 `100`／半高 `630` 與共同 `0`、左 `15`、右 `26`、上 `50`、下 `20` 邊緣內縮；排除像素不產生候選，也不納入局部背景 ring。
+- 關閉屏蔽時，候選 mask、MAD、sigma、門檻、bbox、面積、CNR 與排序均與參考 commit 的自動 CNR 實作一致。
+- 缺陷類型：`202-1_auto_cnr_ng`
 
 ### `401`：負極旋轉矩形檢測
 
