@@ -151,7 +151,7 @@ AOI_CVbased/
 |   `-- monitor_processor.py        # 資料夾監控
 |-- detectors/
 |   |-- base_detector.py            # Detector 共用介面
-|   |-- detector_202.py             # 凸多邊形 NG 檢測
+|   |-- detector_202.py             # 一般二值化四邊形 NG 檢測
 |   |-- detector_401.py
 |   |-- detector_401_1.py
 |   |-- detector_401_2.py
@@ -403,15 +403,16 @@ tile:
 
 所有 Detector 都繼承 `BaseDetector`，並輸出統一格式，包含 Detector ID、PASS／NG、分數、缺陷類型、區域座標、面積及 metadata。如此 Reporter、Aggregator 與 GUI 不需要知道個別演算法細節。
 
-### `202`：凸多邊形檢測
+### `202`：一般二值化四邊形檢測
 
 - 檔案：`detectors/detector_202.py`
-- 用途：依排除屏蔽調參小工具的實際順序執行 Gray → Morphology Open → Adaptive Mean，再套用中心／四邊排除屏蔽，最後以 `RETR_LIST` contours 找出指定面積內的凸多邊形；抓到任一符合輪廓即為 NG。
+- 用途：執行 Gray → 一般二值化，再套用中心／四邊排除屏蔽，最後以固定 `RETR_LIST` contours 找出指定面積內的四邊形；抓到任一符合輪廓即為 NG。
 - 預設中心屏蔽：由影像中心往左右各擴 `100`、往上下各擴 `630`，未受影像邊界裁切時實際矩形為 `200 × 1260`；亦可停用或改用自訂中心座標。
 - 預設邊緣屏蔽：共同內縮 `0`，左 `15`、右 `26`、上 `50`、下 `20`；各邊實際值為共同內縮與個別值兩者的較大值。
-- 預設影像處理：Adaptive Mean block `3`、C `2`；Morphology Open kernel `3`、iterations `6`。
-- 多邊形條件：面積 `20`～`1000` px²、approx epsilon `2%`、頂點數 `3`～`12`、只接受凸多邊形。
-- 缺陷類型：`202_convex_polygon_ng`
+- 預設影像處理：一般二值化門檻 `172`、最大值固定 `255`，預設不反相；Recipe 可調門檻與反相。
+- 四邊形條件：面積 `5`～`100` px²、approx epsilon 固定 `2%`、近似後必須剛好 `4` 個頂點，不限制凸／凹。
+- 舊 Recipe 的 Adaptive Mean、Morphology、contour mode、頂點範圍與凸性欄位仍可載入，但已從 Designer 隱藏且完全不參與 Detector 202 運算。
+- 缺陷類型：`202_quadrilateral_ng`
 
 ### `401`：負極旋轉矩形檢測
 

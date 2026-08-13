@@ -5,22 +5,24 @@ import time
 import cv2
 import numpy as np
 
-from core.parameter_schema import specs_from_defaults
-from core.preprocess_plan import AdaptiveMean, Gray, Morphology, PreprocessPlan
+from core.parameter_schema import ParameterSpec, specs_from_defaults
+from core.preprocess_plan import Gray, PreprocessPlan, Threshold
 from detectors.base_detector import BaseDetector
 
 
 class Detector202(BaseDetector):
     detector_id = "202"
-    detector_name = "convex_polygon_detector"
-    display_name = "202 convex polygon detector"
+    detector_name = "binary_quadrilateral_detector"
+    display_name = "202 binary quadrilateral detector"
+
+    # Detector 202 intentionally exposes only exclusion masks, global threshold,
+    # inversion, and area limits. Geometry settings are fixed by its contract.
     default_params = {
         "center_mask_enabled": True,
         "center_mask_use_image_center": True,
         "center_mask_x": 0,
         "center_mask_y": 0,
-        # These established recipe keys now follow the tuning tool's semantics:
-        # each value is the half extent measured outwards from the center.
+        # These values are half extents measured outwards from the center.
         "center_mask_width": 100,
         "center_mask_height": 630,
         "edge_mask_enabled": True,
@@ -29,94 +31,135 @@ class Detector202(BaseDetector):
         "edge_inset_right": 26,
         "edge_inset_top": 50,
         "edge_inset_bottom": 20,
-        "morph_operation": "open",
-        "morph_kernel": 3,
-        "morph_iterations": 6,
-        "contour_mode": "list",
-        "adaptive_block_size": 3,
-        "adaptive_c": 2.0,
+        "threshold_value": 172,
         "binary_inv": False,
-        "max_value": 255,
-        "min_area": 20.0,
-        "max_area": 1000.0,
-        "approx_epsilon_ratio": 0.02,
-        "min_vertices": 3,
-        "max_vertices": 12,
-        "convex_only": True,
+        "min_area": 5.0,
+        "max_area": 100.0,
     }
-    PARAM_SPEC = specs_from_defaults(
-        default_params,
-        {
-            "center_mask_enabled": {"label": "啟用中心屏蔽"},
-            "center_mask_use_image_center": {
-                "engineer_visible": False,
-                "label": "使用影像中心",
+
+    _LEGACY_IGNORED_SPECS = {
+        "morph_operation": ParameterSpec(
+            str,
+            "open",
+            choices=("none", "open", "close", "erode", "dilate"),
+            engineer_visible=False,
+            tooltip="舊 Recipe 相容欄位；Detector 202 已忽略。",
+        ),
+        "morph_kernel": ParameterSpec(
+            int,
+            3,
+            minimum=1,
+            odd=True,
+            engineer_visible=False,
+            tooltip="舊 Recipe 相容欄位；Detector 202 已忽略。",
+        ),
+        "morph_iterations": ParameterSpec(
+            int,
+            6,
+            minimum=0,
+            engineer_visible=False,
+            tooltip="舊 Recipe 相容欄位；Detector 202 已忽略。",
+        ),
+        "contour_mode": ParameterSpec(
+            str,
+            "list",
+            choices=("external", "list", "tree", "ccomp"),
+            engineer_visible=False,
+            tooltip="舊 Recipe 相容欄位；Detector 202 固定使用 LIST。",
+        ),
+        "adaptive_block_size": ParameterSpec(
+            int,
+            3,
+            minimum=3,
+            odd=True,
+            engineer_visible=False,
+            tooltip="舊 Recipe 相容欄位；Detector 202 已改用一般二值化。",
+        ),
+        "adaptive_c": ParameterSpec(
+            float,
+            2.0,
+            engineer_visible=False,
+            tooltip="舊 Recipe 相容欄位；Detector 202 已改用一般二值化。",
+        ),
+        "max_value": ParameterSpec(
+            int,
+            255,
+            minimum=1,
+            maximum=255,
+            engineer_visible=False,
+            tooltip="舊 Recipe 相容欄位；Detector 202 固定使用 255。",
+        ),
+        "approx_epsilon_ratio": ParameterSpec(
+            float,
+            0.02,
+            minimum=0.0,
+            maximum=1.0,
+            engineer_visible=False,
+            tooltip="舊 Recipe 相容欄位；Detector 202 固定使用 2%。",
+        ),
+        "min_vertices": ParameterSpec(
+            int,
+            3,
+            minimum=3,
+            engineer_visible=False,
+            tooltip="舊 Recipe 相容欄位；Detector 202 固定接受四邊形。",
+        ),
+        "max_vertices": ParameterSpec(
+            int,
+            12,
+            minimum=3,
+            engineer_visible=False,
+            tooltip="舊 Recipe 相容欄位；Detector 202 固定接受四邊形。",
+        ),
+        "convex_only": ParameterSpec(
+            bool,
+            True,
+            engineer_visible=False,
+            tooltip="舊 Recipe 相容欄位；Detector 202 不限制凹凸。",
+        ),
+    }
+    PARAM_SPEC = {
+        **specs_from_defaults(
+            default_params,
+            {
+                "center_mask_enabled": {"label": "啟用中心屏蔽"},
+                "center_mask_use_image_center": {
+                    "engineer_visible": False,
+                    "label": "使用影像中心",
+                },
+                "center_mask_x": {
+                    "minimum": 0,
+                    "engineer_visible": False,
+                    "label": "自訂中心 X",
+                },
+                "center_mask_y": {
+                    "minimum": 0,
+                    "engineer_visible": False,
+                    "label": "自訂中心 Y",
+                },
+                "center_mask_width": {"minimum": 0, "label": "中心屏蔽半寬 X"},
+                "center_mask_height": {"minimum": 0, "label": "中心屏蔽半高 Y"},
+                "edge_mask_enabled": {"label": "啟用邊緣屏蔽"},
+                "edge_inset_all": {"minimum": 0, "label": "共同內縮"},
+                "edge_inset_left": {"minimum": 0, "label": "左側內縮"},
+                "edge_inset_right": {"minimum": 0, "label": "右側內縮"},
+                "edge_inset_top": {"minimum": 0, "label": "上側內縮"},
+                "edge_inset_bottom": {"minimum": 0, "label": "下側內縮"},
+                "threshold_value": {
+                    "minimum": 0,
+                    "maximum": 255,
+                    "label": "一般二值化門檻",
+                },
+                "binary_inv": {"label": "反向二值化"},
+                "min_area": {"minimum": 0, "label": "最小面積"},
+                "max_area": {"minimum": 0, "label": "最大面積"},
             },
-            "center_mask_x": {
-                "minimum": 0,
-                "engineer_visible": False,
-                "label": "自訂中心 X",
-            },
-            "center_mask_y": {
-                "minimum": 0,
-                "engineer_visible": False,
-                "label": "自訂中心 Y",
-            },
-            "center_mask_width": {"minimum": 0, "label": "中心往外擴 X"},
-            "center_mask_height": {"minimum": 0, "label": "中心往外擴 Y"},
-            "edge_mask_enabled": {"label": "啟用邊緣屏蔽"},
-            "edge_inset_all": {"minimum": 0, "label": "四邊共同內縮"},
-            "edge_inset_left": {"minimum": 0, "label": "左側內縮"},
-            "edge_inset_right": {"minimum": 0, "label": "右側內縮"},
-            "edge_inset_top": {"minimum": 0, "label": "上側內縮"},
-            "edge_inset_bottom": {"minimum": 0, "label": "下側內縮"},
-            "morph_operation": {
-                "choices": ("none", "open", "close", "erode", "dilate"),
-                "engineer_visible": False,
-            },
-            "morph_kernel": {
-                "minimum": 1,
-                "odd": True,
-                "engineer_visible": False,
-                "label": "型態學 Kernel",
-            },
-            "morph_iterations": {
-                "minimum": 0,
-                "engineer_visible": False,
-                "label": "Open 次數",
-            },
-            "contour_mode": {
-                "choices": ("external", "list", "tree", "ccomp"),
-                "engineer_visible": False,
-            },
-            "adaptive_block_size": {
-                "minimum": 3,
-                "odd": True,
-                "engineer_visible": False,
-                "label": "Adaptive Block",
-            },
-            "adaptive_c": {"engineer_visible": False, "label": "Adaptive C"},
-            "binary_inv": {"engineer_visible": False},
-            "max_value": {
-                "minimum": 1,
-                "maximum": 255,
-                "engineer_visible": False,
-            },
-            "min_area": {"minimum": 0, "label": "最小面積"},
-            "max_area": {"minimum": 0, "label": "最大面積"},
-            "approx_epsilon_ratio": {
-                "minimum": 0.0,
-                "maximum": 1.0,
-                "label": "多邊形 Epsilon 比例",
-            },
-            "min_vertices": {"minimum": 3, "label": "最少頂點數"},
-            "max_vertices": {"minimum": 3, "label": "最多頂點數"},
-            "convex_only": {
-                "engineer_visible": False,
-                "label": "只接受凸多邊形",
-            },
-        },
-    )
+        ),
+        **_LEGACY_IGNORED_SPECS,
+    }
+
+    _MAX_VALUE = 255
+    _APPROX_EPSILON_RATIO = 0.02
 
     def preprocess(self, image):
         return image
@@ -126,15 +169,11 @@ class Detector202(BaseDetector):
             binary = self._make_binary(image)
         with self.measure_detection_stage("find_contours"):
             contours, _ = cv2.findContours(
-                binary, self._contour_mode(), cv2.CHAIN_APPROX_SIMPLE
+                binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE
             )
 
         geometry_started = time.perf_counter()
         defects = []
-        epsilon_ratio = float(self.params.get("approx_epsilon_ratio", 0.02))
-        min_vertices = int(self.params.get("min_vertices", 3))
-        max_vertices = int(self.params.get("max_vertices", 12))
-        convex_only = bool(self.params.get("convex_only", True))
         half_x = int(self.params.get("center_mask_width", 100))
         half_y = int(self.params.get("center_mask_height", 630))
         image_height, image_width = image.shape[:2]
@@ -147,50 +186,38 @@ class Detector202(BaseDetector):
             perimeter = float(cv2.arcLength(contour, True))
             if perimeter <= 0.0:
                 continue
-            approx = cv2.approxPolyDP(contour, epsilon_ratio * perimeter, True)
-            vertex_count = len(approx)
-            if vertex_count < min_vertices or vertex_count > max_vertices:
-                continue
-
-            is_convex = bool(cv2.isContourConvex(approx))
-            if convex_only and not is_convex:
+            approx = cv2.approxPolyDP(
+                contour, self._APPROX_EPSILON_RATIO * perimeter, True
+            )
+            if len(approx) != 4:
                 continue
 
             x, y, width, height = cv2.boundingRect(approx)
             vertices = approx.reshape(-1, 2).astype(int)
             defects.append(
                 {
-                    "type": "202_convex_polygon_ng",
+                    "type": "202_quadrilateral_ng",
                     "bbox_local": [int(x), int(y), int(width), int(height)],
                     "area": float(np.round(area, 3)),
                     "confidence": 1.0,
                     "metadata": {
-                        "shape": "convex_polygon",
+                        "shape": "quadrilateral",
                         "vertices_local": vertices.tolist(),
-                        "vertex_count": int(vertex_count),
-                        "is_convex": is_convex,
+                        "vertex_count": 4,
+                        "is_convex": bool(cv2.isContourConvex(approx)),
                         "perimeter": float(np.round(perimeter, 3)),
-                        "approx_epsilon_ratio": epsilon_ratio,
-                        "min_vertices": min_vertices,
-                        "max_vertices": max_vertices,
-                        "convex_only": convex_only,
-                        "threshold_method": "adaptive_mean_inv"
+                        "approx_epsilon_ratio": self._APPROX_EPSILON_RATIO,
+                        "convexity_required": False,
+                        "threshold_method": "global_binary_inv"
                         if bool(self.params.get("binary_inv", False))
-                        else "adaptive_mean",
-                        "adaptive_block_size": int(
-                            self.params.get("adaptive_block_size", 3)
+                        else "global_binary",
+                        "threshold_value": int(
+                            self.params.get("threshold_value", 172)
                         ),
-                        "adaptive_c": float(self.params.get("adaptive_c", 2.0)),
-                        "morph_operation": str(
-                            self.params.get("morph_operation", "open")
-                        ),
-                        "morph_kernel": int(self.params.get("morph_kernel", 3)),
-                        "morph_iterations": int(
-                            self.params.get("morph_iterations", 6)
-                        ),
-                        "contour_mode": str(self.params.get("contour_mode", "list")),
-                        "min_area": float(self.params.get("min_area", 20.0)),
-                        "max_area": float(self.params.get("max_area", 1000.0)),
+                        "max_value": self._MAX_VALUE,
+                        "contour_mode": "list",
+                        "min_area": float(self.params.get("min_area", 5.0)),
+                        "max_area": float(self.params.get("max_area", 100.0)),
                         "center_mask_enabled": bool(
                             self.params.get("center_mask_enabled", True)
                         ),
@@ -209,7 +236,7 @@ class Detector202(BaseDetector):
                         "effective_edge_insets": self._effective_edge_insets(
                             image_width, image_height
                         ),
-                        "mask_order": "morphology_threshold_exclusion_contours",
+                        "mask_order": "threshold_exclusion_contours",
                     },
                 }
             )
@@ -227,44 +254,22 @@ class Detector202(BaseDetector):
         return defects
 
     def _make_binary(self, image):
-        block_size = self._odd_at_least(
-            int(self.params.get("adaptive_block_size", 3)), 3
-        )
-        adaptive_c = float(self.params.get("adaptive_c", 2.0))
-        max_value = int(self.params.get("max_value", 255))
+        threshold_value = int(self.params.get("threshold_value", 172))
         invert = bool(self.params.get("binary_inv", False))
-        operation = str(self.params.get("morph_operation", "open")).lower()
-        raw_kernel_size = int(self.params.get("morph_kernel", 3))
-        kernel_size = (
-            1
-            if raw_kernel_size <= 1
-            else self._odd_at_least(raw_kernel_size, 3)
-        )
-        iterations = max(0, int(self.params.get("morph_iterations", 6)))
-        preprocess_signature = (
-            "202_tool_order_preprocess",
-            operation,
-            kernel_size,
-            iterations,
-            block_size,
-            adaptive_c,
-            max_value,
-            invert,
-        )
+        preprocess_signature = ("202_global_binary", threshold_value, invert)
         preprocess_plan = self.cached_preprocess_plan(
             image,
             preprocess_signature,
             lambda: PreprocessPlan(
-                name="202_tool_order_preprocess",
+                name="202_global_binary",
                 operations=(
                     Gray(),
-                    Morphology(operation, kernel_size, iterations),
-                    AdaptiveMean(block_size, adaptive_c, max_value, invert),
+                    Threshold(threshold_value, self._MAX_VALUE, invert),
                 ),
             ),
         )
         binary = self.execute_preprocess_plan(image, preprocess_plan)
-        self._record_debug_image("202_adaptive_binary", binary)
+        self._record_debug_image("202_binary", binary)
         masked = self._apply_exclusion_masks(binary)
         self._record_debug_image("202_masked_binary", masked)
         return masked
@@ -328,25 +333,10 @@ class Detector202(BaseDetector):
         }
 
     def _passes_area_filter(self, area: float) -> bool:
-        min_area = float(self.params.get("min_area", 20.0))
-        max_area = float(self.params.get("max_area", 1000.0))
+        min_area = float(self.params.get("min_area", 5.0))
+        max_area = float(self.params.get("max_area", 100.0))
         if min_area and area < min_area:
             return False
         if max_area and area > max_area:
             return False
         return True
-
-    def _contour_mode(self) -> int:
-        mode = str(self.params.get("contour_mode", "list")).lower()
-        if mode in {"all", "list"}:
-            return cv2.RETR_LIST
-        if mode == "tree":
-            return cv2.RETR_TREE
-        if mode == "ccomp":
-            return cv2.RETR_CCOMP
-        return cv2.RETR_EXTERNAL
-
-    @staticmethod
-    def _odd_at_least(value: int, minimum: int) -> int:
-        value = max(int(value), minimum)
-        return value if value % 2 == 1 else value + 1

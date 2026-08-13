@@ -39,6 +39,7 @@ DEFECT_COLORS = {
 DEFECT_COLOR_FALLBACK = "#ff5d52"
 
 DEFECT_TYPE_LABELS = {
+    "202_quadrilateral_ng": "202 四邊形 NG",
     "202_convex_polygon_ng": "202 凸多邊形 NG",
     "blob": "Blob",
     "scratch": "Scratch",

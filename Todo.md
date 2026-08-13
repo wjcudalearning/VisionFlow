@@ -112,7 +112,7 @@
 - [x] 401-1 遷移到 cached 共用 plan：Gray → Resize(area) → Gaussian → AdaptiveMean → Morphology；CUDA 無法保持 area 語意時整個 detector CPU fallback。
 - [x] 401 遷移到 cached 共用 plan，保留 BGR Gaussian → Morphology → Gray → AdaptiveMean、threshold 與 contour 語意。
 - [x] 401-2 preprocessing 已遷移到共用 plan，並保留 fused/legacy/CPU 路徑。
-- [x] Detector 202 依調參小工具對齊：中心 X/Y 採由中心往兩側延伸的半徑語意，Morphology Open → Adaptive Mean 共用單一 cached plan，完成後才套中心／四邊屏蔽再找 LIST contours；共同內縮、屏蔽開關、自訂中心及頂點上限皆與小工具一致，抓到即 NG。
+- [x] Detector 202 簡化為 Gray → 一般二值化（預設門檻 172）→ 中心／四邊屏蔽 → 固定 LIST contours；只接受面積 5～100、2% epsilon 的四邊形，不限制凹凸。舊 Adaptive／Morphology／幾何 Recipe 欄位僅保留讀取相容性且不再參與運算。
 - [x] 900 遷移成 cached CPU DAG plan，共用一次 gray 產生 outer global 與 inner adaptive masks。
 - [x] 900 DAG 接上 CUDA/native executor，共用 device gray 並只下載必要 masks。
 - [x] 401/401-1/401-2 的 `findContours` 與少量幾何分析暫留 CPU，只下載 binary mask。
@@ -350,6 +350,8 @@
 - [ ] 加速不得犧牲 GUI 回應、打包啟動、結果追溯、錯誤訊息或 CPU fallback。
 
 ## 完成紀錄
+- [x] 2026-08-13：依新規格簡化 Detector 202：保留中心與四邊排除屏蔽，前處理改為 Gray → 一般二值化（預設門檻 172、最大值 255、預設不反相）→ 屏蔽 → 固定 LIST contours；輪廓固定以 2% epsilon 近似，只接受面積 5～100 且剛好 4 個頂點，不限制凹凸，缺陷類型更新為 `202_quadrilateral_ng`。舊 Adaptive Mean、Morphology、contour mode、頂點與凸性 Recipe 欄位仍可載入，但從 Designer 隱藏且完全忽略。Detector 202 專屬 15 tests、完整 229 tests、compileall、CUDA source/ABI preflight、GUI offscreen smoke、CPU CLI 合成 NG（1 筆缺陷，預期 exit 2）及 `git diff --check` 通過；未修改 CUDA source／header／ABI／DLL，依要求未打包。
+
 - [x] 2026-08-12：彙整 2026-08-06 至 2026-08-12 的 8 筆功能／文件提交、22 個異動檔案、Detector 202 與調參工具逐像素等價、CSV summary 自動彙總、GUI 大量 Overlay／Results 延後載入、VisionFlow AOI v1.3.0／v1.3.1 發布及 228 項測試證據，新增 `WEEKLY_UPDATE_2026-08-06_to_2026-08-12.md` 流水帳報告；另明確記錄 v1.3.0／v1.3.1 tags 早於 Detector 202 最終語意修正，正式使用前應準備後續發行版。週報建立前 `main` 已與 `origin/main` 同步且工作目錄乾淨。
 
 - [x] 2026-08-10：同步更新 `README.md` 與 `AGENT.md` 至目前實作：修正 Detector 202 為 Gray → Morphology Open → Adaptive Mean → 排除屏蔽 → LIST contours，記錄大量 Overlay 的批次重繪、Results 延後建立及每批 24 張 NG 縮圖行為，補齊 CSV summary／report artifacts／Detector 202 與四支獨立工具的文件結構；維護規範新增外部調參工具逐像素等價、GUI 大量繪製、獨立工具打包 smoke 與完整 compileall 範圍。完整 228 tests、擴充後 compileall、CUDA source/ABI preflight 與 `git diff --check` 通過；本次未變更 runtime、Recipe、CUDA source／header／ABI／DLL，也未勾選硬體或 production 驗收項目。

@@ -53,26 +53,10 @@ class _PrimitiveRuntime:
         self.calls.append("gray")
         return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-    def adaptive_threshold(self, image, block_size, c, max_value, invert):
-        self.calls.append("adaptive")
+    def threshold(self, image, threshold, max_value, invert):
+        self.calls.append("threshold")
         threshold_type = cv2.THRESH_BINARY_INV if invert else cv2.THRESH_BINARY
-        return cv2.adaptiveThreshold(
-            image,
-            max_value,
-            cv2.ADAPTIVE_THRESH_MEAN_C,
-            threshold_type,
-            block_size,
-            c,
-        )
-
-    def morphology(self, image, operation, kernel_size, iterations):
-        self.calls.append("morphology")
-        kernel = cv2.getStructuringElement(
-            cv2.MORPH_RECT, (kernel_size, kernel_size)
-        )
-        return cv2.morphologyEx(
-            image, cv2.MORPH_OPEN, kernel, iterations=iterations
-        )
+        return cv2.threshold(image, threshold, max_value, threshold_type)[1]
 
 
 class _MissingPrimitiveRuntime:
@@ -83,10 +67,10 @@ class _MissingPrimitiveRuntime:
     supports_fused_401_2 = False
 
 
-class _FailingMorphologyRuntime(_PrimitiveRuntime):
-    def morphology(self, *_args):
-        self.calls.append("morphology")
-        raise RuntimeError("injected detector 202 morphology failure")
+class _FailingThresholdRuntime(_PrimitiveRuntime):
+    def threshold(self, *_args):
+        self.calls.append("threshold")
+        raise RuntimeError("injected detector 202 threshold failure")
 
 
 class _DeviceRoi:
@@ -114,28 +98,39 @@ class Detector202ContractTests(unittest.TestCase):
             "edge_inset_right": 26,
             "edge_inset_top": 50,
             "edge_inset_bottom": 20,
-            "morph_operation": "open",
-            "morph_kernel": 3,
-            "morph_iterations": 6,
-            "contour_mode": "list",
-            "adaptive_block_size": 3,
-            "adaptive_c": 2.0,
-            "min_area": 20.0,
-            "max_area": 1000.0,
-            "approx_epsilon_ratio": 0.02,
-            "min_vertices": 3,
-            "max_vertices": 12,
-            "convex_only": True,
+            "threshold_value": 172,
+            "binary_inv": False,
+            "min_area": 5.0,
+            "max_area": 100.0,
         }
         manager = DetectorManager()
         definition = manager.definitions()["202"]
 
-        for key, value in expected.items():
-            self.assertEqual(definition["default_params"][key], value)
-        self.assertEqual(
-            set(definition["param_spec"]), set(definition["default_params"])
-        )
+        self.assertEqual(definition["default_params"], expected)
+        self.assertEqual(definition["detector_name"], "binary_quadrilateral_detector")
         self.assertIsInstance(manager.create("202"), Detector202)
+
+        legacy_keys = {
+            "morph_operation",
+            "morph_kernel",
+            "morph_iterations",
+            "contour_mode",
+            "adaptive_block_size",
+            "adaptive_c",
+            "max_value",
+            "approx_epsilon_ratio",
+            "min_vertices",
+            "max_vertices",
+            "convex_only",
+        }
+        self.assertTrue(legacy_keys.isdisjoint(definition["default_params"]))
+        self.assertTrue(legacy_keys.issubset(definition["param_spec"]))
+        self.assertTrue(
+            all(
+                not definition["param_spec"][key]["engineer_visible"]
+                for key in legacy_keys
+            )
+        )
 
         recipe = yaml.safe_load(
             (ROOT / "recipes/PRODUCT_A_NEGATIVE_401_AOI_01.yaml").read_text(
@@ -152,6 +147,51 @@ class Detector202ContractTests(unittest.TestCase):
             }
         }
         RecipeManager().validate(recipe)
+
+    def test_old_recipe_fields_still_validate_but_do_not_affect_preprocess(self):
+        manager = DetectorManager()
+        definition = manager.definitions()["202"]
+        recipe = yaml.safe_load(
+            (ROOT / "recipes/PRODUCT_A_NEGATIVE_401_AOI_01.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        recipe["decision"]["important_detectors"] = ["202"]
+        old_params = deepcopy(definition["default_params"])
+        old_params.pop("threshold_value")
+        old_params.update(
+            {
+                "morph_operation": "close",
+                "morph_kernel": 5,
+                "morph_iterations": 2,
+                "contour_mode": "external",
+                "adaptive_block_size": 7,
+                "adaptive_c": 9.0,
+                "max_value": 100,
+                "approx_epsilon_ratio": 0.4,
+                "min_vertices": 8,
+                "max_vertices": 9,
+                "convex_only": True,
+            }
+        )
+        recipe["detectors"] = {
+            "202": {
+                "enabled": True,
+                "use_gpu": False,
+                "display_name": definition["display_name"],
+                "params": old_params,
+            }
+        }
+        RecipeManager().validate(recipe)
+
+        image = np.random.default_rng(202).integers(
+            0, 256, size=(51, 67, 3), dtype=np.uint8
+        )
+        baseline = Detector202(params=definition["default_params"])
+        legacy = Detector202(params=old_params)
+        np.testing.assert_array_equal(
+            baseline._make_binary(image), legacy._make_binary(image)
+        )
 
     def test_edge_and_center_exclusion_masks_are_exact(self):
         detector = Detector202(
@@ -235,29 +275,16 @@ class Detector202PreprocessTests(unittest.TestCase):
             "edge_inset_right": 3,
             "edge_inset_top": 4,
             "edge_inset_bottom": 5,
-            "morph_operation": "open",
-            "morph_kernel": 3,
-            "morph_iterations": 2,
-            "adaptive_block_size": 5,
-            "adaptive_c": 1.5,
+            "threshold_value": 172,
             "binary_inv": False,
         }
 
     @staticmethod
     def _opencv_reference(image, params):
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        morphed = cv2.morphologyEx(
-            gray, cv2.MORPH_OPEN, kernel, iterations=2
-        )
-        binary = cv2.adaptiveThreshold(
-            morphed,
-            255,
-            cv2.ADAPTIVE_THRESH_MEAN_C,
-            cv2.THRESH_BINARY,
-            5,
-            1.5,
-        )
+        binary = cv2.threshold(
+            gray, params["threshold_value"], 255, cv2.THRESH_BINARY
+        )[1]
         height, width = binary.shape
         masked = binary.copy()
         center_x = width // 2
@@ -269,8 +296,8 @@ class Detector202PreprocessTests(unittest.TestCase):
         masked[:, width - 3 :] = 0
         return masked
 
-    def test_shared_plans_match_direct_opencv_and_cache_by_parameters(self):
-        image = np.random.default_rng(202).integers(
+    def test_shared_plan_matches_direct_opencv_and_caches_by_threshold(self):
+        image = np.random.default_rng(203).integers(
             0, 256, size=(51, 67, 3), dtype=np.uint8
         )
         detector = Detector202(params=self._params())
@@ -280,34 +307,19 @@ class Detector202PreprocessTests(unittest.TestCase):
         np.testing.assert_array_equal(
             actual, self._opencv_reference(image, self._params())
         )
-        old_order = cv2.morphologyEx(
-            cv2.adaptiveThreshold(
-                cv2.cvtColor(image, cv2.COLOR_BGR2GRAY),
-                255,
-                cv2.ADAPTIVE_THRESH_MEAN_C,
-                cv2.THRESH_BINARY,
-                5,
-                1.5,
-            ),
-            cv2.MORPH_OPEN,
-            cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
-            iterations=2,
-        )
-        old_order = detector._apply_exclusion_masks(old_order)
-        self.assertGreater(np.count_nonzero(actual != old_order), 0)
         self.assertEqual(detector.last_preprocess_capability["route"], "cpu")
         self.assertEqual(detector.preprocess_plan_cache_size, 1)
         detector._make_binary(image.copy())
         self.assertEqual(detector.preprocess_plan_cache_size, 1)
-        detector.params["adaptive_c"] = 2.5
+        detector.params["threshold_value"] = 173
         detector._make_binary(image)
         self.assertEqual(detector.preprocess_plan_cache_size, 2)
-        detector.params["morph_iterations"] = 3
+        detector.params["binary_inv"] = True
         detector._make_binary(image)
         self.assertEqual(detector.preprocess_plan_cache_size, 3)
 
     def test_native_plan_runs_combined_shared_preprocess_before_mask(self):
-        image = np.random.default_rng(203).integers(
+        image = np.random.default_rng(204).integers(
             0, 256, size=(54, 68, 3), dtype=np.uint8
         )
         params = self._params()
@@ -327,7 +339,7 @@ class Detector202PreprocessTests(unittest.TestCase):
         )
 
     def test_resident_source_runs_full_preprocess_before_cpu_exclusion_mask(self):
-        image = np.random.default_rng(206).integers(
+        image = np.random.default_rng(205).integers(
             0, 256, size=(60, 74, 3), dtype=np.uint8
         )
         runtime = _NativePlanRuntime()
@@ -340,36 +352,32 @@ class Detector202PreprocessTests(unittest.TestCase):
         self.assertEqual(device_roi.calls, [(0, 0, 74, 60)])
         self.assertIs(runtime.device_rois[0], device_roi.token)
 
-    def test_exclusion_is_applied_after_morphology_and_threshold(self):
+    def test_exclusion_is_applied_after_global_threshold(self):
         detector = Detector202(
             params={
                 "center_mask_width": 10,
                 "center_mask_height": 30,
                 "edge_mask_enabled": False,
-                "morph_kernel": 3,
-                "morph_iterations": 6,
             }
         )
-        morphed = np.zeros((80, 80), dtype=np.uint8)
-        cv2.rectangle(morphed, (24, 20), (39, 60), 255, -1)
+        binary = np.zeros((80, 80), dtype=np.uint8)
+        cv2.rectangle(binary, (24, 20), (39, 60), 255, -1)
         captured_operations = []
 
         def execute(_image, plan, **_kwargs):
             captured_operations.extend(type(item).__name__ for item in plan.operations)
-            return morphed.copy()
+            return binary.copy()
 
         with patch.object(detector, "execute_preprocess_plan", side_effect=execute):
             actual = detector._make_binary(np.zeros((80, 80, 3), np.uint8))
 
-        expected = morphed.copy()
+        expected = binary.copy()
         expected[10:70, 30:50] = 0
         np.testing.assert_array_equal(actual, expected)
-        self.assertEqual(
-            captured_operations, ["Gray", "Morphology", "AdaptiveMean"]
-        )
+        self.assertEqual(captured_operations, ["Gray", "Threshold"])
 
     def test_legacy_primitives_preserve_cpu_result(self):
-        image = np.random.default_rng(204).integers(
+        image = np.random.default_rng(206).integers(
             0, 256, size=(56, 70, 3), dtype=np.uint8
         )
         params = self._params()
@@ -380,14 +388,14 @@ class Detector202PreprocessTests(unittest.TestCase):
             params=params, use_gpu=True, gpu_runtime=runtime
         ).run(image)
 
-        self.assertEqual(runtime.calls, ["gray", "morphology", "adaptive"])
+        self.assertEqual(runtime.calls, ["gray", "threshold"])
         self.assertEqual(actual["defects"], expected["defects"])
         self.assertEqual(
             actual["execution"]["preprocess_capability"]["route"], "primitive"
         )
 
     def test_missing_primitive_and_failure_restart_detector_on_cpu(self):
-        image = np.random.default_rng(205).integers(
+        image = np.random.default_rng(207).integers(
             0, 256, size=(58, 72, 3), dtype=np.uint8
         )
         params = self._params()
@@ -402,14 +410,14 @@ class Detector202PreprocessTests(unittest.TestCase):
             missing["execution"]["preprocess_capability"]["route"], "fallback"
         )
 
-        runtime = _FailingMorphologyRuntime()
+        runtime = _FailingThresholdRuntime()
         failed = Detector202(
             params=params, use_gpu=True, gpu_runtime=runtime
         ).run(image)
         self.assertEqual(failed["defects"], expected["defects"])
         self.assertEqual(failed["execution"]["backend"], "cpu")
         self.assertIn(
-            "injected detector 202 morphology failure",
+            "injected detector 202 threshold failure",
             failed["execution"]["fallback_reason"],
         )
 
@@ -424,48 +432,42 @@ class Detector202GeometryTests(unittest.TestCase):
         defaults.update(params)
         return Detector202(params=defaults)
 
-    def test_actual_preprocess_detects_convex_polygon_as_ng(self):
-        image = np.full((160, 160, 3), 200, dtype=np.uint8)
-        polygon = np.array(
-            [[35, 35], [58, 38], [64, 55], [52, 72], [30, 60]],
-            dtype=np.int32,
-        )
-        cv2.fillPoly(image, [polygon], (40, 40, 40))
+    def test_actual_preprocess_detects_four_sided_shape_as_ng(self):
+        image = np.full((80, 80, 3), 40, dtype=np.uint8)
+        cv2.rectangle(image, (20, 20), (30, 26), (220, 220, 220), -1)
 
         result = self._detector().run(image)
 
         self.assertFalse(result["pass"])
-        self.assertGreaterEqual(len(result["defects"]), 1)
-        self.assertTrue(
-            all(defect["metadata"]["is_convex"] for defect in result["defects"])
-        )
-        self.assertTrue(
-            all(20.0 <= defect["area"] <= 1000.0 for defect in result["defects"])
-        )
+        self.assertEqual(len(result["defects"]), 1)
+        defect = result["defects"][0]
+        self.assertEqual(defect["type"], "202_quadrilateral_ng")
+        self.assertEqual(defect["metadata"]["vertex_count"], 4)
+        self.assertEqual(defect["metadata"]["threshold_value"], 172)
+        self.assertTrue(5.0 <= defect["area"] <= 100.0)
 
-    def test_no_accepted_polygon_is_pass(self):
-        result = self._detector().run(np.full((80, 80, 3), 200, dtype=np.uint8))
+    def test_no_accepted_quadrilateral_is_pass(self):
+        result = self._detector().run(np.full((80, 80, 3), 40, dtype=np.uint8))
         self.assertTrue(result["pass"])
         self.assertEqual(result["defects"], [])
 
-    def test_area_vertices_convexity_metadata_and_order(self):
-        small = np.array(
-            [[[1, 1]], [[4, 1]], [[4, 4]], [[1, 4]]], dtype=np.int32
+    def test_area_vertex_count_metadata_order_and_concave_acceptance(self):
+        below_area = np.array(
+            [[[1, 1]], [[3, 1]], [[3, 2]], [[1, 2]]], dtype=np.int32
         )
         convex = np.array(
-            [[[10, 10]], [[30, 10]], [[30, 20]], [[10, 20]]], dtype=np.int32
-        )
-        larger = np.array(
-            [[[50, 40]], [[75, 40]], [[75, 60]], [[50, 60]]], dtype=np.int32
+            [[[10, 10]], [[15, 10]], [[15, 14]], [[10, 14]]], dtype=np.int32
         )
         concave = np.array(
-            [[[10, 50]], [[30, 50]], [[20, 56]], [[30, 65]], [[10, 65]]],
-            dtype=np.int32,
+            [[[40, 40]], [[50, 40]], [[44, 44]], [[40, 50]]], dtype=np.int32
         )
-        huge = np.array(
-            [[[0, 0]], [[50, 0]], [[50, 50]], [[0, 50]]], dtype=np.int32
+        triangle = np.array(
+            [[[10, 50]], [[20, 50]], [[15, 58]]], dtype=np.int32
         )
-        detector = self._detector(min_area=20.0, max_area=1000.0)
+        above_area = np.array(
+            [[[0, 0]], [[11, 0]], [[11, 10]], [[0, 10]]], dtype=np.int32
+        )
+        detector = self._detector()
 
         with (
             patch.object(
@@ -473,50 +475,45 @@ class Detector202GeometryTests(unittest.TestCase):
             ),
             patch(
                 "detectors.detector_202.cv2.findContours",
-                return_value=([small, convex, larger, concave, huge], None),
+                return_value=(
+                    [below_area, convex, concave, triangle, above_area],
+                    None,
+                ),
             ),
         ):
             defects = detector.detect(np.zeros((90, 90), np.uint8))
 
-        self.assertEqual([item["area"] for item in defects], [500.0, 200.0])
-        self.assertEqual(defects[0]["bbox_local"], [50, 40, 26, 21])
-        self.assertEqual(defects[1]["bbox_local"], [10, 10, 21, 11])
+        self.assertEqual([item["area"] for item in defects], [40.0, 20.0])
+        self.assertFalse(defects[0]["metadata"]["is_convex"])
+        self.assertTrue(defects[1]["metadata"]["is_convex"])
         for defect in defects:
             metadata = defect["metadata"]
             self.assertEqual(metadata["vertex_count"], 4)
-            self.assertTrue(metadata["is_convex"])
             self.assertEqual(metadata["approx_epsilon_ratio"], 0.02)
-            self.assertEqual(metadata["min_vertices"], 3)
-            self.assertEqual(metadata["max_vertices"], 12)
+            self.assertFalse(metadata["convexity_required"])
+            self.assertEqual(metadata["contour_mode"], "list")
             self.assertEqual(defect["confidence"], 1.0)
 
-    def test_polygon_above_maximum_vertex_count_is_rejected(self):
-        angles = np.linspace(0, 2 * np.pi, 13, endpoint=False)
-        points = np.stack(
-            [40 + 15 * np.cos(angles), 40 + 15 * np.sin(angles)], axis=1
+    def test_area_boundaries_five_and_one_hundred_are_inclusive(self):
+        area_five = np.array(
+            [[[5, 5]], [[10, 5]], [[10, 6]], [[5, 6]]], dtype=np.int32
         )
-        contour = np.rint(points).astype(np.int32).reshape(-1, 1, 2)
+        area_hundred = np.array(
+            [[[20, 20]], [[30, 20]], [[30, 30]], [[20, 30]]], dtype=np.int32
+        )
+        detector = self._detector()
+        with (
+            patch.object(
+                detector, "_make_binary", return_value=np.zeros((50, 50), np.uint8)
+            ),
+            patch(
+                "detectors.detector_202.cv2.findContours",
+                return_value=([area_five, area_hundred], None),
+            ),
+        ):
+            defects = detector.detect(np.zeros((50, 50), np.uint8))
 
-        rejected = self._detector(
-            approx_epsilon_ratio=0.0, max_vertices=12
-        )
-        accepted = self._detector(
-            approx_epsilon_ratio=0.0, max_vertices=13
-        )
-        with patch.object(
-            rejected, "_make_binary", return_value=np.zeros((80, 80), np.uint8)
-        ), patch(
-            "detectors.detector_202.cv2.findContours",
-            return_value=([contour], None),
-        ):
-            self.assertEqual(rejected.detect(np.zeros((80, 80), np.uint8)), [])
-        with patch.object(
-            accepted, "_make_binary", return_value=np.zeros((80, 80), np.uint8)
-        ), patch(
-            "detectors.detector_202.cv2.findContours",
-            return_value=([contour], None),
-        ):
-            self.assertEqual(len(accepted.detect(np.zeros((80, 80), np.uint8))), 1)
+        self.assertEqual([item["area"] for item in defects], [100.0, 5.0])
 
 
 if __name__ == "__main__":
