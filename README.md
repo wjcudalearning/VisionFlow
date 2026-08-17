@@ -424,6 +424,7 @@ tile:
 - 自動面積：最小值為 `max(5, int(0.000001 × H × W))`，最大值為 `int(0.05 × H × W)`；沿用參考實作，Recipe 不另提供固定面積欄位。
 - 屏蔽：完全沿用 Detector 202 的中心半寬 `100`／半高 `630` 與共同 `0`、左 `15`、右 `26`、上 `50`、下 `20` 邊緣內縮；排除像素不產生候選，也不納入局部背景 ring。
 - 關閉屏蔽時，候選 mask、MAD、sigma、門檻、bbox、面積、CNR 與排序均與參考 commit 的自動 CNR 實作一致。
+- 詳細邏輯、公式、固定二值化比較及光衰容忍度評估：[`DETECTOR_202_1_AUTO_CNR_EVALUATION.md`](DETECTOR_202_1_AUTO_CNR_EVALUATION.md)
 - 缺陷類型：`202-1_auto_cnr_ng`
 
 ### `401`：負極旋轉矩形檢測
