@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import os
 import tempfile
 import unittest
@@ -14,6 +15,7 @@ from PySide6.QtCore import QSettings
 from PySide6.QtGui import QImage, QPalette
 from PySide6.QtWidgets import QApplication, QComboBox
 
+from core.detector_manager import DetectorManager
 from core.recipe_manager import RecipeManager
 from gui.main_window import MainWindow, _backend_status_from_result
 from gui.permission_manager import ModePasswordPrompt, PermissionManager
@@ -388,6 +390,25 @@ class GuiWorkflowTests(unittest.TestCase):
             }
             self.assertEqual(shown, set(definition["param_spec"]), detector_id)
 
+        screen._select_detector("202-CS-SN-1")
+        self.assertIsNotNone(
+            screen.param_form.labelForField(
+                screen._param_widgets["202-CS-SN-1"]["background_kernel_size"]
+            )
+        )
+        self.assertEqual(
+            screen._param_widgets["202-CS-SN-1"]["noise_sigma_floor"].edit.text(),
+            "0.00000100",
+        )
+        screen._select_detector("203-AS-SN-1")
+        for key in ("blur_size", "adaptive_block_size", "adaptive_c"):
+            self.assertIsNotNone(
+                screen.param_form.labelForField(
+                    screen._param_widgets["203-AS-SN-1"][key]
+                ),
+                key,
+            )
+
         group_headers = {
             label.property("parameterGroup")
             for label in screen.param_form_container.findChildren(
@@ -418,6 +439,45 @@ class GuiWorkflowTests(unittest.TestCase):
         self.assertEqual(built_params["blur_size"], 17)
         self.assertEqual(built_params["adaptive_c"], 7)
         self.assertEqual(built_params["min_area"], 44)
+
+    def test_admin_saves_202_and_203_optical_parameters(self):
+        recipe = RecipeManager().load(
+            Path("recipes/PRODUCT_A_NEGATIVE_401_AOI_01.yaml")
+        )
+        definitions = DetectorManager().definitions()
+        recipe["decision"]["important_detectors"] = [
+            "202-CS-SN-1",
+            "203-AS-SN-1",
+        ]
+        recipe["detectors"] = {
+            detector_id: {
+                "enabled": True,
+                "use_gpu": False,
+                "display_name": definitions[detector_id]["display_name"],
+                "params": deepcopy(definitions[detector_id]["default_params"]),
+            }
+            for detector_id in recipe["decision"]["important_detectors"]
+        }
+        screen = DesignerScreen()
+        screen.set_mode("admin")
+        screen.set_recipe(recipe)
+
+        screen._select_detector("202-CS-SN-1")
+        screen._param_widgets["202-CS-SN-1"]["background_kernel_size"].setValue(9)
+        screen._param_widgets["202-CS-SN-1"]["residual_sigma_multiplier"].setValue(4.5)
+        screen._select_detector("203-AS-SN-1")
+        screen._param_widgets["203-AS-SN-1"]["blur_size"].setValue(5)
+        screen._param_widgets["203-AS-SN-1"]["adaptive_c"].setValue(2.5)
+
+        built = screen.build_recipe()["detectors"]
+        self.assertEqual(
+            built["202-CS-SN-1"]["params"]["background_kernel_size"], 9
+        )
+        self.assertEqual(
+            built["202-CS-SN-1"]["params"]["residual_sigma_multiplier"], 4.5
+        )
+        self.assertEqual(built["203-AS-SN-1"]["params"]["blur_size"], 5)
+        self.assertEqual(built["203-AS-SN-1"]["params"]["adaptive_c"], 2.5)
 
     def test_yolox_model_file_dialog_validates_and_switches_registry_model(self):
         model_root = Path("models/yolox")

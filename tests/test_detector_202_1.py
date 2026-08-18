@@ -188,6 +188,30 @@ class Detector2021ContractTests(unittest.TestCase):
             "edge_inset_right",
             "edge_inset_top",
             "edge_inset_bottom",
+            "background_kernel_size",
+            "background_kernel_divisor",
+            "background_kernel_min",
+            "background_kernel_max",
+            "gaussian_sigma",
+            "mad_scale",
+            "noise_sigma_floor",
+            "residual_threshold_floor",
+            "residual_sigma_multiplier",
+            "candidate_max_value",
+            "morph_operation",
+            "morph_kernel",
+            "morph_iterations",
+            "connectivity",
+            "min_component_area_px",
+            "min_component_area_ratio",
+            "max_component_area_px",
+            "max_component_area_ratio",
+            "component_border_margin_px",
+            "background_padding_min_px",
+            "background_padding_max_px",
+            "background_padding_scale",
+            "min_background_pixels",
+            "cnr_noise_floor",
         }
 
         self.assertEqual(set(definition["default_params"]), expected_keys)
@@ -215,6 +239,26 @@ class Detector2021ContractTests(unittest.TestCase):
             }
         }
         RecipeManager().validate(recipe)
+
+        legacy_recipe = deepcopy(recipe)
+        legacy_recipe["detectors"]["202-CS-SN-1"]["params"] = {
+            "center_mask_enabled": False,
+            "edge_mask_enabled": False,
+        }
+        RecipeManager().validate(legacy_recipe)
+        detector = manager.create(
+            "202-CS-SN-1",
+            params=legacy_recipe["detectors"]["202-CS-SN-1"]["params"],
+        )
+        self.assertEqual(detector.params["background_kernel_min"], 31)
+        self.assertEqual(detector.params["residual_sigma_multiplier"], 3.0)
+
+        with self.assertRaisesRegex(ValueError, "background_kernel_size"):
+            Detector202_1.validate_parameters({"background_kernel_size": 10})
+        with self.assertRaisesRegex(ValueError, "background_kernel_min"):
+            Detector202_1.validate_parameters(
+                {"background_kernel_min": 153, "background_kernel_max": 151}
+            )
 
     def test_inherits_detector_202_exclusion_mask_semantics(self):
         detector = Detector202_1(
@@ -282,6 +326,46 @@ class Detector2021ReferenceTests(unittest.TestCase):
             self.assertAlmostEqual(
                 actual.background_std, expected["background_std"], places=12
             )
+
+    def test_admin_auto_cnr_parameters_drive_gaussian_threshold_and_mask(self):
+        gray = self._sample()
+        params = {
+            "center_mask_enabled": False,
+            "edge_mask_enabled": False,
+            "background_kernel_size": 9,
+            "gaussian_sigma": 1.25,
+            "mad_scale": 2.0,
+            "noise_sigma_floor": 0.25,
+            "residual_threshold_floor": 6.0,
+            "residual_sigma_multiplier": 2.5,
+            "candidate_max_value": 200,
+            "morph_operation": "none",
+            "morph_iterations": 0,
+            "min_component_area_px": 7,
+            "min_component_area_ratio": 0.001,
+            "max_component_area_px": 500,
+            "max_component_area_ratio": 0.01,
+        }
+        detector = Detector202_1(params=params)
+
+        analysis = detector._automatic_cnr_mask(gray)
+
+        background = cv2.GaussianBlur(gray.astype(np.float32), (9, 9), 1.25)
+        residual = gray.astype(np.float32) - background
+        median = float(np.median(residual))
+        mad = float(np.median(np.abs(residual - median)))
+        sigma = max(2.0 * mad, 0.25)
+        threshold = max(6.0, 2.5 * sigma)
+        expected_mask = (
+            (np.abs(residual - median) > threshold).astype(np.uint8) * 200
+        )
+        np.testing.assert_array_equal(analysis["candidate_mask"], expected_mask)
+        self.assertEqual(analysis["background_kernel"], 9)
+        self.assertEqual(analysis["gaussian_sigma"], 1.25)
+        self.assertEqual(analysis["robust_noise_sigma"], sigma)
+        self.assertEqual(analysis["residual_threshold"], threshold)
+        self.assertEqual(analysis["min_area"], 240)
+        self.assertEqual(analysis["max_area"], 500)
 
     def test_uniform_image_is_pass_and_candidate_is_ng(self):
         detector = Detector202_1(

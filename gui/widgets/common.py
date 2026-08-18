@@ -373,8 +373,12 @@ def make_param_widget(value, read_only: bool = False, spec: dict | None = None) 
             edit.setReadOnly(True)
             return edit
         is_float = isinstance(value, float)
-        decimals = 4 if is_float else 0
-        step = 0.01 if is_float else 1
+        decimals = spec.get("decimals")
+        if decimals is None:
+            decimals = 4 if is_float else 0
+        step = spec.get("step")
+        if step is None:
+            step = 0.01 if is_float else 1
         minimum = spec.get("minimum", -1_000_000)
         maximum = spec.get("maximum", 1_000_000)
         return NumStepper(value=value, minimum=minimum, maximum=maximum, step=step, decimals=decimals)

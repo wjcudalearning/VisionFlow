@@ -78,7 +78,11 @@ class StrictRecipeContractTests(unittest.TestCase):
             "202-CS-SN-1": {
                 "center_mask_width", "center_mask_height", "edge_inset_all",
                 "edge_inset_left", "edge_inset_right", "edge_inset_top",
-                "edge_inset_bottom",
+                "edge_inset_bottom", "min_component_area_px",
+                "min_component_area_ratio", "max_component_area_px",
+                "max_component_area_ratio", "component_border_margin_px",
+                "background_padding_min_px", "background_padding_max_px",
+                "background_padding_scale",
             },
             "203-AS-SN-1": {
                 "edge_inset_all", "edge_inset_left", "edge_inset_right",
@@ -95,6 +99,51 @@ class StrictRecipeContractTests(unittest.TestCase):
                 "max_edge_gap", "roi_inset_px",
             },
             "yolox": {"min_box_area_px"},
+        }
+        expected_inner = {
+            "202-CS-SN-1": {
+                "center_mask_enabled", "center_mask_use_image_center",
+                "center_mask_x", "center_mask_y", "edge_mask_enabled",
+                "background_kernel_size", "background_kernel_divisor",
+                "background_kernel_min", "background_kernel_max",
+                "gaussian_sigma", "mad_scale", "noise_sigma_floor",
+                "residual_threshold_floor", "residual_sigma_multiplier",
+                "candidate_max_value", "morph_operation", "morph_kernel",
+                "morph_iterations", "connectivity", "min_background_pixels",
+                "cnr_noise_floor",
+            },
+            "203-AS-SN-1": {
+                "edge_mask_enabled",
+                "blur_size", "adaptive_block_size", "adaptive_c", "max_value",
+                "binary_inv", "morph_operation", "morph_kernel",
+                "morph_iterations", "contour_mode",
+            },
+            "401-AS-SN-1": {
+                "blur_size", "morph_operation", "morph_kernel",
+                "morph_iterations", "adaptive_block_size", "adaptive_c",
+                "binary_inv", "max_value", "contour_mode",
+            },
+            "401-CS-AP-1": {
+                "threshold_method", "max_value", "invert", "blur_size",
+                "adaptive_block_size", "adaptive_c", "contour_mode",
+                "morph_operation", "morph_kernel", "morph_iterations",
+                "process_scale", "min_circularity", "min_fill_ratio",
+                "max_fill_ratio",
+            },
+            "401-CS-AP-2": {
+                "max_value", "blur_size", "adaptive_block_size", "adaptive_c",
+                "contour_mode", "white_pixel_ratio_threshold",
+            },
+            "900-CS-AP-1": {
+                "max_value", "outer_threshold", "outer_invert",
+                "outer_contour_mode", "inner_adaptive_block_size",
+                "inner_adaptive_c", "inner_invert", "inner_contour_mode",
+            },
+            "yolox": {
+                "model_id", "confidence_threshold", "nms_iou_threshold",
+                "target_class_ids", "max_detections", "inference_backend",
+                "precision", "class_agnostic_nms",
+            },
         }
         definitions = DetectorManager().definitions()
 
@@ -116,6 +165,15 @@ class StrictRecipeContractTests(unittest.TestCase):
                     spec["engineer_visible"] == (spec["parameter_group"] == "outer")
                     for spec in specs.values()
                 )
+            )
+            self.assertEqual(
+                {
+                    key
+                    for key, spec in specs.items()
+                    if spec["parameter_group"] == "inner"
+                },
+                expected_inner[detector_id],
+                detector_id,
             )
 
         for source_path in sorted((ROOT / "detectors").glob("detector_*.py")):

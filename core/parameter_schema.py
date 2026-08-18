@@ -17,6 +17,8 @@ class ParameterSpec:
     maximum: float | None = None
     choices: tuple[Any, ...] = ()
     odd: bool = False
+    step: float | None = None
+    decimals: int | None = None
     parameter_group: str = PARAMETER_GROUP_INNER
     engineer_visible: bool = field(init=False)
     label: str = ""
@@ -28,6 +30,10 @@ class ParameterSpec:
                 "parameter_group must be one of: "
                 + ", ".join(sorted(PARAMETER_GROUPS))
             )
+        if self.step is not None and self.step <= 0:
+            raise ValueError("step must be positive")
+        if self.decimals is not None and self.decimals < 0:
+            raise ValueError("decimals must be non-negative")
         object.__setattr__(
             self,
             "engineer_visible",

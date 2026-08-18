@@ -26,6 +26,15 @@ class Detector203AsAp1(BaseDetector):
         "edge_inset_right": 26,
         "edge_inset_top": 50,
         "edge_inset_bottom": 20,
+        "blur_size": 3,
+        "adaptive_block_size": 21,
+        "adaptive_c": 1.0,
+        "max_value": 255,
+        "binary_inv": True,
+        "morph_operation": "open",
+        "morph_kernel": 3,
+        "morph_iterations": 1,
+        "contour_mode": "list",
         "min_area": 0.0,
         "max_area": 0.0,
     }
@@ -41,17 +50,66 @@ class Detector203AsAp1(BaseDetector):
             "edge_inset_right": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER, "label": "右側內縮"},
             "edge_inset_top": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER, "label": "上側內縮"},
             "edge_inset_bottom": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER, "label": "下側內縮"},
+            "blur_size": {
+                "minimum": 1,
+                "odd": True,
+                "parameter_group": PARAMETER_GROUP_INNER,
+                "label": "Gaussian 模糊核心",
+            },
+            "adaptive_block_size": {
+                "minimum": 3,
+                "odd": True,
+                "parameter_group": PARAMETER_GROUP_INNER,
+                "label": "自適應二值化區塊",
+            },
+            "adaptive_c": {
+                "minimum": -255,
+                "maximum": 255,
+                "parameter_group": PARAMETER_GROUP_INNER,
+                "label": "自適應二值化 C",
+            },
+            "max_value": {
+                "minimum": 1,
+                "maximum": 255,
+                "parameter_group": PARAMETER_GROUP_INNER,
+                "label": "二值化最大值",
+            },
+            "binary_inv": {
+                "parameter_group": PARAMETER_GROUP_INNER,
+                "label": "反相二值化",
+            },
+            "morph_operation": {
+                "choices": ("none", "open", "close", "erode", "dilate"),
+                "parameter_group": PARAMETER_GROUP_INNER,
+                "label": "形態學操作",
+            },
+            "morph_kernel": {
+                "minimum": 1,
+                "odd": True,
+                "parameter_group": PARAMETER_GROUP_INNER,
+                "label": "形態學核心",
+            },
+            "morph_iterations": {
+                "minimum": 0,
+                "parameter_group": PARAMETER_GROUP_INNER,
+                "label": "形態學次數",
+            },
+            "contour_mode": {
+                "choices": ("external", "list", "tree", "ccomp"),
+                "parameter_group": PARAMETER_GROUP_INNER,
+                "label": "輪廓擷取模式",
+            },
             "min_area": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER, "label": "最小面積"},
             "max_area": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER, "label": "最大面積"},
         },
     )
 
-    _BLUR_SIZE = 3
-    _ADAPTIVE_BLOCK_SIZE = 21
-    _ADAPTIVE_C = 1.0
-    _MAX_VALUE = 255
-    _MORPH_KERNEL = 3
-    _MORPH_ITERATIONS = 1
+    _CONTOUR_MODES = {
+        "external": cv2.RETR_EXTERNAL,
+        "list": cv2.RETR_LIST,
+        "tree": cv2.RETR_TREE,
+        "ccomp": cv2.RETR_CCOMP,
+    }
 
     def preprocess(self, image):
         return image
@@ -60,8 +118,11 @@ class Detector203AsAp1(BaseDetector):
         with self.measure_detection_stage("preprocess"):
             binary = self._make_binary(image)
         with self.measure_detection_stage("find_contours"):
+            contour_mode = str(self.params.get("contour_mode", "list")).lower()
             contours, _ = cv2.findContours(
-                binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE
+                binary,
+                self._CONTOUR_MODES.get(contour_mode, cv2.RETR_LIST),
+                cv2.CHAIN_APPROX_SIMPLE,
             )
 
         geometry_started = time.perf_counter()
@@ -82,17 +143,27 @@ class Detector203AsAp1(BaseDetector):
                     "confidence": 1.0,
                     "metadata": {
                         "shape": "contour",
-                        "threshold_method": "adaptive_mean_inv",
-                        "blur_size": self._BLUR_SIZE,
-                        "adaptive_block_size": self._ADAPTIVE_BLOCK_SIZE,
-                        "adaptive_c": self._ADAPTIVE_C,
-                        "max_value": self._MAX_VALUE,
+                        "threshold_method": (
+                            "adaptive_mean_inv"
+                            if bool(self.params.get("binary_inv", True))
+                            else "adaptive_mean"
+                        ),
+                        "blur_size": int(self.params.get("blur_size", 3)),
+                        "adaptive_block_size": int(
+                            self.params.get("adaptive_block_size", 21)
+                        ),
+                        "adaptive_c": float(self.params.get("adaptive_c", 1.0)),
+                        "max_value": int(self.params.get("max_value", 255)),
                         "morphology": {
-                            "operation": "open",
-                            "kernel": self._MORPH_KERNEL,
-                            "iterations": self._MORPH_ITERATIONS,
+                            "operation": str(
+                                self.params.get("morph_operation", "open")
+                            ).lower(),
+                            "kernel": int(self.params.get("morph_kernel", 3)),
+                            "iterations": int(
+                                self.params.get("morph_iterations", 1)
+                            ),
                         },
-                        "contour_mode": "list",
+                        "contour_mode": contour_mode,
                         "min_area": float(self.params.get("min_area", 0.0)),
                         "max_area": float(self.params.get("max_area", 0.0)),
                         "edge_mask_enabled": bool(
@@ -119,14 +190,24 @@ class Detector203AsAp1(BaseDetector):
         return defects
 
     def _make_binary(self, image: np.ndarray) -> np.ndarray:
+        blur_size = int(self.params.get("blur_size", 3))
+        adaptive_block_size = int(self.params.get("adaptive_block_size", 21))
+        adaptive_c = float(self.params.get("adaptive_c", 1.0))
+        max_value = int(self.params.get("max_value", 255))
+        binary_inv = bool(self.params.get("binary_inv", True))
+        morph_operation = str(self.params.get("morph_operation", "open")).lower()
+        morph_kernel = int(self.params.get("morph_kernel", 3))
+        morph_iterations = int(self.params.get("morph_iterations", 1))
         signature = (
             "203_as_ap_1_preprocess",
-            self._BLUR_SIZE,
-            self._ADAPTIVE_BLOCK_SIZE,
-            self._ADAPTIVE_C,
-            self._MAX_VALUE,
-            self._MORPH_KERNEL,
-            self._MORPH_ITERATIONS,
+            blur_size,
+            adaptive_block_size,
+            adaptive_c,
+            max_value,
+            binary_inv,
+            morph_operation,
+            morph_kernel,
+            morph_iterations,
         )
         plan = self.cached_preprocess_plan(
             image,
@@ -135,17 +216,17 @@ class Detector203AsAp1(BaseDetector):
                 name="203_as_ap_1_preprocess",
                 operations=(
                     Gray(),
-                    Gaussian(self._BLUR_SIZE),
+                    Gaussian(blur_size),
                     AdaptiveMean(
-                        block_size=self._ADAPTIVE_BLOCK_SIZE,
-                        c=self._ADAPTIVE_C,
-                        max_value=self._MAX_VALUE,
-                        invert=True,
+                        block_size=adaptive_block_size,
+                        c=adaptive_c,
+                        max_value=max_value,
+                        invert=binary_inv,
                     ),
                     Morphology(
-                        "open",
-                        kernel_size=self._MORPH_KERNEL,
-                        iterations=self._MORPH_ITERATIONS,
+                        morph_operation,
+                        kernel_size=morph_kernel,
+                        iterations=morph_iterations,
                     ),
                 ),
             ),

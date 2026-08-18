@@ -430,8 +430,8 @@ Recipe Designer 會依共同 parameter schema 將每個 Detector 參數分成兩
 
 | Detector | 工程模式可調外參 | 管理模式額外開放的內參 |
 |---|---|---|
-| `202-CS-SN-1` | 中心屏蔽寬高、四邊內縮 | 屏蔽開關、中心基準與位置 |
-| `203-AS-SN-1` | 四邊內縮、最小／最大面積 | 邊緣屏蔽開關 |
+| `202-CS-SN-1` | 中心屏蔽寬高、四邊內縮、候選面積、邊界距離及背景 Ring 尺寸 | 屏蔽開關與位置、Gaussian 背景核心／Sigma、MAD／robust sigma、residual 門檻、形態學、連通性與 CNR 雜訊設定 |
+| `203-AS-SN-1` | 四邊內縮、最小／最大面積 | 邊緣屏蔽、Gaussian blur、Adaptive Mean block／C／反相／最大值、形態學及輪廓模式 |
 | `401-AS-SN-1` | ROI 內縮、最小／最大面積 | blur、adaptive threshold、反相、morphology、contour mode |
 | `401-CS-AP-1` | ROI 內縮、最小／最大面積 | threshold、blur、morphology、縮放、圓度與填充比 |
 | `401-CS-AP-2` | ROI 內縮、最小／最大面積 | threshold、blur、contour mode、白像素比例 |
@@ -442,9 +442,9 @@ Recipe Designer 會依共同 parameter schema 將每個 Detector 參數分成兩
 
 - 檔案：`detectors/detector_202_1.py`
 - 參考實作：[Wwjyun/AcceptanceChecker `DefectDetector`](https://github.com/Wwjyun/AcceptanceChecker/blob/117fce477744188b97659a035b031fe3bf874260/acceptance_checker/core/detector.py)
-- 用途：以大範圍 Gaussian blur 估背景，計算原灰階與背景的 residual，再以 MAD 估 robust noise sigma；使用 `max(8, 3 × sigma)` 建立異常 mask，執行 `3 × 3` Morphology Open 一次後套用中心／四邊屏蔽，最後用 8-connectivity connected components 取得候選。
+- 用途：以大範圍 Gaussian blur 估背景，計算原灰階與背景的 residual，再以 MAD 估 robust noise sigma；預設使用 `max(8, 3 × sigma)` 建立異常 mask，執行 `3 × 3` Morphology Open 一次後套用中心／四邊屏蔽，最後用 8-connectivity connected components 取得候選。Gaussian 固定／自動核心、Sigma、MAD 倍率、sigma floor、residual 門檻、候選遮罩值、形態學及連通性皆可在管理模式調整。
 - CNR：每個 component 的缺陷平均值與周圍背景 ring 平均值之差，除以 ring 的灰階標準差；候選依 CNR 由高到低輸出，抓到任一候選即為 NG。
-- 自動面積：最小值為 `max(5, int(0.000001 × H × W))`，最大值為 `int(0.05 × H × W)`；沿用參考實作，Recipe 不另提供固定面積欄位。
+- 自動面積：預設最小值為 `max(5, int(0.000001 × H × W))`，最大值為 `int(0.05 × H × W)`；工程模式可調固定像素值與影像面積比例。候選邊界距離、局部背景 Ring 外擴範圍／倍率也屬尺寸外參。
 - 屏蔽：中心半寬 `100`／半高 `630`，並使用共同 `0`、左 `15`、右 `26`、上 `50`、下 `20` 邊緣內縮；排除像素不產生候選，也不納入局部背景 ring。
 - 關閉屏蔽時，候選 mask、MAD、sigma、門檻、bbox、面積、CNR 與排序均與參考 commit 的自動 CNR 實作一致。
 - 詳細邏輯、公式、固定二值化比較及光衰容忍度評估：[`DETECTOR_202_1_AUTO_CNR_EVALUATION.md`](DETECTOR_202_1_AUTO_CNR_EVALUATION.md)
@@ -453,7 +453,7 @@ Recipe Designer 會依共同 parameter schema 將每個 Detector 參數分成兩
 ### `203-AS-SN-1`：自適應反相輪廓檢測
 
 - 檔案：`detectors/detector_203_as_ap_1.py`
-- 固定流程：Gray → `3 × 3` Gaussian Blur → Adaptive Mean 反相二值化（block `21`、C `1`）→ `3 × 3` Morphology Open 一次 → 四邊排除屏蔽 → 固定 `RETR_LIST` contours；抓到任一符合面積條件的輪廓即為 NG。
+- 預設流程：Gray → `3 × 3` Gaussian Blur → Adaptive Mean 反相二值化（block `21`、C `1`）→ `3 × 3` Morphology Open 一次 → 四邊排除屏蔽 → `RETR_LIST` contours；抓到任一符合面積條件的輪廓即為 NG。管理模式可調 blur、Adaptive Mean block／C、最大值、反相、形態學操作／核心／次數及 contour mode，舊 Recipe 缺少這些欄位時仍使用上述預設。
 - 預設四邊屏蔽：共同內縮 `0`，左 `15`、右 `26`、上 `50`、下 `20`；各邊實際值為共同內縮與個別值兩者的較大值。工程模式可調整內縮尺寸，停用屏蔽則需要管理模式。
 - 面積：`min_area`／`max_area` 預設皆為 `0`，代表不限制；只排除面積為零的輪廓。
 - 缺陷類型：`203_as_ap_1_contour_ng`

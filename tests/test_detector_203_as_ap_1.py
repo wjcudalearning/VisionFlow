@@ -131,6 +131,15 @@ class Detector203AsAp1ContractTests(unittest.TestCase):
             "edge_inset_right": 26,
             "edge_inset_top": 50,
             "edge_inset_bottom": 20,
+            "blur_size": 3,
+            "adaptive_block_size": 21,
+            "adaptive_c": 1.0,
+            "max_value": 255,
+            "binary_inv": True,
+            "morph_operation": "open",
+            "morph_kernel": 3,
+            "morph_iterations": 1,
+            "contour_mode": "list",
             "min_area": 0.0,
             "max_area": 0.0,
         }
@@ -210,21 +219,43 @@ class Detector203AsAp1PreprocessTests(unittest.TestCase):
     @staticmethod
     def _opencv_reference(image, params):
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
-        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+        blur_size = int(params.get("blur_size", 3))
+        blurred = cv2.GaussianBlur(gray, (blur_size, blur_size), 0)
+        threshold_type = (
+            cv2.THRESH_BINARY_INV
+            if bool(params.get("binary_inv", True))
+            else cv2.THRESH_BINARY
+        )
         binary = cv2.adaptiveThreshold(
             blurred,
-            255,
+            int(params.get("max_value", 255)),
             cv2.ADAPTIVE_THRESH_MEAN_C,
-            cv2.THRESH_BINARY_INV,
-            21,
-            1,
+            threshold_type,
+            int(params.get("adaptive_block_size", 21)),
+            float(params.get("adaptive_c", 1.0)),
         )
-        binary = cv2.morphologyEx(
-            binary,
-            cv2.MORPH_OPEN,
-            cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
-            iterations=1,
-        )
+        morph_operation = str(params.get("morph_operation", "open"))
+        morph_iterations = int(params.get("morph_iterations", 1))
+        morph_kernel = int(params.get("morph_kernel", 3))
+        if morph_operation != "none" and morph_iterations > 0 and morph_kernel > 1:
+            operations = {
+                "open": cv2.MORPH_OPEN,
+                "close": cv2.MORPH_CLOSE,
+                "erode": cv2.MORPH_ERODE,
+                "dilate": cv2.MORPH_DILATE,
+            }
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_RECT, (morph_kernel, morph_kernel)
+            )
+            operation = operations[morph_operation]
+            if operation == cv2.MORPH_ERODE:
+                binary = cv2.erode(binary, kernel, iterations=morph_iterations)
+            elif operation == cv2.MORPH_DILATE:
+                binary = cv2.dilate(binary, kernel, iterations=morph_iterations)
+            else:
+                binary = cv2.morphologyEx(
+                    binary, operation, kernel, iterations=morph_iterations
+                )
         binary[: params["edge_inset_top"], :] = 0
         binary[-params["edge_inset_bottom"] :, :] = 0
         binary[:, : params["edge_inset_left"]] = 0
@@ -241,6 +272,37 @@ class Detector203AsAp1PreprocessTests(unittest.TestCase):
 
         np.testing.assert_array_equal(actual, expected)
         self.assertEqual(detector.last_preprocess_capability["route"], "cpu")
+
+    def test_admin_adaptive_and_morphology_parameters_match_opencv(self):
+        params = {
+            **self._params(),
+            "blur_size": 5,
+            "adaptive_block_size": 15,
+            "adaptive_c": 2.5,
+            "max_value": 200,
+            "binary_inv": False,
+            "morph_operation": "close",
+            "morph_kernel": 5,
+            "morph_iterations": 2,
+        }
+        image = np.random.default_rng(20311).integers(
+            0, 256, size=(79, 93, 3), dtype=np.uint8
+        )
+        detector = Detector203AsAp1(params=params)
+
+        actual = detector._make_binary(image)
+        expected = self._opencv_reference(image, params)
+
+        np.testing.assert_array_equal(actual, expected)
+        self.assertEqual(
+            detector.last_preprocess_capability["plan_signature"][1],
+            (
+                ("gray",),
+                ("gaussian", 5),
+                ("adaptive_mean", 15, 2.5, 200, False),
+                ("morphology", "close", 5, 2),
+            ),
+        )
 
     def test_plan_cache_reuses_shape_and_invalidates_on_shape_change(self):
         detector = Detector203AsAp1(params={"edge_mask_enabled": False})
