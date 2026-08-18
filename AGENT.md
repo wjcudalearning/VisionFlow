@@ -12,6 +12,7 @@ Primary entry points:
 - GUI: `python main.py --gui`
 - Packaged GUI entry/smoke: `gui_launcher.py` and `VisionFlow AOI.exe --smoke-test`
 - Windows package build: `build_exe.ps1` using the tracked `VisionFlow AOI.spec`
+- Traditional-CV tuning reference: `contour_preprocess_tool/` (run with `python -m contour_preprocess_tool`)
 - Standalone utilities: `export_ng_tiles_by_area.py`, `export_pattern_grid_tiles.py`, `export_matrix_summary.py`, and `export_scatter_plots.py`
 - Utility bundle build: `build_utility_tools.ps1`; individual utility builds use their dedicated `build_*_exporter.ps1` or `build_ng_tile_area_tool.ps1` entry point
 - CUDA build: `gpu/build_cuda_dll.ps1`
@@ -110,6 +111,7 @@ Put behavior in the narrowest appropriate module. Do not duplicate pipeline or f
 - Do not add detector-specific CUDA workflows or exports for new detectors. When a reusable operation is missing, add a backend-neutral typed operator and its CPU reference first; temporary compatibility adapters require an explicit migration item in `Todo.md`.
 - A new traditional CV detector is not complete without tests for direct OpenCV/CPU equivalence, plan cache reuse and invalidation, missing/legacy/failing backend routing, PASS/NG, defect count, bbox, area, confidence, metadata, and deterministic ordering as applicable.
 - When detector behavior is defined by an external tuning or reference tool, preserve its exact operation order, border/channel semantics, masks, and parameter meaning. Add a direct pixel-level reference comparison that can distinguish the approved order from plausible but incorrect reorderings.
+- Use `contour_preprocess_tool.engine.ContourProcessingEngine` and an exported `visionflow-traditional-cv-tuning/v1` JSON as the canonical reference for newly tuned traditional-CV detectors. The tool must process the original full-resolution pixels; OpenGL/raster view scaling is display-only. Before migrating a Detector, select the matching raw-contour or shape-filter mode and add mask pixel equivalence plus contour/bbox/area/PASS-NG contract tests.
 - DL model inference, framework sessions, and TensorRT/ONNX Runtime execution are not required to fit inside `PreprocessPlan`. Reusable traditional CV preprocessing and postprocessing around the model should still use shared typed operators or an equivalent shared DL preprocessing abstraction.
 - DL detectors must share model/session lifecycle, GPU scheduling, VRAM budget, warm-up, capability metrics, error handling, and fallback policy. GUI, monitor, and batch workers must not each load an independent model copy.
 - A DL detector must preserve traceable preprocessing, model version, backend, input/output shape, thresholds, and fallback metadata, with CPU or approved reference-backend accuracy tests before GPU acceleration becomes a default.
@@ -134,7 +136,7 @@ Before finishing, always run:
 
 ```powershell
 .\env\Scripts\python.exe -m unittest discover -s tests -v
-.\env\Scripts\python.exe -m compileall main.py gui_launcher.py export_ng_tiles_by_area.py export_pattern_grid_tiles.py export_matrix_summary.py export_scatter_plots.py core detectors gui gpu
+.\env\Scripts\python.exe -m compileall main.py gui_launcher.py export_ng_tiles_by_area.py export_pattern_grid_tiles.py export_matrix_summary.py export_scatter_plots.py contour_preprocess_tool core detectors gui gpu
 .\env\Scripts\python.exe gpu\preflight_cuda_build.py
 git diff --check
 ```

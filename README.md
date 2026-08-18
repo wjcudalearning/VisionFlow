@@ -161,6 +161,11 @@ AOI_CVbased/
 |   |-- detector_900_domain.py      # 900-CS-AP-1 typed config、candidate 與 geometry
 |   |-- detector_900_renderer.py    # 900-CS-AP-1 專屬 NG debug overlay
 |   `-- detector_yolox.py
+|-- contour_preprocess_tool/        # 傳統 CV Detector 原圖調參基準工具
+|   |-- engine.py                   # Qt-independent OpenCV reference engine
+|   |-- viewer.py                   # OpenGL 完整解析度顯示／raster fallback
+|   |-- recipe_io.py                # 版本化調參 Recipe JSON
+|   `-- app.py                      # Qt composition root 與背景 workers
 |-- models/yolox/                   # YOLOX model registry 與 checksum 保護的模型
 |-- gui/
 |   |-- main_window.py
@@ -732,6 +737,16 @@ CUDA 詳細架構及操作請參考 [`gpu/README.md`](gpu/README.md)，完整實
 
 ## 獨立匯出工具
 
+傳統 CV Detector 請先使用原圖調參工具建立可重現的參考 Recipe：
+
+```powershell
+.\env\Scripts\python.exe -m contour_preprocess_tool
+```
+
+工具的 Gaussian、Threshold、Morphology、屏蔽、contour 與面積都在完整原圖像素上執行；OpenGL 只負責把完整 QPixmap 顯示到視窗，不會建立 OpenCV 運算縮圖。預覽與儲存共用同一處理引擎。完成調參後可匯出 `visionflow-traditional-cv-tuning/v1` JSON，新增 Detector 時必須以此檔建立 mask 像素級及 contour／bbox／area／PASS-NG 等價測試。203-AS-SN-1 應使用「輪廓」模式；舊「全部」模式會額外套用三種形狀篩選，不等同接受所有 contour。詳見 [`contour_preprocess_tool/README.md`](contour_preprocess_tool/README.md)。
+
+其餘後處理／切圖工具：
+
 ```powershell
 .\env\Scripts\python.exe export_scatter_plots.py
 .\env\Scripts\python.exe export_matrix_summary.py
@@ -797,7 +812,7 @@ VisionFlow-AOI-vX.Y.Z-windows-x64.zip
 
 ```powershell
 .\env\Scripts\python.exe -m unittest discover -s tests -v
-.\env\Scripts\python.exe -m compileall main.py gui_launcher.py export_ng_tiles_by_area.py export_pattern_grid_tiles.py export_matrix_summary.py export_scatter_plots.py core detectors gui gpu
+.\env\Scripts\python.exe -m compileall main.py gui_launcher.py export_ng_tiles_by_area.py export_pattern_grid_tiles.py export_matrix_summary.py export_scatter_plots.py contour_preprocess_tool core detectors gui gpu
 .\env\Scripts\python.exe gpu\preflight_cuda_build.py
 git diff --check
 ```
