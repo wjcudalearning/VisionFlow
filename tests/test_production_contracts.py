@@ -70,7 +70,7 @@ class StrictRecipeContractTests(unittest.TestCase):
         self.assertFalse(spec.engineer_visible)
         with self.assertRaisesRegex(ValueError, "parameter_group must be one of"):
             ParameterSpec(int, 1, parameter_group="unknown")
-        with self.assertRaisesRegex(ValueError, "must match parameter_group"):
+        with self.assertRaisesRegex(TypeError, "unexpected keyword argument"):
             ParameterSpec(int, 1, engineer_visible=True)
 
     def test_all_detector_parameters_have_explicit_outer_or_inner_access(self):
@@ -102,6 +102,9 @@ class StrictRecipeContractTests(unittest.TestCase):
         for detector_id, definition in definitions.items():
             specs = definition["param_spec"]
             self.assertEqual(
+                set(specs), set(definition["default_params"]), detector_id
+            )
+            self.assertEqual(
                 {key for key, spec in specs.items() if spec["parameter_group"] == "outer"},
                 expected_outer[detector_id],
             )
@@ -113,6 +116,13 @@ class StrictRecipeContractTests(unittest.TestCase):
                     spec["engineer_visible"] == (spec["parameter_group"] == "outer")
                     for spec in specs.values()
                 )
+            )
+
+        for source_path in sorted((ROOT / "detectors").glob("detector_*.py")):
+            self.assertNotIn(
+                "engineer_visible",
+                source_path.read_text(encoding="utf-8"),
+                source_path.name,
             )
 
     def test_load_migrates_all_legacy_detector_ids_and_default_display_names(self):

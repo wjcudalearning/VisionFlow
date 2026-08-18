@@ -46,7 +46,6 @@ class Detector202(BaseDetector):
             str,
             "open",
             choices=("none", "open", "close", "erode", "dilate"),
-            engineer_visible=False,
             tooltip="舊 Recipe 相容欄位；Detector 202 已忽略。",
         ),
         "morph_kernel": ParameterSpec(
@@ -54,21 +53,18 @@ class Detector202(BaseDetector):
             3,
             minimum=1,
             odd=True,
-            engineer_visible=False,
             tooltip="舊 Recipe 相容欄位；Detector 202 已忽略。",
         ),
         "morph_iterations": ParameterSpec(
             int,
             6,
             minimum=0,
-            engineer_visible=False,
             tooltip="舊 Recipe 相容欄位；Detector 202 已忽略。",
         ),
         "contour_mode": ParameterSpec(
             str,
             "list",
             choices=("external", "list", "tree", "ccomp"),
-            engineer_visible=False,
             tooltip="舊 Recipe 相容欄位；Detector 202 固定使用 LIST。",
         ),
         "adaptive_block_size": ParameterSpec(
@@ -76,13 +72,11 @@ class Detector202(BaseDetector):
             3,
             minimum=3,
             odd=True,
-            engineer_visible=False,
             tooltip="舊 Recipe 相容欄位；Detector 202 已改用一般二值化。",
         ),
         "adaptive_c": ParameterSpec(
             float,
             2.0,
-            engineer_visible=False,
             tooltip="舊 Recipe 相容欄位；Detector 202 已改用一般二值化。",
         ),
         "max_value": ParameterSpec(
@@ -90,7 +84,6 @@ class Detector202(BaseDetector):
             255,
             minimum=1,
             maximum=255,
-            engineer_visible=False,
             tooltip="舊 Recipe 相容欄位；Detector 202 固定使用 255。",
         ),
         "approx_epsilon_ratio": ParameterSpec(
@@ -98,27 +91,23 @@ class Detector202(BaseDetector):
             0.02,
             minimum=0.0,
             maximum=1.0,
-            engineer_visible=False,
             tooltip="舊 Recipe 相容欄位；Detector 202 固定使用 2%。",
         ),
         "min_vertices": ParameterSpec(
             int,
             3,
             minimum=3,
-            engineer_visible=False,
             tooltip="舊 Recipe 相容欄位；Detector 202 固定接受四邊形。",
         ),
         "max_vertices": ParameterSpec(
             int,
             12,
             minimum=3,
-            engineer_visible=False,
             tooltip="舊 Recipe 相容欄位；Detector 202 固定接受四邊形。",
         ),
         "convex_only": ParameterSpec(
             bool,
             True,
-            engineer_visible=False,
             tooltip="舊 Recipe 相容欄位；Detector 202 不限制凹凸。",
         ),
     }
@@ -128,17 +117,14 @@ class Detector202(BaseDetector):
             {
                 "center_mask_enabled": {"label": "啟用中心屏蔽"},
                 "center_mask_use_image_center": {
-                    "engineer_visible": False,
                     "label": "使用影像中心",
                 },
                 "center_mask_x": {
                     "minimum": 0,
-                    "engineer_visible": False,
                     "label": "自訂中心 X",
                 },
                 "center_mask_y": {
                     "minimum": 0,
-                    "engineer_visible": False,
                     "label": "自訂中心 Y",
                 },
                 "center_mask_width": {

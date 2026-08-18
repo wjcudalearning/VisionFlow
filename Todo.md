@@ -287,15 +287,9 @@
 
 - [x] 定義 detector ID 為 `yolox`、顯示名稱為「YOLOX 物件偵測」，輸入語意為目前 tile／ROI 的 BGR `uint8` 影像；命中指定缺陷類別即產生 defect，零筆 defect 為 PASS。
 - [x] 建立受控的 YOLOX model registry；Recipe 只保存穩定的 `model_id`，不可直接依賴使用者電腦上的任意絕對路徑。每個模型 manifest 至少記錄模型名稱、版本、格式、SHA-256、class names、輸入尺寸、色彩順序、正規化方式、letterbox padding、輸出節點與 decoder/stride 規格。
-- [x] 第一版工程模式可調參數固定為：
-  - `model_id`：透過檔案選擇視窗指定 `.onnx`，再由同資料夾已驗證的 model registry 解析；Recipe 仍只保存穩定 model ID。
-  - `confidence_threshold`：信心門檻，範圍 `0.0～1.0`，建議預設 `0.25`。
-  - `nms_iou_threshold`：NMS 重疊率門檻，範圍 `0.0～1.0`，建議預設 `0.45`。
-  - `target_class_ids`：要判定為 NG 的類別；空值代表模型 manifest 內全部類別。
-  - `max_detections`：單張 tile／ROI 最大保留筆數，正整數，建議預設 `300`。
-  - `min_box_area_px`：濾除過小 bbox，`0` 代表停用；此參數與 NMS IoU 分開定義。
+- [x] 工程模式只開放尺寸／面積外參 `min_box_area_px`，用來濾除過小 bbox，`0` 代表停用；此參數與 NMS IoU 分開定義。
+- [x] 管理模式開放 YOLOX 內參：`model_id`（由已驗證 `.onnx` 與 model registry 解析）、`confidence_threshold`、`nms_iou_threshold`、`target_class_ids`、`max_detections`、`inference_backend`、`precision` 與 `class_agnostic_nms`；模型輸入寬高由 manifest 唯讀帶入，不讓 Recipe 任意改成模型不支援的尺寸。
 - [x] GUI 將 `nms_iou_threshold` 標示為「NMS 重疊率 (IoU)」，tooltip 說明其值為兩框交集除以聯集，不是像素交集面積；抑制規則固定為同類別較低分框在 `IoU > threshold` 時移除，邊界等於門檻時保留。
-- [x] 管理模式才顯示進階參數：`inference_backend`（`auto`／`onnxruntime_cpu`／`onnxruntime_cuda`／`tensorrt`）、`precision`（`fp32`／`fp16`／`int8`）與 `class_agnostic_nms`；模型輸入寬高由 manifest 唯讀帶入，不讓 Recipe 任意改成模型不支援的尺寸。
 - [x] `ParameterSpec`／Recipe validation 驗證數值範圍、model ID 存在、類別 ID、backend/precision 相容性及 `max_detections > 0`；舊 Recipe 不含 YOLOX 時行為完全不變。
 
 ### 前處理、推論與結果契約
@@ -353,6 +347,7 @@
 - [ ] 加速不得犧牲 GUI 回應、打包啟動、結果追溯、錯誤訊息或 CPU fallback。
 
 ## 完成紀錄
+- [x] 2026-08-18：完成全部 Detector 參數權限 audit：逐一核對 7 個正式 registry Detector、未註冊的 `Detector202` 共用基底、`default_params`／`PARAM_SPEC`、runtime 參數讀取、tracked Recipe 與 GUI metadata；正式 Detector 外參／內參數量依序為 `202-CS-SN-1` 7／5、`203-AS-SN-1` 7／1、`401-AS-SN-1` 3／9、`401-CS-AP-1` 3／14、`401-CS-AP-2` 3／6、`900-CS-AP-1` 10／8、`yolox` 1／8，未發現權限誤分類。將不可退化規則寫入 `AGENT.md`，`parameter_group` 成為唯一權威，`engineer_visible` 改為唯讀衍生相容 metadata，Detector source 不再直接設定；修正 Todo 舊 YOLOX 工程權限描述，並強化 default/spec equality、legacy source prohibition、全 registry visibility 與隱藏內參 round-trip tests。完整 257 tests、compileall、CUDA preflight、GUI smoke、CLI smoke 及 `git diff --check` 通過；未修改 Recipe 欄位、Detector 判定語意、CUDA source／header／ABI／DLL。
 - [x] 2026-08-18：完成所有 7 個正式 Detector 的內外參權限分層；共用 `ParameterSpec` 新增 `outer`／`inner` schema，未分類參數安全預設為管理者內參，並保留舊 `engineer_visible` metadata 相容輸出。Recipe Designer 不再依參數名稱猜測權限，工程模式只顯示面積、尺寸、間距與 ROI 幾何外參，管理模式依序顯示外參及影像／光學／演算法／模型內參；YOLOX 工程模式僅保留最小框面積，模型、信心、NMS、類別與後端改為管理者限定。舊 Recipe 隱藏內參載入再儲存時完整保留。完整 257 tests、compileall、CUDA source／ABI preflight、GUI offscreen smoke、`401-AS-SN-1` CPU CLI 合成 PASS、管理模式畫面檢查及 `git diff --check` 通過；未修改 Recipe 欄位、Detector 判定語意、CUDA source／header／ABI／DLL。
 - [x] 2026-08-18：同步更新 README 的 Detector 文件：新增 7 組正式 ID 與舊 Recipe ID 對照表，說明舊 ID 載入別名、衝突拒絕、已移除 `202` 不提供別名、內建 Recipe 舊檔名及 defect type key 的相容策略；並補齊 Detector 專案樹、`900-CS-AP-1` 架構名稱、完整 compileall 指令，以及 YOLOX ONNX Runtime CPU／CUDA FP32 fallback 現況與限制。完整 253 tests、compileall、CUDA source／ABI preflight 及 `git diff --check` 通過；本次僅修改文件，未變更 runtime、Recipe、GUI 或 CUDA 實作。
 - [x] 2026-08-18：依命名規格將 Detector `202-1`／`203-AS-AP-1`／`401`／`401-1`／`401-2`／`900` 正式 ID 更新為 `202-CS-SN-1`／`203-AS-SN-1`／`401-AS-SN-1`／`401-CS-AP-1`／`401-CS-AP-2`／`900-CS-AP-1`，YOLOX 維持 `yolox`；Detector `202` 已從 registry、GUI 與正式 Recipe 移除，僅保留為 202-CS-SN-1 的內部屏蔽共用基底。內建 Recipe、Designer 預設、GUI 繁中標籤、900 debug renderer、401 profiler 與文件已同步；RecipeManager 載入舊 Recipe 時會將六組舊 ID、decision 清單及舊預設顯示名稱正規化成新值，同時存在新舊 ID 時拒絕覆蓋，舊 `202` 則明確回報未註冊。完整 253 tests、compileall、CUDA source/ABI preflight、GUI offscreen smoke、`401-AS-SN-1` CPU CLI 合成 NG（1 筆缺陷，預期 exit 2）及 `git diff --check` 通過；未修改 CUDA source／header／ABI／DLL。

@@ -5,7 +5,11 @@ import numpy as np
 import time
 
 from core.preprocess_plan import AdaptiveMean, Gaussian, Gray, Morphology, PreprocessPlan
-from core.parameter_schema import PARAMETER_GROUP_OUTER, specs_from_defaults
+from core.parameter_schema import (
+    PARAMETER_GROUP_INNER,
+    PARAMETER_GROUP_OUTER,
+    specs_from_defaults,
+)
 from detectors.base_detector import BaseDetector
 
 
@@ -29,15 +33,15 @@ class Detector401(BaseDetector):
     }
     PARAM_SPEC = specs_from_defaults(default_params, {
         "roi_inset_px": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER},
-        "blur_size": {"minimum": 3, "odd": True, "engineer_visible": False},
-        "morph_operation": {"choices": ("none", "open", "close", "erode", "dilate"), "engineer_visible": False},
-        "morph_kernel": {"minimum": 1, "odd": True, "engineer_visible": False},
-        "morph_iterations": {"minimum": 0, "engineer_visible": False},
-        "adaptive_block_size": {"minimum": 3, "odd": True, "engineer_visible": False},
-        "adaptive_c": {"engineer_visible": False},
-        "binary_inv": {"engineer_visible": False},
-        "max_value": {"minimum": 1, "maximum": 255, "engineer_visible": False},
-        "contour_mode": {"choices": ("external", "list", "tree", "ccomp"), "engineer_visible": False},
+        "blur_size": {"minimum": 3, "odd": True, "parameter_group": PARAMETER_GROUP_INNER},
+        "morph_operation": {"choices": ("none", "open", "close", "erode", "dilate"), "parameter_group": PARAMETER_GROUP_INNER},
+        "morph_kernel": {"minimum": 1, "odd": True, "parameter_group": PARAMETER_GROUP_INNER},
+        "morph_iterations": {"minimum": 0, "parameter_group": PARAMETER_GROUP_INNER},
+        "adaptive_block_size": {"minimum": 3, "odd": True, "parameter_group": PARAMETER_GROUP_INNER},
+        "adaptive_c": {"parameter_group": PARAMETER_GROUP_INNER},
+        "binary_inv": {"parameter_group": PARAMETER_GROUP_INNER},
+        "max_value": {"minimum": 1, "maximum": 255, "parameter_group": PARAMETER_GROUP_INNER},
+        "contour_mode": {"choices": ("external", "list", "tree", "ccomp"), "parameter_group": PARAMETER_GROUP_INNER},
         "min_area": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER},
         "max_area": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER},
     })

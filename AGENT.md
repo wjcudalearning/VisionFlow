@@ -91,6 +91,17 @@ Put behavior in the narrowest appropriate module. Do not duplicate pipeline or f
 - Keep hidden Results content lazy. Defer table/output population until the screen is opened and create large thumbnail collections in bounded event-loop batches so inspection completion remains responsive.
 - New operator-facing text is Traditional Chinese except established industrial abbreviations such as PASS, NG, ERROR, CPU, CUDA, ROI and DLL. Status must remain understandable without color alone and keyboard paths require tests.
 
+## Detector parameter access contract
+
+- Every registered Detector parameter must be classified by the shared `ParameterSpec.parameter_group` contract as `outer` or `inner`. `parameter_group` is authoritative; the derived `engineer_visible` field exists only for compatibility and detector source must not set it directly.
+- `outer` is intentionally narrow: only physical acceptance geometry that engineering personnel can tune without image-processing knowledge, such as area, width/height, radius/length, spacing/gap, dimensional tolerance, crop padding, and ROI or mask extents/insets.
+- Everything else is `inner`, including enable/mode switches, coordinates or origin selection, threshold/max-value/inversion, blur, adaptive parameters, morphology, contour mode, scale, circularity/fill/white-pixel ratios, model/class selection, confidence, NMS, backend, and precision.
+- `ParameterSpec` must remain fail-closed: an omitted or newly introduced classification defaults to admin-only `inner`. Never infer access from a parameter name in the GUI and never make an unknown parameter engineer-visible automatically.
+- Recipe Designer exposes only `outer` parameters in Engineer mode and exposes both groups in Admin mode. OP does not gain Detector editing access. Mode changes and programmatic loads must not create false dirty state.
+- Loading or saving a Recipe in Engineer mode must preserve every hidden `inner` value exactly. Parameter grouping is UI/access metadata only and must not rename Recipe fields, change defaults, alter Detector decisions, or break legacy Recipe ID aliases.
+- Before adding or changing a Detector, audit the registry ID, `default_params`, `PARAM_SPEC`, every runtime parameter read, tracked Recipes, and GUI metadata together. Each declared runtime parameter must have one schema entry and every schema entry must have a defined runtime/default meaning.
+- Regression tests must enumerate the exact `outer` key set for every registered Detector, assert `default_params` and `PARAM_SPEC` key equality, verify Engineer/Admin visibility for all registered Detectors, and prove an Engineer-mode Recipe round trip preserves hidden `inner` values.
+
 ## Future detector development contract
 
 - Every new traditional CV detector must express reusable image preprocessing as a cached immutable `PreprocessPlan`; detector code keeps only detector-specific geometry, filtering, PASS/NG decisions, defect metadata, and deterministic ordering.

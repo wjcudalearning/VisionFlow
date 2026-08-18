@@ -11,7 +11,11 @@ from core.ai_runtime import (
     prepare_yolox_input,
     validate_yolox_parameters,
 )
-from core.parameter_schema import PARAMETER_GROUP_OUTER, specs_from_defaults
+from core.parameter_schema import (
+    PARAMETER_GROUP_INNER,
+    PARAMETER_GROUP_OUTER,
+    specs_from_defaults,
+)
 from detectors.base_detector import BaseDetector
 
 
@@ -35,18 +39,21 @@ class DetectorYolox(BaseDetector):
         default_params,
         {
             "model_id": {
+                "parameter_group": PARAMETER_GROUP_INNER,
                 "label": "模型",
                 "tooltip": "選擇包含 registry.yaml 與權重檔、且已通過 SHA-256 驗證的 YOLOX 模型資料夾。",
             },
             "confidence_threshold": {
                 "minimum": 0.0,
                 "maximum": 1.0,
+                "parameter_group": PARAMETER_GROUP_INNER,
                 "label": "信心門檻",
                 "tooltip": "只保留 objectness × class probability 達到此值的框。",
             },
             "nms_iou_threshold": {
                 "minimum": 0.0,
                 "maximum": 1.0,
+                "parameter_group": PARAMETER_GROUP_INNER,
                 "label": "NMS 重疊率 (IoU)",
                 "tooltip": (
                     "兩框交集除以聯集，不是像素交集面積；同類別較低分框在 "
@@ -54,11 +61,13 @@ class DetectorYolox(BaseDetector):
                 ),
             },
             "target_class_ids": {
+                "parameter_group": PARAMETER_GROUP_INNER,
                 "label": "NG 類別 ID",
                 "tooltip": "以逗號分隔，例如 0,2；留空代表模型全部類別。",
             },
             "max_detections": {
                 "minimum": 1,
+                "parameter_group": PARAMETER_GROUP_INNER,
                 "label": "最大偵測數",
                 "tooltip": "單一 Tile／ROI 經 NMS 後最多保留的缺陷數。",
             },
@@ -75,7 +84,7 @@ class DetectorYolox(BaseDetector):
                     "onnxruntime_cuda",
                     "tensorrt",
                 ),
-                "engineer_visible": False,
+                "parameter_group": PARAMETER_GROUP_INNER,
                 "label": "推論後端",
                 "tooltip": (
                     "Auto 會依 detector GPU 開關選擇 ONNX Runtime CUDA；"
@@ -84,12 +93,12 @@ class DetectorYolox(BaseDetector):
             },
             "precision": {
                 "choices": ("fp32", "fp16", "int8"),
-                "engineer_visible": False,
+                "parameter_group": PARAMETER_GROUP_INNER,
                 "label": "推論精度",
                 "tooltip": "FP16／INT8 必須先通過後續精度驗收。",
             },
             "class_agnostic_nms": {
-                "engineer_visible": False,
+                "parameter_group": PARAMETER_GROUP_INNER,
                 "label": "跨類別 NMS",
                 "tooltip": "啟用後，不同類別的重疊框也會互相抑制。",
             },

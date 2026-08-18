@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Mapping
 
 
@@ -18,7 +18,7 @@ class ParameterSpec:
     choices: tuple[Any, ...] = ()
     odd: bool = False
     parameter_group: str = PARAMETER_GROUP_INNER
-    engineer_visible: bool | None = None
+    engineer_visible: bool = field(init=False)
     label: str = ""
     tooltip: str = ""
 
@@ -28,14 +28,11 @@ class ParameterSpec:
                 "parameter_group must be one of: "
                 + ", ".join(sorted(PARAMETER_GROUPS))
             )
-        expected_visibility = self.parameter_group == PARAMETER_GROUP_OUTER
-        if self.engineer_visible is None:
-            object.__setattr__(self, "engineer_visible", expected_visibility)
-        elif bool(self.engineer_visible) != expected_visibility:
-            raise ValueError(
-                "engineer_visible must match parameter_group; "
-                "only outer parameters are engineer-visible"
-            )
+        object.__setattr__(
+            self,
+            "engineer_visible",
+            self.parameter_group == PARAMETER_GROUP_OUTER,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)

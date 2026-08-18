@@ -4,7 +4,11 @@ import time
 
 import numpy as np
 
-from core.parameter_schema import PARAMETER_GROUP_OUTER, specs_from_defaults
+from core.parameter_schema import (
+    PARAMETER_GROUP_INNER,
+    PARAMETER_GROUP_OUTER,
+    specs_from_defaults,
+)
 from detectors.base_detector import BaseDetector
 from detectors.detector_900_domain import (
     CandidateAnalyzer,
@@ -40,17 +44,18 @@ class Detector900(BaseDetector):
         "roi_inset_px": 0,
     }
     PARAM_SPEC = specs_from_defaults(default_params, {
-        "max_value": {"minimum": 1, "maximum": 255, "engineer_visible": False},
-        "outer_threshold": {"minimum": 0, "maximum": 255, "engineer_visible": False},
-        "outer_invert": {"engineer_visible": False},
-        "outer_contour_mode": {"choices": ("external", "list", "tree", "ccomp"), "engineer_visible": False},
+        "max_value": {"minimum": 1, "maximum": 255, "parameter_group": PARAMETER_GROUP_INNER},
+        "outer_threshold": {"minimum": 0, "maximum": 255, "parameter_group": PARAMETER_GROUP_INNER},
+        "outer_invert": {"parameter_group": PARAMETER_GROUP_INNER},
+        "outer_contour_mode": {"choices": ("external", "list", "tree", "ccomp"), "parameter_group": PARAMETER_GROUP_INNER},
         "outer_target_width": {"minimum": 1, "parameter_group": PARAMETER_GROUP_OUTER},
         "outer_width_tolerance": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER},
         "outer_target_height": {"minimum": 1, "parameter_group": PARAMETER_GROUP_OUTER},
         "outer_height_tolerance": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER},
-        "inner_adaptive_block_size": {"minimum": 3, "odd": True, "engineer_visible": False},
-        "inner_adaptive_c": {"engineer_visible": False}, "inner_invert": {"engineer_visible": False},
-        "inner_contour_mode": {"choices": ("external", "list", "tree", "ccomp"), "engineer_visible": False},
+        "inner_adaptive_block_size": {"minimum": 3, "odd": True, "parameter_group": PARAMETER_GROUP_INNER},
+        "inner_adaptive_c": {"parameter_group": PARAMETER_GROUP_INNER},
+        "inner_invert": {"parameter_group": PARAMETER_GROUP_INNER},
+        "inner_contour_mode": {"choices": ("external", "list", "tree", "ccomp"), "parameter_group": PARAMETER_GROUP_INNER},
         "inner_target_width": {"minimum": 1, "parameter_group": PARAMETER_GROUP_OUTER},
         "inner_width_tolerance": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER},
         "inner_target_height": {"minimum": 1, "parameter_group": PARAMETER_GROUP_OUTER},
