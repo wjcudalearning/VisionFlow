@@ -114,6 +114,7 @@
 - [x] 401-2 preprocessing 已遷移到共用 plan，並保留 fused/legacy/CPU 路徑。
 - [x] Detector 202 簡化為 Gray → 一般二值化（預設門檻 172）→ 中心／四邊屏蔽 → 固定 LIST contours；只接受面積 5～100、2% epsilon 的四邊形，不限制凹凸。舊 Adaptive／Morphology／幾何 Recipe 欄位僅保留讀取相容性且不再參與運算。
 - [x] 新增 Detector 202-1 自動 CNR：依 AcceptanceChecker 參考實作執行尺度相關 Gaussian 背景、residual、MAD robust sigma、`max(8, 3×sigma)` mask、3×3 Open、8-connectivity components 與局部背景 ring CNR，並沿用 Detector 202 中心／四邊屏蔽；候選依 CNR 降冪輸出，抓到即 NG。
+- [x] 新增 Detector 203-AS-AP-1：固定執行 Gray → Gaussian 3 → Adaptive Mean 反相（block 21、C 1）→ 3×3 Open 一次 → 四邊屏蔽 → LIST contours；四邊內縮與面積上下限可由 Recipe 調整，抓到任一符合輪廓即 NG。
 - [x] 900 遷移成 cached CPU DAG plan，共用一次 gray 產生 outer global 與 inner adaptive masks。
 - [x] 900 DAG 接上 CUDA/native executor，共用 device gray 並只下載必要 masks。
 - [x] 401/401-1/401-2 的 `findContours` 與少量幾何分析暫留 CPU，只下載 binary mask。
@@ -351,6 +352,8 @@
 - [ ] 加速不得犧牲 GUI 回應、打包啟動、結果追溯、錯誤訊息或 CPU fallback。
 
 ## 完成紀錄
+- [x] 2026-08-18：新增 Detector 203-AS-AP-1，固定執行 Gray → Gaussian 3 → Adaptive Mean 反相（block 21、C 1）→ 3×3 Morphology Open 一次，再套用共同／左／右／上／下四邊屏蔽與 LIST contours；整合 DetectorManager、Recipe Designer 繁中標籤、結果標籤、metadata、cached shared plan、CPU／native／primitive／missing／strict／failing backend fallback 與 resident ROI 測試。12 項專屬測試、完整 251 tests、compileall、CUDA source/ABI preflight、GUI offscreen smoke、CPU CLI 合成 NG（1 筆缺陷，預期 exit 2）及 `git diff --check` 通過；未修改 CUDA source／header／ABI／DLL。
+
 - [x] 2026-08-17：新增 `DETECTOR_202_1_AUTO_CNR_EVALUATION.md` 技術評估，逐步說明 Detector 202-1 的 Gaussian 背景、residual、MAD robust sigma、自動門檻、Morphology Open、屏蔽、connected components、局部 ring 與 CNR 公式，並和 Detector 202 固定門檻 172 比較。以實際兩支 detector 對 240×160 合成影像做逐 1% 光衰與 Monte Carlo shot/read-noise 壓測；理想模型上限為固定 21%／Auto CNR 77%，較接近相機的 shot＋read 模型保守支持固定約 10%／Auto CNR 40%。報告明確將 Auto CNR 量產暫定設計值降為 30%，並記錄實機驗證方法、限制與不可直接視為保證規格的原因。公式／Wilson CI spot check、完整 239 tests、compileall、CUDA source/ABI preflight 與 `git diff --check` 通過；本次只新增文件與連結，未修改 detector runtime、Recipe、GUI、CUDA source／header／ABI／DLL，也未打包。
 
 - [x] 2026-08-13：新增 Detector 202-1，依 `Wwjyun/AcceptanceChecker` commit `117fce4` 的自動 CNR 語意實作尺度相關 Gaussian 背景、residual、MAD robust sigma、`max(8, 3×sigma)` 異常 mask、3×3 Open、8-connectivity components、自動面積上下限與局部背景 ring CNR；沿用 Detector 202 的中心／四邊屏蔽，被排除像素不產生候選且不納入背景 ring，候選依 CNR 降冪輸出並抓到即 NG。關閉屏蔽時逐像素 mask 與逐候選 bbox／面積／CNR 對照一致；10 項專屬 tests、完整 239 tests、compileall、CUDA source/ABI preflight、GUI offscreen smoke、CPU CLI 合成 NG（1 筆缺陷，預期 exit 2）及 `git diff --check` 通過。未修改 CUDA source／header／ABI／DLL，未打包。

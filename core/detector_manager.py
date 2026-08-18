@@ -6,6 +6,7 @@ from pathlib import Path
 from core.ai_runtime import YoloXModelRegistry
 from detectors.detector_202 import Detector202
 from detectors.detector_202_1 import Detector202_1
+from detectors.detector_203_as_ap_1 import Detector203AsAp1
 from detectors.detector_401 import Detector401
 from detectors.detector_401_1 import Detector401_1
 from detectors.detector_401_2 import Detector401_2
@@ -18,6 +19,7 @@ class DetectorManager:
         self._registry = {
             Detector202.detector_id: Detector202,
             Detector202_1.detector_id: Detector202_1,
+            Detector203AsAp1.detector_id: Detector203AsAp1,
             Detector401.detector_id: Detector401,
             Detector401_1.detector_id: Detector401_1,
             Detector401_2.detector_id: Detector401_2,

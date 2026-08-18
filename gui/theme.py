@@ -42,6 +42,7 @@ DEFECT_TYPE_LABELS = {
     "202-1_auto_cnr_ng": "202-1 自動 CNR NG",
     "202_quadrilateral_ng": "202 四邊形 NG",
     "202_convex_polygon_ng": "202 凸多邊形 NG",
+    "203_as_ap_1_contour_ng": "203-AS-AP-1 輪廓 NG",
     "blob": "Blob",
     "scratch": "Scratch",
     "uniformity": "Uniformity",

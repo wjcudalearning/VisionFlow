@@ -427,6 +427,14 @@ tile:
 - 詳細邏輯、公式、固定二值化比較及光衰容忍度評估：[`DETECTOR_202_1_AUTO_CNR_EVALUATION.md`](DETECTOR_202_1_AUTO_CNR_EVALUATION.md)
 - 缺陷類型：`202-1_auto_cnr_ng`
 
+### `203-AS-AP-1`：自適應反相輪廓檢測
+
+- 檔案：`detectors/detector_203_as_ap_1.py`
+- 固定流程：Gray → `3 × 3` Gaussian Blur → Adaptive Mean 反相二值化（block `21`、C `1`）→ `3 × 3` Morphology Open 一次 → 四邊排除屏蔽 → 固定 `RETR_LIST` contours；抓到任一符合面積條件的輪廓即為 NG。
+- 預設四邊屏蔽：共同內縮 `0`，左 `15`、右 `26`、上 `50`、下 `20`；各邊實際值為共同內縮與個別值兩者的較大值，並可在 Recipe Designer 調整或停用。
+- 面積：`min_area`／`max_area` 預設皆為 `0`，代表不限制；只排除面積為零的輪廓。
+- 缺陷類型：`203_as_ap_1_contour_ng`
+
 ### `401`：負極旋轉矩形檢測
 
 - 檔案：`detectors/detector_401.py`
