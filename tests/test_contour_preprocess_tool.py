@@ -12,6 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
+from contour_preprocess_tool import __version__
 from contour_preprocess_tool.app import ContourPreprocessWindow
 from contour_preprocess_tool.engine import ContourProcessingEngine
 from contour_preprocess_tool.recipe_io import TuningRecipeDocument, TuningRecipeStore
@@ -99,6 +100,9 @@ def detector_203_tool_params() -> dict:
 
 
 class ContourProcessingEngineTests(unittest.TestCase):
+    def test_release_version(self):
+        self.assertEqual(__version__, "1.0.0")
+
     def test_detector_203_mask_and_raw_contours_are_pixel_equivalent(self):
         image = np.random.default_rng(2030818).integers(
             0, 256, size=(137, 181, 3), dtype=np.uint8

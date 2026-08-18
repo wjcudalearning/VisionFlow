@@ -745,6 +745,14 @@ CUDA 詳細架構及操作請參考 [`gpu/README.md`](gpu/README.md)，完整實
 
 工具的 Gaussian、Threshold、Morphology、屏蔽、contour 與面積都在完整原圖像素上執行；OpenGL 只負責把完整 QPixmap 顯示到視窗，不會建立 OpenCV 運算縮圖。預覽與儲存共用同一處理引擎。完成調參後可匯出 `visionflow-traditional-cv-tuning/v1` JSON，新增 Detector 時必須以此檔建立 mask 像素級及 contour／bbox／area／PASS-NG 等價測試。203-AS-SN-1 應使用「輪廓」模式；舊「全部」模式會額外套用三種形狀篩選，不等同接受所有 contour。詳見 [`contour_preprocess_tool/README.md`](contour_preprocess_tool/README.md)。
 
+獨立 Windows x64 EXE 使用自己的版本與 Tag 命名空間，不併入 AOI 主程式或四支 Utility Tools：
+
+```powershell
+.\build_contour_preprocess_tool.ps1 -Version 1.0.0
+```
+
+輸出目錄為 `dist\Traditional-CV-Tuning-Tool`；發佈 ZIP 命名為 `Traditional-CV-Tuning-Tool-vX.Y.Z-windows-x64.zip`，Tag 使用 `cv-tuning-tool-vX.Y.Z`。此工具的 OpenCV 處理為 CPU 路徑，不含 CUDA DLL；OpenGL 僅用於完整解析度 Qt 預覽並保留 raster fallback。
+
 其餘後處理／切圖工具：
 
 ```powershell

@@ -46,3 +46,19 @@ $env:QT_QPA_PLATFORM='offscreen'
 - `recipe_io.py`：版本化調參 Recipe JSON。
 - `viewer.py`：完整解析度 OpenGL／Qt raster 顯示。
 - `app.py`：Qt composition root、參數控制、背景 preview/save workers。
+
+## Windows 獨立版
+
+由 repository 根目錄執行：
+
+```powershell
+.\build_contour_preprocess_tool.ps1 -Version 1.0.0
+```
+
+完成後執行：
+
+```powershell
+& '.\dist\Traditional-CV-Tuning-Tool\Traditional CV Tuning Tool.exe'
+```
+
+Release ZIP 為 `Traditional-CV-Tuning-Tool-v1.0.0-windows-x64.zip`，Git tag 為 `cv-tuning-tool-v1.0.0`。EXE 為 Windows x64 one-file GUI，不需另裝 Python。OpenCV 處理使用 CPU，不含 CUDA DLL；Qt 會在可用時用 OpenGL 顯示完整解析度影像，否則自動使用 raster fallback。程式尚未簽章，Windows SmartScreen 可能顯示未知發行者。

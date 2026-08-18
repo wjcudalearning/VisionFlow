@@ -55,6 +55,7 @@ from PySide6.QtWidgets import (
 from .engine import ContourProcessingEngine
 from .image_io import UnicodeImageStore
 from .recipe_io import TuningRecipeDocument, TuningRecipeStore
+from .version import __version__
 from .viewer import FullResolutionImageViewer
 
 
@@ -1339,13 +1340,25 @@ class ContourPreprocessWindow(QMainWindow):
 
 def main() -> int:
     smoke_test = "--smoke-test" in sys.argv
+    if "--version" in sys.argv:
+        print(__version__)
+        return 0
+
     qt_args = [argument for argument in sys.argv if argument != "--smoke-test"]
     app = QApplication(qt_args)
     win = ContourPreprocessWindow()
     if smoke_test:
         params = win.collect_params()
+        synthetic = np.full((97, 131, 3), 127, dtype=np.uint8)
+        result = win.engine.process(synthetic, params)
+        win.viewer.set_cv_image(result.annotated)
+        if result.annotated.shape != synthetic.shape:
+            raise RuntimeError("Smoke test changed the processing resolution")
+        if win.viewer.source_size != (131, 97):
+            raise RuntimeError("Smoke test viewer did not retain full resolution")
         print(
             "Contour tuning tool smoke passed:",
+            __version__,
             type(win.engine).__name__,
             win.viewer.render_backend,
             params["shape_mode"],

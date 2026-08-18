@@ -2,6 +2,8 @@
 
 本文件是專案唯一的工作清單，涵蓋 CPU、GPU、CUDA、Detector、GUI、打包、CI 與實機驗收。完成程式修改時必須同步更新對應 checkbox；不得再建立分散的 CPU/GPU Todo 文件。
 
+- [x] 2026-08-18：建立 Traditional CV Tuning Tool v1.0.0 獨立 Windows 發佈契約：加入單一來源版本、PyInstaller-safe launcher、Windows version resource、one-file GUI spec、專用 build script、完整解析度 packaged smoke、README 與 release notes；使用 `cv-tuning-tool-vX.Y.Z` Tag 與 `Traditional-CV-Tuning-Tool-vX.Y.Z-windows-x64.zip`，不混用 AOI 主程式或 Utility Tools 版本；成品為 CPU/OpenCV 處理、Qt OpenGL 顯示／raster fallback，且不含 CUDA DLL。
+
 ## 開發原則
 
 - CPU 路徑是正確性基準，也是無 NVIDIA GPU、DLL 載入失敗、CUDA error 或顯存不足時的 fallback。
