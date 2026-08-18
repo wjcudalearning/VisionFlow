@@ -4,6 +4,11 @@ from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
 
+PARAMETER_GROUP_OUTER = "outer"
+PARAMETER_GROUP_INNER = "inner"
+PARAMETER_GROUPS = frozenset({PARAMETER_GROUP_OUTER, PARAMETER_GROUP_INNER})
+
+
 @dataclass(frozen=True)
 class ParameterSpec:
     value_type: type
@@ -12,9 +17,25 @@ class ParameterSpec:
     maximum: float | None = None
     choices: tuple[Any, ...] = ()
     odd: bool = False
-    engineer_visible: bool = True
+    parameter_group: str = PARAMETER_GROUP_INNER
+    engineer_visible: bool | None = None
     label: str = ""
     tooltip: str = ""
+
+    def __post_init__(self) -> None:
+        if self.parameter_group not in PARAMETER_GROUPS:
+            raise ValueError(
+                "parameter_group must be one of: "
+                + ", ".join(sorted(PARAMETER_GROUPS))
+            )
+        expected_visibility = self.parameter_group == PARAMETER_GROUP_OUTER
+        if self.engineer_visible is None:
+            object.__setattr__(self, "engineer_visible", expected_visibility)
+        elif bool(self.engineer_visible) != expected_visibility:
+            raise ValueError(
+                "engineer_visible must match parameter_group; "
+                "only outer parameters are engineer-visible"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)

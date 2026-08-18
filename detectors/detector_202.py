@@ -5,7 +5,11 @@ import time
 import cv2
 import numpy as np
 
-from core.parameter_schema import ParameterSpec, specs_from_defaults
+from core.parameter_schema import (
+    PARAMETER_GROUP_OUTER,
+    ParameterSpec,
+    specs_from_defaults,
+)
 from core.preprocess_plan import Gray, PreprocessPlan, Threshold
 from detectors.base_detector import BaseDetector
 
@@ -137,22 +141,58 @@ class Detector202(BaseDetector):
                     "engineer_visible": False,
                     "label": "自訂中心 Y",
                 },
-                "center_mask_width": {"minimum": 0, "label": "中心屏蔽半寬 X"},
-                "center_mask_height": {"minimum": 0, "label": "中心屏蔽半高 Y"},
+                "center_mask_width": {
+                    "minimum": 0,
+                    "parameter_group": PARAMETER_GROUP_OUTER,
+                    "label": "中心屏蔽半寬 X",
+                },
+                "center_mask_height": {
+                    "minimum": 0,
+                    "parameter_group": PARAMETER_GROUP_OUTER,
+                    "label": "中心屏蔽半高 Y",
+                },
                 "edge_mask_enabled": {"label": "啟用邊緣屏蔽"},
-                "edge_inset_all": {"minimum": 0, "label": "共同內縮"},
-                "edge_inset_left": {"minimum": 0, "label": "左側內縮"},
-                "edge_inset_right": {"minimum": 0, "label": "右側內縮"},
-                "edge_inset_top": {"minimum": 0, "label": "上側內縮"},
-                "edge_inset_bottom": {"minimum": 0, "label": "下側內縮"},
+                "edge_inset_all": {
+                    "minimum": 0,
+                    "parameter_group": PARAMETER_GROUP_OUTER,
+                    "label": "共同內縮",
+                },
+                "edge_inset_left": {
+                    "minimum": 0,
+                    "parameter_group": PARAMETER_GROUP_OUTER,
+                    "label": "左側內縮",
+                },
+                "edge_inset_right": {
+                    "minimum": 0,
+                    "parameter_group": PARAMETER_GROUP_OUTER,
+                    "label": "右側內縮",
+                },
+                "edge_inset_top": {
+                    "minimum": 0,
+                    "parameter_group": PARAMETER_GROUP_OUTER,
+                    "label": "上側內縮",
+                },
+                "edge_inset_bottom": {
+                    "minimum": 0,
+                    "parameter_group": PARAMETER_GROUP_OUTER,
+                    "label": "下側內縮",
+                },
                 "threshold_value": {
                     "minimum": 0,
                     "maximum": 255,
                     "label": "一般二值化門檻",
                 },
                 "binary_inv": {"label": "反向二值化"},
-                "min_area": {"minimum": 0, "label": "最小面積"},
-                "max_area": {"minimum": 0, "label": "最大面積"},
+                "min_area": {
+                    "minimum": 0,
+                    "parameter_group": PARAMETER_GROUP_OUTER,
+                    "label": "最小面積",
+                },
+                "max_area": {
+                    "minimum": 0,
+                    "parameter_group": PARAMETER_GROUP_OUTER,
+                    "label": "最大面積",
+                },
             },
         ),
         **_LEGACY_IGNORED_SPECS,

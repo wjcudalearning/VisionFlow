@@ -178,6 +178,7 @@
 - [x] **CSV 面積精度換算**：Recipe Designer 可設定 `1 px = n µm` 並保存至 recipe；所有執行模式的缺陷 CSV 集中換算為 µm²並標示單位，留空及舊 recipe 維持 px²，Detector 判定門檻不變。
 - [x] **GUI 操作環境記憶**：使用 QSettings 保存並恢復上次 recipe、影像／batch／monitor 資料夾、輸出選項、最後畫面、視窗 geometry/state、viewer zoom 與主要 splitter 比例；無效路徑安全忽略。
 - [x] **GUI 權限管理器**：每次啟動固定進入 OP；工程／管理模式分別以預設密碼 `1234`／`5678` 驗證，驗證邏輯與密碼提示視窗採獨立 OOP 元件且可注入替換。
+- [x] **Detector 內外參權限**：所有正式 Detector 由共用 parameter schema 明確標記外參／內參；工程模式只顯示面積、尺寸、間距與 ROI 幾何外參，管理模式完整顯示影像、光學、演算法與模型內參，未分類的新參數安全預設為管理者內參，舊 Recipe 隱藏值仍完整保留。
 - [x] **大量資料操作**：Batch／Monitor 表格使用 model/view 與增量更新，提供 PASS／NG／ERROR 篩選；scatter 超過上限採 deterministic sampling，避免每筆結果重建整表。
 - [x] **繁中一致性與可及性**：操作訊息統一繁體中文，PASS／NG／CPU／CUDA 等工業縮寫保留；狀態不得只依賴顏色，並補 tooltip／文字標籤與鍵盤操作測試。
 - [ ] 有 GPU、無 GPU、DLL 缺少、DLL 版本不符、fallback 開/關各完成一次打包實機測試。（runtime tests 已覆蓋 missing/ABI mismatch/no-device/context-failure 與 fallback policy；無 NVIDIA/CUDA DLL 電腦已完成 CPU-compatible package build 與 5 recipes bundle，packaged smoke 進一步驗證 MainWindow、CPU-only pipeline、缺 DLL fallback 開啟時與 CPU 結果一致且 GPU call count=0、fallback 關閉/strict CUDA 明確失敗，EXE exit 0；有 GPU 與 packaged ABI mismatch 待實機）
@@ -352,6 +353,7 @@
 - [ ] 加速不得犧牲 GUI 回應、打包啟動、結果追溯、錯誤訊息或 CPU fallback。
 
 ## 完成紀錄
+- [x] 2026-08-18：完成所有 7 個正式 Detector 的內外參權限分層；共用 `ParameterSpec` 新增 `outer`／`inner` schema，未分類參數安全預設為管理者內參，並保留舊 `engineer_visible` metadata 相容輸出。Recipe Designer 不再依參數名稱猜測權限，工程模式只顯示面積、尺寸、間距與 ROI 幾何外參，管理模式依序顯示外參及影像／光學／演算法／模型內參；YOLOX 工程模式僅保留最小框面積，模型、信心、NMS、類別與後端改為管理者限定。舊 Recipe 隱藏內參載入再儲存時完整保留。完整 257 tests、compileall、CUDA source／ABI preflight、GUI offscreen smoke、`401-AS-SN-1` CPU CLI 合成 PASS、管理模式畫面檢查及 `git diff --check` 通過；未修改 Recipe 欄位、Detector 判定語意、CUDA source／header／ABI／DLL。
 - [x] 2026-08-18：同步更新 README 的 Detector 文件：新增 7 組正式 ID 與舊 Recipe ID 對照表，說明舊 ID 載入別名、衝突拒絕、已移除 `202` 不提供別名、內建 Recipe 舊檔名及 defect type key 的相容策略；並補齊 Detector 專案樹、`900-CS-AP-1` 架構名稱、完整 compileall 指令，以及 YOLOX ONNX Runtime CPU／CUDA FP32 fallback 現況與限制。完整 253 tests、compileall、CUDA source／ABI preflight 及 `git diff --check` 通過；本次僅修改文件，未變更 runtime、Recipe、GUI 或 CUDA 實作。
 - [x] 2026-08-18：依命名規格將 Detector `202-1`／`203-AS-AP-1`／`401`／`401-1`／`401-2`／`900` 正式 ID 更新為 `202-CS-SN-1`／`203-AS-SN-1`／`401-AS-SN-1`／`401-CS-AP-1`／`401-CS-AP-2`／`900-CS-AP-1`，YOLOX 維持 `yolox`；Detector `202` 已從 registry、GUI 與正式 Recipe 移除，僅保留為 202-CS-SN-1 的內部屏蔽共用基底。內建 Recipe、Designer 預設、GUI 繁中標籤、900 debug renderer、401 profiler 與文件已同步；RecipeManager 載入舊 Recipe 時會將六組舊 ID、decision 清單及舊預設顯示名稱正規化成新值，同時存在新舊 ID 時拒絕覆蓋，舊 `202` 則明確回報未註冊。完整 253 tests、compileall、CUDA source/ABI preflight、GUI offscreen smoke、`401-AS-SN-1` CPU CLI 合成 NG（1 筆缺陷，預期 exit 2）及 `git diff --check` 通過；未修改 CUDA source／header／ABI／DLL。
 

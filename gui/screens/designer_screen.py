@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from core.detector_manager import DetectorManager
 from core.gpu_runtime import GpuRuntime
+from core.parameter_schema import PARAMETER_GROUP_INNER, PARAMETER_GROUP_OUTER
 from core.recipe_manager import RecipeError
 from gui import icons
 from gui.designer_model import (
@@ -83,53 +84,6 @@ CONTOUR_DEFAULTS = {
     },
 }
 
-ENGINEER_VISIBLE_PARAM_KEYS = {
-    "roi_inset_px",
-    "min_area",
-    "max_area",
-    "min_width",
-    "max_width",
-    "min_height",
-    "max_height",
-    "width",
-    "height",
-    "min_radius",
-    "max_radius",
-    "radius",
-    "min_length",
-    "max_length",
-    "crop_padding",
-    "padding",
-}
-
-ENGINEER_HIDDEN_PARAM_KEY_PARTS = {
-    "adaptive",
-    "binary",
-    "blur",
-    "circularity",
-    "contour",
-    "fill_ratio",
-    "invert",
-    "kernel",
-    "max_value",
-    "morph",
-    "nms",
-    "process_scale",
-    "ratio",
-    "threshold",
-    "window",
-}
-
-
-def _is_engineer_visible_param(key: str) -> bool:
-    normalized = key.lower()
-    if normalized in ENGINEER_VISIBLE_PARAM_KEYS:
-        return True
-    if any(part in normalized for part in ENGINEER_HIDDEN_PARAM_KEY_PARTS):
-        return False
-    return normalized.endswith(("_area", "_width", "_height", "_radius", "_length", "_padding"))
-
-
 def _form_grid() -> QFormLayout:
     form = QFormLayout()
     form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
@@ -145,6 +99,22 @@ def _label(text: str, mono: bool = False) -> QLabel:
     if mono:
         widget.setProperty("mono", "true")
     return widget
+
+
+def _parameter_group_header(parameter_group: str) -> QLabel:
+    if parameter_group == PARAMETER_GROUP_OUTER:
+        text = "外參｜尺寸、面積與 ROI 範圍"
+        tooltip = "工程與管理模式皆可調整；只包含幾何尺寸、面積及 ROI 範圍。"
+    else:
+        text = "內參｜影像、光學與演算法（僅管理模式）"
+        tooltip = "需要影像處理或模型知識，僅管理模式可調整。"
+    header = QLabel(text)
+    header.setProperty("parameterGroup", parameter_group)
+    header.setStyleSheet(
+        f"color: {COLORS['accent_text']}; font-weight: 700; padding: 8px 0 3px 0;"
+    )
+    header.setToolTip(tooltip)
+    return header
 
 
 class TilePreviewLabel(QLabel):
@@ -953,25 +923,45 @@ class DesignerScreen(QWidget):
         self._clear_param_form()
         widgets = self._param_widgets.setdefault(detector_id, {})
         param_spec = definition.get("param_spec", {})
+        grouped_parameters = {
+            PARAMETER_GROUP_OUTER: [],
+            PARAMETER_GROUP_INNER: [],
+        }
         for key, default_value in self._param_values_for_detector(detector_id).items():
-            visible = param_spec.get(key, {}).get("engineer_visible", _is_engineer_visible_param(key))
-            if self.mode == "eng" and not visible:
-                continue
+            spec = param_spec.get(key, {})
+            parameter_group = str(
+                spec.get("parameter_group", PARAMETER_GROUP_INNER)
+            )
             widget = widgets.get(key)
             if widget is None:
                 widget = self._make_detector_param_widget(
-                    detector_id, key, default_value, param_spec.get(key, {})
+                    detector_id, key, default_value, spec
                 )
                 widgets[key] = widget
-            spec = param_spec.get(key, {})
-            label = _label(spec.get("label") or key, mono=not bool(spec.get("label")))
-            tooltip = str(spec.get("tooltip", "")).strip()
-            if tooltip:
-                label.setToolTip(tooltip)
-                widget.setToolTip(tooltip)
-            self.param_form.addRow(label, widget)
+            if self.mode != "admin" and parameter_group != PARAMETER_GROUP_OUTER:
+                continue
+            grouped_parameters[parameter_group].append((key, widget, spec))
 
-        if detector_id == "yolox":
+        for parameter_group in (PARAMETER_GROUP_OUTER, PARAMETER_GROUP_INNER):
+            parameters = grouped_parameters[parameter_group]
+            if not parameters:
+                continue
+            self.param_form.addRow(_parameter_group_header(parameter_group))
+            for key, widget, spec in parameters:
+                label = _label(
+                    spec.get("label") or key,
+                    mono=not bool(spec.get("label")),
+                )
+                label.setProperty("parameterKey", key)
+                widget.setProperty("parameterKey", key)
+                widget.setProperty("parameterGroup", parameter_group)
+                tooltip = str(spec.get("tooltip", "")).strip()
+                if tooltip:
+                    label.setToolTip(tooltip)
+                    widget.setToolTip(tooltip)
+                self.param_form.addRow(label, widget)
+
+        if detector_id == "yolox" and self.mode == "admin":
             self.yolox_model_info_edit = QLineEdit()
             self.yolox_model_info_edit.setReadOnly(True)
             self.yolox_model_info_edit.setProperty("mono", "true")

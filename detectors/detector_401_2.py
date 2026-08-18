@@ -5,7 +5,7 @@ import numpy as np
 import time
 
 from core.preprocess_plan import AdaptiveMean, Gaussian, Gray, PreprocessPlan
-from core.parameter_schema import specs_from_defaults
+from core.parameter_schema import PARAMETER_GROUP_OUTER, specs_from_defaults
 from detectors.base_detector import BaseDetector
 
 
@@ -29,9 +29,10 @@ class Detector401_2(BaseDetector):
         "blur_size": {"minimum": 3, "odd": True, "engineer_visible": False},
         "adaptive_block_size": {"minimum": 3, "odd": True, "engineer_visible": False},
         "adaptive_c": {"engineer_visible": False},
-        "roi_inset_px": {"minimum": 0},
+        "roi_inset_px": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER},
         "contour_mode": {"choices": ("external", "list", "tree", "ccomp"), "engineer_visible": False},
-        "min_area": {"minimum": 0}, "max_area": {"minimum": 0},
+        "min_area": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER},
+        "max_area": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER},
         "white_pixel_ratio_threshold": {"minimum": 0.0, "maximum": 1.0, "engineer_visible": False},
     })
 

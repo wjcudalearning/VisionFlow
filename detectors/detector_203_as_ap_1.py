@@ -5,7 +5,7 @@ import time
 import cv2
 import numpy as np
 
-from core.parameter_schema import specs_from_defaults
+from core.parameter_schema import PARAMETER_GROUP_OUTER, specs_from_defaults
 from core.preprocess_plan import AdaptiveMean, Gaussian, Gray, Morphology, PreprocessPlan
 from detectors.base_detector import BaseDetector
 
@@ -29,13 +29,13 @@ class Detector203AsAp1(BaseDetector):
         default_params,
         {
             "edge_mask_enabled": {"label": "啟用四邊屏蔽"},
-            "edge_inset_all": {"minimum": 0, "label": "共同內縮"},
-            "edge_inset_left": {"minimum": 0, "label": "左側內縮"},
-            "edge_inset_right": {"minimum": 0, "label": "右側內縮"},
-            "edge_inset_top": {"minimum": 0, "label": "上側內縮"},
-            "edge_inset_bottom": {"minimum": 0, "label": "下側內縮"},
-            "min_area": {"minimum": 0, "label": "最小面積"},
-            "max_area": {"minimum": 0, "label": "最大面積"},
+            "edge_inset_all": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER, "label": "共同內縮"},
+            "edge_inset_left": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER, "label": "左側內縮"},
+            "edge_inset_right": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER, "label": "右側內縮"},
+            "edge_inset_top": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER, "label": "上側內縮"},
+            "edge_inset_bottom": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER, "label": "下側內縮"},
+            "min_area": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER, "label": "最小面積"},
+            "max_area": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER, "label": "最大面積"},
         },
     )
 

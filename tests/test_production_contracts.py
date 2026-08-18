@@ -12,6 +12,7 @@ import numpy as np
 import yaml
 
 from core.detector_manager import DetectorManager
+from core.parameter_schema import ParameterSpec
 from core.pipeline import AOIPipeline
 from core.provenance import canonical_sha256, inspection_provenance, sha256_bytes
 from core.recipe_manager import RecipeError, RecipeManager
@@ -61,6 +62,58 @@ class StrictRecipeContractTests(unittest.TestCase):
         self.assertEqual(set(definition["param_spec"]), set(definition["default_params"]))
         self.assertTrue(definition["param_spec"]["morph_kernel"]["odd"])
         self.assertFalse(definition["param_spec"]["morph_kernel"]["engineer_visible"])
+
+    def test_unclassified_parameter_defaults_to_admin_only_inner_group(self):
+        spec = ParameterSpec(int, 1)
+
+        self.assertEqual(spec.parameter_group, "inner")
+        self.assertFalse(spec.engineer_visible)
+        with self.assertRaisesRegex(ValueError, "parameter_group must be one of"):
+            ParameterSpec(int, 1, parameter_group="unknown")
+        with self.assertRaisesRegex(ValueError, "must match parameter_group"):
+            ParameterSpec(int, 1, engineer_visible=True)
+
+    def test_all_detector_parameters_have_explicit_outer_or_inner_access(self):
+        expected_outer = {
+            "202-CS-SN-1": {
+                "center_mask_width", "center_mask_height", "edge_inset_all",
+                "edge_inset_left", "edge_inset_right", "edge_inset_top",
+                "edge_inset_bottom",
+            },
+            "203-AS-SN-1": {
+                "edge_inset_all", "edge_inset_left", "edge_inset_right",
+                "edge_inset_top", "edge_inset_bottom", "min_area", "max_area",
+            },
+            "401-AS-SN-1": {"roi_inset_px", "min_area", "max_area"},
+            "401-CS-AP-1": {"roi_inset_px", "min_area", "max_area"},
+            "401-CS-AP-2": {"roi_inset_px", "min_area", "max_area"},
+            "900-CS-AP-1": {
+                "outer_target_width", "outer_width_tolerance",
+                "outer_target_height", "outer_height_tolerance",
+                "inner_target_width", "inner_width_tolerance",
+                "inner_target_height", "inner_height_tolerance",
+                "max_edge_gap", "roi_inset_px",
+            },
+            "yolox": {"min_box_area_px"},
+        }
+        definitions = DetectorManager().definitions()
+
+        self.assertEqual(set(definitions), set(expected_outer))
+        for detector_id, definition in definitions.items():
+            specs = definition["param_spec"]
+            self.assertEqual(
+                {key for key, spec in specs.items() if spec["parameter_group"] == "outer"},
+                expected_outer[detector_id],
+            )
+            self.assertTrue(
+                all(spec["parameter_group"] in {"outer", "inner"} for spec in specs.values())
+            )
+            self.assertTrue(
+                all(
+                    spec["engineer_visible"] == (spec["parameter_group"] == "outer")
+                    for spec in specs.values()
+                )
+            )
 
     def test_load_migrates_all_legacy_detector_ids_and_default_display_names(self):
         aliases = RecipeManager.LEGACY_DETECTOR_ID_ALIASES

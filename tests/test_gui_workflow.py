@@ -320,13 +320,30 @@ class GuiWorkflowTests(unittest.TestCase):
         )
         self.assertTrue(model_widget.path_edit.isReadOnly())
         self.assertEqual(model_widget.browse_button.text(), "瀏覽")
+        self.assertIn("最小框面積 (px²)", labels)
+        self.assertNotIn("模型", labels)
+        self.assertNotIn("信心門檻", labels)
+        self.assertNotIn("NMS 重疊率 (IoU)", labels)
+        self.assertNotIn("NG 類別 ID", labels)
+        self.assertNotIn("最大偵測數", labels)
+        self.assertNotIn("推論後端", labels)
+        self.assertIsNone(screen.yolox_model_info_edit)
+
+        screen.set_mode("admin")
+        labels = [
+            label.text()
+            for label in screen.param_form_container.findChildren(
+                type(screen.active_id_label)
+            )
+        ]
         self.assertIn("模型", labels)
         self.assertIn("信心門檻", labels)
         self.assertIn("NMS 重疊率 (IoU)", labels)
         self.assertIn("NG 類別 ID", labels)
         self.assertIn("最大偵測數", labels)
-        self.assertIn("最小框面積 (px²)", labels)
-        self.assertNotIn("推論後端", labels)
+        self.assertIn("推論後端", labels)
+        self.assertIn("推論精度", labels)
+        self.assertIn("跨類別 NMS", labels)
         self.assertIn(
             "交集除以聯集",
             screen._param_widgets["yolox"]["nms_iou_threshold"].toolTip(),
@@ -343,16 +360,64 @@ class GuiWorkflowTests(unittest.TestCase):
         self.assertTrue(screen.is_dirty())
         self.assertEqual(screen.editor_state_badge.text(), "未儲存")
 
+    def test_designer_enforces_outer_parameters_for_engineer_and_all_for_admin(self):
+        screen = DesignerScreen()
+        definitions = screen.detector_definitions
+
+        for detector_id, definition in definitions.items():
+            screen._select_detector(detector_id)
+            shown = {
+                key
+                for key, widget in screen._param_widgets[detector_id].items()
+                if screen.param_form.labelForField(widget) is not None
+            }
+            expected_outer = {
+                key
+                for key, spec in definition["param_spec"].items()
+                if spec["parameter_group"] == "outer"
+            }
+            self.assertEqual(shown, expected_outer, detector_id)
+
         screen.set_mode("admin")
-        labels = [
-            label.text()
+        for detector_id, definition in definitions.items():
+            screen._select_detector(detector_id)
+            shown = {
+                key
+                for key, widget in screen._param_widgets[detector_id].items()
+                if screen.param_form.labelForField(widget) is not None
+            }
+            self.assertEqual(shown, set(definition["param_spec"]), detector_id)
+
+        group_headers = {
+            label.property("parameterGroup")
             for label in screen.param_form_container.findChildren(
                 type(screen.active_id_label)
             )
-        ]
-        self.assertIn("推論後端", labels)
-        self.assertIn("推論精度", labels)
-        self.assertIn("跨類別 NMS", labels)
+            if label.property("parameterGroup")
+        }
+        self.assertEqual(group_headers, {"outer", "inner"})
+
+    def test_engineer_round_trip_preserves_hidden_inner_recipe_values(self):
+        detector_id = "401-AS-SN-1"
+        recipe = RecipeManager().load(
+            Path("recipes/PRODUCT_A_NEGATIVE_401_AOI_01.yaml")
+        )
+        recipe["detectors"][detector_id]["params"].update(
+            {"blur_size": 17, "adaptive_c": 7, "min_area": 44}
+        )
+        screen = DesignerScreen()
+        screen.set_recipe(recipe)
+        screen._select_detector(detector_id)
+
+        self.assertIsNone(
+            screen.param_form.labelForField(
+                screen._param_widgets[detector_id]["blur_size"]
+            )
+        )
+        built_params = screen.build_recipe()["detectors"][detector_id]["params"]
+        self.assertEqual(built_params["blur_size"], 17)
+        self.assertEqual(built_params["adaptive_c"], 7)
+        self.assertEqual(built_params["min_area"], 44)
 
     def test_yolox_model_file_dialog_validates_and_switches_registry_model(self):
         model_root = Path("models/yolox")
@@ -379,6 +444,7 @@ class GuiWorkflowTests(unittest.TestCase):
             )
 
             screen = DesignerScreen()
+            screen.set_mode("admin")
             screen._select_detector("yolox")
             screen._row_widgets["yolox"]["toggle"].setChecked(True)
             picker = screen._param_widgets["yolox"]["model_id"]
@@ -414,6 +480,7 @@ class GuiWorkflowTests(unittest.TestCase):
             unsupported.write_bytes(b"not-a-supported-model")
 
             screen = DesignerScreen()
+            screen.set_mode("admin")
             screen._select_detector("yolox")
             screen._row_widgets["yolox"]["toggle"].setChecked(True)
             picker = screen._param_widgets["yolox"]["model_id"]
@@ -449,6 +516,7 @@ class GuiWorkflowTests(unittest.TestCase):
 
     def test_yolox_missing_model_is_inline_and_invalid_after_recipe_load(self):
         screen = DesignerScreen()
+        screen.set_mode("admin")
         screen._select_detector("yolox")
         recipe = RecipeManager().load(
             Path("recipes/examples/YOLOX_TINY_REFERENCE_AOI_01.yaml")
@@ -480,6 +548,7 @@ class GuiWorkflowTests(unittest.TestCase):
                 os.environ, {"VISIONFLOW_YOLOX_MODEL_DIR": str(root)}
             ):
                 screen = DesignerScreen()
+                screen.set_mode("admin")
                 screen._select_detector("yolox")
                 screen._row_widgets["yolox"]["toggle"].setChecked(True)
 
@@ -577,6 +646,7 @@ class GuiWorkflowTests(unittest.TestCase):
             with patch.dict(os.environ, {}, clear=False):
                 os.environ.pop("VISIONFLOW_YOLOX_MODEL_DIR", None)
                 window = MainWindow(settings=settings)
+                window.designer_screen.set_mode("admin")
                 window.designer_screen._select_detector("yolox")
                 picker = window.designer_screen._param_widgets["yolox"]["model_id"]
 

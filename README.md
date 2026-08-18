@@ -421,6 +421,23 @@ tile:
 
 內建 Recipe 檔名目前保留 `PRODUCT_A_NEGATIVE_401_AOI_01.yaml`、`PRODUCT_A_CIRCLE_401_1_AOI_01.yaml` 等既有路徑，避免外部腳本第一次升級就找不到檔案；檔案內容與執行結果已使用正式新 ID。既有 defect type key 也暫時保持不變，維持 CSV／JSON 與下游報表相容。
 
+Recipe Designer 會依共同 parameter schema 將每個 Detector 參數分成兩組：
+
+- **外參**：面積、寬高、間距、容差、屏蔽內縮及 ROI 範圍等幾何規格；工程與管理模式都可調整。
+- **內參**：閾值、反相、模糊、形態學、輪廓模式、比例、模型、信心與推論設定等需要影像／光學／演算法知識的項目；僅管理模式可調整。
+
+未明確分類的新參數會安全地預設成管理者內參，不會因名稱看起來像尺寸就自動開放。舊 Recipe 的全部參數仍會載入及保存；工程模式只是隱藏內參欄位，不會刪除或重設既有值。
+
+| Detector | 工程模式可調外參 | 管理模式額外開放的內參 |
+|---|---|---|
+| `202-CS-SN-1` | 中心屏蔽寬高、四邊內縮 | 屏蔽開關、中心基準與位置 |
+| `203-AS-SN-1` | 四邊內縮、最小／最大面積 | 邊緣屏蔽開關 |
+| `401-AS-SN-1` | ROI 內縮、最小／最大面積 | blur、adaptive threshold、反相、morphology、contour mode |
+| `401-CS-AP-1` | ROI 內縮、最小／最大面積 | threshold、blur、morphology、縮放、圓度與填充比 |
+| `401-CS-AP-2` | ROI 內縮、最小／最大面積 | threshold、blur、contour mode、白像素比例 |
+| `900-CS-AP-1` | 內外框寬高／容差、最大邊距、ROI 內縮 | 內外框 threshold、反相與 contour mode |
+| `yolox` | 最小框面積 | 模型、信心、NMS、NG 類別、最大偵測數、backend、precision |
+
 ### `202-CS-SN-1`：自動 CNR 候選缺陷檢測
 
 - 檔案：`detectors/detector_202_1.py`
@@ -437,7 +454,7 @@ tile:
 
 - 檔案：`detectors/detector_203_as_ap_1.py`
 - 固定流程：Gray → `3 × 3` Gaussian Blur → Adaptive Mean 反相二值化（block `21`、C `1`）→ `3 × 3` Morphology Open 一次 → 四邊排除屏蔽 → 固定 `RETR_LIST` contours；抓到任一符合面積條件的輪廓即為 NG。
-- 預設四邊屏蔽：共同內縮 `0`，左 `15`、右 `26`、上 `50`、下 `20`；各邊實際值為共同內縮與個別值兩者的較大值，並可在 Recipe Designer 調整或停用。
+- 預設四邊屏蔽：共同內縮 `0`，左 `15`、右 `26`、上 `50`、下 `20`；各邊實際值為共同內縮與個別值兩者的較大值。工程模式可調整內縮尺寸，停用屏蔽則需要管理模式。
 - 面積：`min_area`／`max_area` 預設皆為 `0`，代表不限制；只排除面積為零的輪廓。
 - 缺陷類型：`203_as_ap_1_contour_ng`
 
@@ -483,7 +500,7 @@ Detector `900-CS-AP-1` 的 NG Tile 會額外繪出內外框候選、被拒絕候
 - Runtime：支援 ONNX Runtime CPU／CUDA 的 FP32 session；CUDA 必須安裝提供 `CUDAExecutionProvider` 的 `onnxruntime-gpu`。本機或 provider 不可用時，`gpu.mode=auto` 會完整改由 CPU 重跑，`gpu.mode=cuda` 則明確失敗。TensorRT 與 production acceptance 尚未完成。
 - 模型管理：Recipe 僅保存 `model_id`；`models/yolox/registry.yaml` 記錄模型版本、SHA-256、class names、輸入前處理、letterbox、輸出 decoder 與 strides。checksum 不符時拒絕推論。
 - 主要參數：`model_id`、`confidence_threshold`、`nms_iou_threshold`、`target_class_ids`（逗號分隔）、`max_detections`、`min_box_area_px`。
-- Recipe Designer：工程模式直接選擇 `.onnx` 模型檔案；程式會從同資料夾的 `registry.yaml` 找出對應模型、驗證 SHA-256，再將穩定的 `model_id` 寫入 Recipe。GUI 會記住最近使用的模型資料夾；模型未登錄、遺失、checksum 錯誤或 backend 不相容時顯示 inline notice 並禁止儲存。現行推論後端是 ONNX Runtime，因此尚不接受 PyTorch `.pt`／`.pth` 權重。
+- Recipe Designer：管理模式可直接選擇 `.onnx` 模型檔案；程式會從同資料夾的 `registry.yaml` 找出對應模型、驗證 SHA-256，再將穩定的 `model_id` 寫入 Recipe。工程模式只開放最小框面積，不可修改模型、信心、NMS 或推論內參。GUI 會記住最近使用的模型資料夾；模型未登錄、遺失、checksum 錯誤或 backend 不相容時顯示 inline notice 並禁止儲存。現行推論後端是 ONNX Runtime，因此尚不接受 PyTorch `.pt`／`.pth` 權重。
 - Session：GUI 單張、batch 與 monitor 透過共用 execution session 重用同一份模型；cache key 包含模型 SHA-256、backend、device、precision 與 input shape。session 具 warm-up、明確 close、bounded inference queue、LRU cache 上限、選擇性 invalidation 與佇列／推論 metrics；YOLOX CUDA 使用 ONNX Runtime，不要求載入 `visionflow_cuda.dll`。
 - NMS 語意：`nms_iou_threshold` 是兩個 bbox 的交集除以聯集；同類別較低分框在 `IoU > threshold` 時移除，等於 threshold 時保留。
 - 結果：`confidence = objectness × class probability`；bbox 由模型輸入座標反 letterbox 回 Tile，再由 Pipeline 映射到全圖。
@@ -527,8 +544,8 @@ Reference 配方使用的 `yolox_tiny_fixture.onnx` 只會輸出固定測試 ten
 ### 操作模式
 
 - **OP**：產線導向的限制模式，主要顯示監控工作流程。
-- **Engineer**：工程調機模式，隱藏部分進階 Detector 參數；預設密碼為 `1234`。
-- **Admin**：完整的配方與 Detector 參數權限；預設密碼為 `5678`。
+- **Engineer**：工程調機模式，Detector 只開放尺寸、面積與 ROI 範圍等外參；預設密碼為 `1234`。
+- **Admin**：完整開放 Detector 外參及影像、光學、演算法與模型內參；預設密碼為 `5678`。
 
 GUI 每次啟動都會先進入 OP 模式。切換至 Engineer 或 Admin 時必須通過密碼視窗驗證；切回 OP 不需密碼。權限驗證由獨立的 `PermissionManager` 管理，預設密碼可由程式建構時注入替換。目前仍屬本機防誤操作機制，不是具帳號、加密密碼儲存或稽核功能的資安邊界。
 

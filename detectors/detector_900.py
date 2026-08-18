@@ -4,7 +4,7 @@ import time
 
 import numpy as np
 
-from core.parameter_schema import specs_from_defaults
+from core.parameter_schema import PARAMETER_GROUP_OUTER, specs_from_defaults
 from detectors.base_detector import BaseDetector
 from detectors.detector_900_domain import (
     CandidateAnalyzer,
@@ -44,14 +44,19 @@ class Detector900(BaseDetector):
         "outer_threshold": {"minimum": 0, "maximum": 255, "engineer_visible": False},
         "outer_invert": {"engineer_visible": False},
         "outer_contour_mode": {"choices": ("external", "list", "tree", "ccomp"), "engineer_visible": False},
-        "outer_target_width": {"minimum": 1}, "outer_width_tolerance": {"minimum": 0},
-        "outer_target_height": {"minimum": 1}, "outer_height_tolerance": {"minimum": 0},
+        "outer_target_width": {"minimum": 1, "parameter_group": PARAMETER_GROUP_OUTER},
+        "outer_width_tolerance": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER},
+        "outer_target_height": {"minimum": 1, "parameter_group": PARAMETER_GROUP_OUTER},
+        "outer_height_tolerance": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER},
         "inner_adaptive_block_size": {"minimum": 3, "odd": True, "engineer_visible": False},
         "inner_adaptive_c": {"engineer_visible": False}, "inner_invert": {"engineer_visible": False},
         "inner_contour_mode": {"choices": ("external", "list", "tree", "ccomp"), "engineer_visible": False},
-        "inner_target_width": {"minimum": 1}, "inner_width_tolerance": {"minimum": 0},
-        "inner_target_height": {"minimum": 1}, "inner_height_tolerance": {"minimum": 0},
-        "max_edge_gap": {"minimum": 0}, "roi_inset_px": {"minimum": 0},
+        "inner_target_width": {"minimum": 1, "parameter_group": PARAMETER_GROUP_OUTER},
+        "inner_width_tolerance": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER},
+        "inner_target_height": {"minimum": 1, "parameter_group": PARAMETER_GROUP_OUTER},
+        "inner_height_tolerance": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER},
+        "max_edge_gap": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER},
+        "roi_inset_px": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER},
     })
 
     def preprocess(self, image):

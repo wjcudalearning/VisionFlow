@@ -11,7 +11,7 @@ from core.ai_runtime import (
     prepare_yolox_input,
     validate_yolox_parameters,
 )
-from core.parameter_schema import specs_from_defaults
+from core.parameter_schema import PARAMETER_GROUP_OUTER, specs_from_defaults
 from detectors.base_detector import BaseDetector
 
 
@@ -64,6 +64,7 @@ class DetectorYolox(BaseDetector):
             },
             "min_box_area_px": {
                 "minimum": 0.0,
+                "parameter_group": PARAMETER_GROUP_OUTER,
                 "label": "最小框面積 (px²)",
                 "tooltip": "濾除過小 bbox；0 代表停用。",
             },
