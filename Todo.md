@@ -352,6 +352,7 @@
 - [ ] 加速不得犧牲 GUI 回應、打包啟動、結果追溯、錯誤訊息或 CPU fallback。
 
 ## 完成紀錄
+- [x] 2026-08-18：同步更新 README 的 Detector 文件：新增 7 組正式 ID 與舊 Recipe ID 對照表，說明舊 ID 載入別名、衝突拒絕、已移除 `202` 不提供別名、內建 Recipe 舊檔名及 defect type key 的相容策略；並補齊 Detector 專案樹、`900-CS-AP-1` 架構名稱、完整 compileall 指令，以及 YOLOX ONNX Runtime CPU／CUDA FP32 fallback 現況與限制。完整 253 tests、compileall、CUDA source／ABI preflight 及 `git diff --check` 通過；本次僅修改文件，未變更 runtime、Recipe、GUI 或 CUDA 實作。
 - [x] 2026-08-18：依命名規格將 Detector `202-1`／`203-AS-AP-1`／`401`／`401-1`／`401-2`／`900` 正式 ID 更新為 `202-CS-SN-1`／`203-AS-SN-1`／`401-AS-SN-1`／`401-CS-AP-1`／`401-CS-AP-2`／`900-CS-AP-1`，YOLOX 維持 `yolox`；Detector `202` 已從 registry、GUI 與正式 Recipe 移除，僅保留為 202-CS-SN-1 的內部屏蔽共用基底。內建 Recipe、Designer 預設、GUI 繁中標籤、900 debug renderer、401 profiler 與文件已同步；RecipeManager 載入舊 Recipe 時會將六組舊 ID、decision 清單及舊預設顯示名稱正規化成新值，同時存在新舊 ID 時拒絕覆蓋，舊 `202` 則明確回報未註冊。完整 253 tests、compileall、CUDA source/ABI preflight、GUI offscreen smoke、`401-AS-SN-1` CPU CLI 合成 NG（1 筆缺陷，預期 exit 2）及 `git diff --check` 通過；未修改 CUDA source／header／ABI／DLL。
 
 - [x] 2026-08-18：新增 Detector 203-AS-AP-1，固定執行 Gray → Gaussian 3 → Adaptive Mean 反相（block 21、C 1）→ 3×3 Morphology Open 一次，再套用共同／左／右／上／下四邊屏蔽與 LIST contours；整合 DetectorManager、Recipe Designer 繁中標籤、結果標籤、metadata、cached shared plan、CPU／native／primitive／missing／strict／failing backend fallback 與 resident ROI 測試。12 項專屬測試、完整 251 tests、compileall、CUDA source/ABI preflight、GUI offscreen smoke、CPU CLI 合成 NG（1 筆缺陷，預期 exit 2）及 `git diff --check` 通過；未修改 CUDA source／header／ABI／DLL。

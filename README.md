@@ -126,7 +126,7 @@ AOI_CVbased/
 |-- core/
 |   |-- pipeline.py                 # 檢測流程協調
 |   |-- pipeline_stages.py          # Recipe/runtime、Tile 與結果組裝階段
-|   |-- ai_runtime.py               # YOLOX model registry、CPU session 與前後處理
+|   |-- ai_runtime.py               # YOLOX model registry、CPU/CUDA session 與前後處理
 |   |-- recipe_manager.py           # 配方載入與驗證
 |   |-- recipe_builder.py           # GUI 配方建立
 |   |-- image_loader.py             # 影像載入
@@ -153,10 +153,11 @@ AOI_CVbased/
 |   |-- base_detector.py            # Detector 共用介面
 |   |-- detector_202.py             # 202-CS-SN-1 內部屏蔽共用基底（不註冊）
 |   |-- detector_202_1.py           # 202-CS-SN-1 自動 CNR 候選缺陷檢測
-|   |-- detector_401.py
-|   |-- detector_401_1.py
-|   |-- detector_401_2.py
-|   |-- detector_900.py
+|   |-- detector_203_as_ap_1.py     # 203-AS-SN-1 自適應反相輪廓檢測
+|   |-- detector_401.py             # 401-AS-SN-1 負極旋轉矩形檢測
+|   |-- detector_401_1.py           # 401-CS-AP-1 自適應圓形輪廓檢測
+|   |-- detector_401_2.py           # 401-CS-AP-2 白像素比例檢測
+|   |-- detector_900.py             # 900-CS-AP-1 雙框間距檢測
 |   |-- detector_900_domain.py      # 900-CS-AP-1 typed config、candidate 與 geometry
 |   |-- detector_900_renderer.py    # 900-CS-AP-1 專屬 NG debug overlay
 |   `-- detector_yolox.py
@@ -186,7 +187,7 @@ AOI_CVbased/
 `-- outputs_validation/             # 本機驗證輸出，不納入版本控制
 ```
 
-`AOIPipeline`、`GpuRuntime`、`Reporter` 與 `MainWindow` 保留為對外相容 façade／composition root；細節分別由 stage、runtime component、writer strategy 與 workflow controller 組合。Detector900 的演算法內部使用 typed value objects，只有在公開結果邊界轉回既有 dict schema，因此 recipe、PASS／NG、metadata、輸出格式與 ABI v1 不因這次責任拆分而改變。
+`AOIPipeline`、`GpuRuntime`、`Reporter` 與 `MainWindow` 保留為對外相容 façade／composition root；細節分別由 stage、runtime component、writer strategy 與 workflow controller 組合。`900-CS-AP-1` 的演算法內部使用 typed value objects，只有在公開結果邊界轉回既有 dict schema，因此 Recipe、PASS／NG、metadata、輸出格式與 ABI v1 不因責任拆分而改變。
 
 ## 系統流程
 
@@ -404,6 +405,22 @@ tile:
 
 所有 Detector 都繼承 `BaseDetector`，並輸出統一格式，包含 Detector ID、PASS／NG、分數、缺陷類型、區域座標、面積及 metadata。如此 Reporter、Aggregator 與 GUI 不需要知道個別演算法細節。
 
+目前正式 registry 共 7 個 Detector：
+
+| 正式 ID | GUI 用途 | 舊 Recipe ID |
+|---|---|---|
+| `202-CS-SN-1` | 自動 CNR 檢測 | `202-1` |
+| `203-AS-SN-1` | 自適應反相輪廓檢測 | `203-AS-AP-1` |
+| `401-AS-SN-1` | 反相矩形 NG 檢測 | `401` |
+| `401-CS-AP-1` | 圓形 NG 檢測 | `401-1` |
+| `401-CS-AP-2` | 白色比例 NG 檢測 | `401-2` |
+| `900-CS-AP-1` | 雙框間距檢測 | `900` |
+| `yolox` | YOLOX 物件偵測 | 不變 |
+
+`RecipeManager.load()` 會在驗證前將表中的六組舊 ID、`decision.important_detectors` 及舊預設顯示名稱轉成正式 ID；同一份 Recipe 若同時包含新舊 ID，會拒絕載入以避免設定被覆蓋。已移除的 `202` 不提供別名，仍使用 `202` 的 Recipe 會明確回報未註冊。
+
+內建 Recipe 檔名目前保留 `PRODUCT_A_NEGATIVE_401_AOI_01.yaml`、`PRODUCT_A_CIRCLE_401_1_AOI_01.yaml` 等既有路徑，避免外部腳本第一次升級就找不到檔案；檔案內容與執行結果已使用正式新 ID。既有 defect type key 也暫時保持不變，維持 CSV／JSON 與下游報表相容。
+
 ### `202-CS-SN-1`：自動 CNR 候選缺陷檢測
 
 - 檔案：`detectors/detector_202_1.py`
@@ -459,8 +476,6 @@ tile:
 - 範例配方：`recipes/PRODUCT_A_FRAME_900_AOI_01.yaml`
 
 Detector `900-CS-AP-1` 的 NG Tile 會額外繪出內外框候選、被拒絕候選、間距輔助線與失敗原因，方便調整配方。
-
-舊 Recipe 載入時會自動遷移 `202-1`、`203-AS-AP-1`、`401`、`401-1`、`401-2`、`900` 至上述新 ID，並同步遷移原本的預設顯示名稱。已移除的 `202` 不提供別名；若 Recipe 仍使用 `202`，驗證會明確回報未註冊。
 
 ### `yolox`：YOLOX 物件偵測（CPU reference + CUDA opt-in）
 
@@ -765,7 +780,7 @@ VisionFlow-AOI-vX.Y.Z-windows-x64.zip
 
 ```powershell
 .\env\Scripts\python.exe -m unittest discover -s tests -v
-.\env\Scripts\python.exe -m compileall main.py gui_launcher.py core detectors gui gpu
+.\env\Scripts\python.exe -m compileall main.py gui_launcher.py export_ng_tiles_by_area.py export_pattern_grid_tiles.py export_matrix_summary.py export_scatter_plots.py core detectors gui gpu
 .\env\Scripts\python.exe gpu\preflight_cuda_build.py
 git diff --check
 ```
@@ -791,7 +806,7 @@ $env:QT_QPA_PLATFORM = 'offscreen'
 
 ## 目前限制
 
-- 傳統 CV Detector 的效果高度依賴光源、治具穩定度及配方門檻；YOLOX 目前只有 ONNX Runtime CPU reference 與固定輸出測試模型，尚未導入量產權重。
+- 傳統 CV Detector 的效果高度依賴光源、治具穩定度及配方門檻；YOLOX 已支援 ONNX Runtime CPU／CUDA FP32 與安全 fallback，但 repository 內只有固定輸出的 reference fixture，尚未導入量產權重或完成 production acceptance。
 - 尚未建立正式且具預期 PASS／NG 標籤的驗證資料集，因此不可將範例結果直接視為量產良率證明。
 - GUI 模式有本機密碼驗證，但不是具帳號、加密密碼儲存或稽核功能的資安權限系統。
 - `--debug` 已存在，但尚未為所有 Detector 提供完整的中間影像輸出。
