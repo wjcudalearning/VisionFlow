@@ -10,7 +10,7 @@ VisionFlow AOI 不只是單一 Detector 範例，而是一套可實際延伸的�
 - PySide6 桌面 GUI。
 - YAML 配方載入、驗證、編輯與儲存。
 - 固定網格、模板定位網格、輪廓及模板比對四種切圖方式。
-- `202`、`401`、`401-1`、`401-2`、`900` 五個傳統電腦視覺 Detector，以及第一階段 ONNX Runtime CPU 版 `yolox` Detector。
+- `202-CS-SN-1`、`203-AS-SN-1`、`401-AS-SN-1`、`401-CS-AP-1`、`401-CS-AP-2`、`900-CS-AP-1` 六個傳統電腦視覺 Detector，以及 ONNX Runtime `yolox` Detector。
 - 單張檢測、批次資料夾檢測及新檔案監控。
 - OP、Engineer、Admin 三種 GUI 操作模式。
 - Overlay、NG 小圖、缺陷 CSV、矩陣 CSV、JSON 與輪替日誌。
@@ -151,14 +151,14 @@ AOI_CVbased/
 |   `-- monitor_processor.py        # 資料夾監控
 |-- detectors/
 |   |-- base_detector.py            # Detector 共用介面
-|   |-- detector_202.py             # 一般二值化四邊形 NG 檢測
-|   |-- detector_202_1.py           # 自動 CNR 候選缺陷檢測
+|   |-- detector_202.py             # 202-CS-SN-1 內部屏蔽共用基底（不註冊）
+|   |-- detector_202_1.py           # 202-CS-SN-1 自動 CNR 候選缺陷檢測
 |   |-- detector_401.py
 |   |-- detector_401_1.py
 |   |-- detector_401_2.py
 |   |-- detector_900.py
-|   |-- detector_900_domain.py      # 900 typed config、candidate 與 geometry
-|   |-- detector_900_renderer.py    # 900 專屬 NG debug overlay
+|   |-- detector_900_domain.py      # 900-CS-AP-1 typed config、candidate 與 geometry
+|   |-- detector_900_renderer.py    # 900-CS-AP-1 專屬 NG debug overlay
 |   `-- detector_yolox.py
 |-- models/yolox/                   # YOLOX model registry 與 checksum 保護的模型
 |-- gui/
@@ -250,14 +250,14 @@ tile:
 decision:
   mode: "all_detectors_must_pass"
   important_detectors:
-    - "401-1"
+    - "401-CS-AP-1"
   max_ng_count: 0
 
 detectors:
-  "401-1":
+  "401-CS-AP-1":
     enabled: true
     use_gpu: false
-    display_name: "401-1 adaptive circle contour detector"
+    display_name: "401-CS-AP-1 adaptive circle contour detector"
     params:
       threshold_method: "adaptive_mean"
       max_value: 255
@@ -404,30 +404,19 @@ tile:
 
 所有 Detector 都繼承 `BaseDetector`，並輸出統一格式，包含 Detector ID、PASS／NG、分數、缺陷類型、區域座標、面積及 metadata。如此 Reporter、Aggregator 與 GUI 不需要知道個別演算法細節。
 
-### `202`：一般二值化四邊形檢測
-
-- 檔案：`detectors/detector_202.py`
-- 用途：執行 Gray → 一般二值化，再套用中心／四邊排除屏蔽，最後以固定 `RETR_LIST` contours 找出指定面積內的四邊形；抓到任一符合輪廓即為 NG。
-- 預設中心屏蔽：由影像中心往左右各擴 `100`、往上下各擴 `630`，未受影像邊界裁切時實際矩形為 `200 × 1260`；亦可停用或改用自訂中心座標。
-- 預設邊緣屏蔽：共同內縮 `0`，左 `15`、右 `26`、上 `50`、下 `20`；各邊實際值為共同內縮與個別值兩者的較大值。
-- 預設影像處理：一般二值化門檻 `172`、最大值固定 `255`，預設不反相；Recipe 可調門檻與反相。
-- 四邊形條件：面積 `5`～`100` px²、approx epsilon 固定 `2%`、近似後必須剛好 `4` 個頂點，不限制凸／凹。
-- 舊 Recipe 的 Adaptive Mean、Morphology、contour mode、頂點範圍與凸性欄位仍可載入，但已從 Designer 隱藏且完全不參與 Detector 202 運算。
-- 缺陷類型：`202_quadrilateral_ng`
-
-### `202-1`：自動 CNR 候選缺陷檢測
+### `202-CS-SN-1`：自動 CNR 候選缺陷檢測
 
 - 檔案：`detectors/detector_202_1.py`
 - 參考實作：[Wwjyun/AcceptanceChecker `DefectDetector`](https://github.com/Wwjyun/AcceptanceChecker/blob/117fce477744188b97659a035b031fe3bf874260/acceptance_checker/core/detector.py)
 - 用途：以大範圍 Gaussian blur 估背景，計算原灰階與背景的 residual，再以 MAD 估 robust noise sigma；使用 `max(8, 3 × sigma)` 建立異常 mask，執行 `3 × 3` Morphology Open 一次後套用中心／四邊屏蔽，最後用 8-connectivity connected components 取得候選。
 - CNR：每個 component 的缺陷平均值與周圍背景 ring 平均值之差，除以 ring 的灰階標準差；候選依 CNR 由高到低輸出，抓到任一候選即為 NG。
 - 自動面積：最小值為 `max(5, int(0.000001 × H × W))`，最大值為 `int(0.05 × H × W)`；沿用參考實作，Recipe 不另提供固定面積欄位。
-- 屏蔽：完全沿用 Detector 202 的中心半寬 `100`／半高 `630` 與共同 `0`、左 `15`、右 `26`、上 `50`、下 `20` 邊緣內縮；排除像素不產生候選，也不納入局部背景 ring。
+- 屏蔽：中心半寬 `100`／半高 `630`，並使用共同 `0`、左 `15`、右 `26`、上 `50`、下 `20` 邊緣內縮；排除像素不產生候選，也不納入局部背景 ring。
 - 關閉屏蔽時，候選 mask、MAD、sigma、門檻、bbox、面積、CNR 與排序均與參考 commit 的自動 CNR 實作一致。
 - 詳細邏輯、公式、固定二值化比較及光衰容忍度評估：[`DETECTOR_202_1_AUTO_CNR_EVALUATION.md`](DETECTOR_202_1_AUTO_CNR_EVALUATION.md)
 - 缺陷類型：`202-1_auto_cnr_ng`
 
-### `203-AS-AP-1`：自適應反相輪廓檢測
+### `203-AS-SN-1`：自適應反相輪廓檢測
 
 - 檔案：`detectors/detector_203_as_ap_1.py`
 - 固定流程：Gray → `3 × 3` Gaussian Blur → Adaptive Mean 反相二值化（block `21`、C `1`）→ `3 × 3` Morphology Open 一次 → 四邊排除屏蔽 → 固定 `RETR_LIST` contours；抓到任一符合面積條件的輪廓即為 NG。
@@ -435,7 +424,7 @@ tile:
 - 面積：`min_area`／`max_area` 預設皆為 `0`，代表不限制；只排除面積為零的輪廓。
 - 缺陷類型：`203_as_ap_1_contour_ng`
 
-### `401`：負極旋轉矩形檢測
+### `401-AS-SN-1`：負極旋轉矩形檢測
 
 - 檔案：`detectors/detector_401.py`
 - 用途：透過自適應閾值、形態學與旋轉矩形擬合偵測負極矩形 NG 區域。
@@ -443,7 +432,7 @@ tile:
 - 缺陷類型：`401_negative_rect_detected_ng`
 - 範例配方：`recipes/PRODUCT_A_NEGATIVE_401_AOI_01.yaml`
 
-### `401-1`：自適應圓形輪廓檢測
+### `401-CS-AP-1`：自適應圓形輪廓檢測
 
 - 檔案：`detectors/detector_401_1.py`
 - 用途：以面積、圓度與填充比篩選圓形 NG 區域。
@@ -451,7 +440,7 @@ tile:
 - 缺陷類型：`401_1_circle_detected_ng`
 - 範例配方：`recipes/PRODUCT_A_CIRCLE_401_1_AOI_01.yaml`
 
-### `401-2`：自適應白像素比例檢測
+### `401-CS-AP-2`：自適應白像素比例檢測
 
 - 檔案：`detectors/detector_401_2.py`
 - 用途：依 `min_area`／`max_area` 篩選每張 tile 內的 contour，再計算輪廓範圍內的白像素比例；達到或超過 `white_pixel_ratio_threshold` 時判定 NG。面積值設為 `0` 代表停用該側限制。
@@ -460,7 +449,7 @@ tile:
 - 缺陷類型：`401_2_white_pixel_ratio_ng`
 - 範例配方：`recipes/PRODUCT_A_WHITE_RATIO_401_2_AOI_01.yaml`
 
-### `900`：雙框間距檢測
+### `900-CS-AP-1`：雙框間距檢測
 
 - 檔案：`detectors/detector_900.py`
 - 用途：找出外框與內框，檢查左、上、右、下四個邊距。
@@ -469,7 +458,9 @@ tile:
 - 缺陷類型：`900_frame_spacing_ng`
 - 範例配方：`recipes/PRODUCT_A_FRAME_900_AOI_01.yaml`
 
-Detector 900 的 NG Tile 會額外繪出內外框候選、被拒絕候選、間距輔助線與失敗原因，方便調整配方。
+Detector `900-CS-AP-1` 的 NG Tile 會額外繪出內外框候選、被拒絕候選、間距輔助線與失敗原因，方便調整配方。
+
+舊 Recipe 載入時會自動遷移 `202-1`、`203-AS-AP-1`、`401`、`401-1`、`401-2`、`900` 至上述新 ID，並同步遷移原本的預設顯示名稱。已移除的 `202` 不提供別名；若 Recipe 仍使用 `202`，驗證會明確回報未註冊。
 
 ### `yolox`：YOLOX 物件偵測（CPU reference + CUDA opt-in）
 
@@ -592,7 +583,7 @@ outputs/
 
 - 只保存 NG Tile 裁切影像。
 - 缺陷框以 Tile 區域座標繪製。
-- Detector 900 額外提供內外框及邊距除錯標記。
+- Detector `900-CS-AP-1` 額外提供內外框及邊距除錯標記。
 - 每張 PNG 旁會產生同名 JSON dataset sidecar，記錄 source/effective recipe hash、build commit、detector 有效參數、局部／全域座標，以及 `pending` 人工複判欄位。
 - 多張 NG tile 可用 `output.ng_tile_write_workers` 設定 bounded 平行寫檔數；`output.png_compression`（0–9）控制 PNG 壓縮，未設定或值無效時使用 OpenCV 預設。
 
@@ -641,7 +632,7 @@ gpu:
   queue_depth: 8
 
 detectors:
-  "401-2":
+  "401-CS-AP-2":
     enabled: true
     use_gpu: true
 ```
@@ -651,8 +642,8 @@ detectors:
 - `CpuPreprocessExecutor` 定義 OpenCV 正確性語意。
 - `CudaPreprocessExecutor` 依 DLL 能力優先選擇 versioned generic native plan，再選相容的 fused adapter、舊版通用 primitive 或 CPU fallback。
 - Generic native linear plan 支援 Gray、兩軸不放大的單通道 Resize(area)、Gaussian、Threshold、Adaptive Mean 與 Morphology；Resize 放大或混合軸縮放仍明確 fallback。整份 plan capability 通過後只做一次 H2D、連續 kernels 與一次必要 D2H。
-- Generic native DAG plan 支援拓撲排序的分支與多輸出；Detector 900 共用一次 device gray，單次上傳後只下載 outer/inner masks。
-- Detector 401-2 已有一次呼叫完成灰階、Gaussian 與 Adaptive Mean 的 persistent context 相容路徑。
+- Generic native DAG plan 支援拓撲排序的分支與多輸出；Detector `900-CS-AP-1` 共用一次 device gray，單次上傳後只下載 outer/inner masks。
+- Detector `401-CS-AP-2` 已有一次呼叫完成灰階、Gaussian 與 Adaptive Mean 的 persistent context 相容路徑。
 - Persistent context 現在持有 non-blocking CUDA stream、grow-only scratch 與 morphology ping-pong buffers；plan 內的中間結果不回傳 CPU。
 - Batch、monitor 與 GUI 單張連續檢測會透過 `GpuExecutionSession` 共用相容的 `GpuRuntime`/CUDA context；GUI 在 Recipe 路徑、mtime 或大小改變時重建 session，關閉視窗時釋放。每次執行仍重新上傳目前原圖，不跨圖片沿用 resident image generation。
 - 舊版 DLL 缺少新 exports 時仍保留既有路徑或 CPU fallback。
@@ -682,7 +673,7 @@ detectors:
   -Recipe .\recipes\PRODUCT_A_AOI_01.yaml
 ```
 
-針對 Detector 401 的 Template Anchor Grid 整張圖效能，可使用專用 profiler。它會保留原 Recipe 的 template match、offset、rows/cols、gap 與 ROI 尺寸，只啟用 401，分別執行 10 次 CPU、1 次 cold GPU 與 10 次共用 context/plan/buffer 的 warm GPU；CUDA 使用 strict mode，任何 fallback 都會使命令失敗：
+針對 Detector `401-AS-SN-1` 的 Template Anchor Grid 整張圖效能，可使用專用 profiler。它會保留原 Recipe 的 template match、offset、rows/cols、gap 與 ROI 尺寸，只啟用 `401-AS-SN-1`，分別執行 10 次 CPU、1 次 cold GPU 與 10 次共用 context/plan/buffer 的 warm GPU；CUDA 使用 strict mode，任何 fallback 都會使命令失敗：
 
 ```powershell
 .\env\Scripts\python.exe .\gpu\profile_401_pipeline.py `

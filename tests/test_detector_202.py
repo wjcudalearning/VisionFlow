@@ -7,11 +7,9 @@ from unittest.mock import patch
 
 import cv2
 import numpy as np
-import yaml
 
 from core.detector_manager import DetectorManager
 from core.preprocess_plan import CpuPreprocessExecutor
-from core.recipe_manager import RecipeManager
 from detectors.detector_202 import Detector202
 
 
@@ -84,7 +82,7 @@ class _DeviceRoi:
 
 
 class Detector202ContractTests(unittest.TestCase):
-    def test_defaults_registration_and_recipe_schema_match_requested_contract(self):
+    def test_removed_detector_is_not_registered_but_internal_contract_is_preserved(self):
         expected = {
             "center_mask_enabled": True,
             "center_mask_use_image_center": True,
@@ -104,11 +102,16 @@ class Detector202ContractTests(unittest.TestCase):
             "max_area": 100.0,
         }
         manager = DetectorManager()
-        definition = manager.definitions()["202"]
+        definitions = manager.definitions()
+        param_spec = {
+            key: spec.to_dict() for key, spec in Detector202.PARAM_SPEC.items()
+        }
 
-        self.assertEqual(definition["default_params"], expected)
-        self.assertEqual(definition["detector_name"], "binary_quadrilateral_detector")
-        self.assertIsInstance(manager.create("202"), Detector202)
+        self.assertNotIn("202", definitions)
+        with self.assertRaisesRegex(KeyError, "not registered: 202"):
+            manager.create("202")
+        self.assertEqual(Detector202.default_params, expected)
+        self.assertEqual(Detector202.detector_name, "binary_quadrilateral_detector")
 
         legacy_keys = {
             "morph_operation",
@@ -123,41 +126,17 @@ class Detector202ContractTests(unittest.TestCase):
             "max_vertices",
             "convex_only",
         }
-        self.assertTrue(legacy_keys.isdisjoint(definition["default_params"]))
-        self.assertTrue(legacy_keys.issubset(definition["param_spec"]))
+        self.assertTrue(legacy_keys.isdisjoint(Detector202.default_params))
+        self.assertTrue(legacy_keys.issubset(param_spec))
         self.assertTrue(
             all(
-                not definition["param_spec"][key]["engineer_visible"]
+                not param_spec[key]["engineer_visible"]
                 for key in legacy_keys
             )
         )
 
-        recipe = yaml.safe_load(
-            (ROOT / "recipes/PRODUCT_A_NEGATIVE_401_AOI_01.yaml").read_text(
-                encoding="utf-8"
-            )
-        )
-        recipe["decision"]["important_detectors"] = ["202"]
-        recipe["detectors"] = {
-            "202": {
-                "enabled": True,
-                "use_gpu": False,
-                "display_name": definition["display_name"],
-                "params": deepcopy(definition["default_params"]),
-            }
-        }
-        RecipeManager().validate(recipe)
-
-    def test_old_recipe_fields_still_validate_but_do_not_affect_preprocess(self):
-        manager = DetectorManager()
-        definition = manager.definitions()["202"]
-        recipe = yaml.safe_load(
-            (ROOT / "recipes/PRODUCT_A_NEGATIVE_401_AOI_01.yaml").read_text(
-                encoding="utf-8"
-            )
-        )
-        recipe["decision"]["important_detectors"] = ["202"]
-        old_params = deepcopy(definition["default_params"])
+    def test_old_recipe_fields_do_not_affect_internal_preprocess(self):
+        old_params = deepcopy(Detector202.default_params)
         old_params.pop("threshold_value")
         old_params.update(
             {
@@ -174,20 +153,10 @@ class Detector202ContractTests(unittest.TestCase):
                 "convex_only": True,
             }
         )
-        recipe["detectors"] = {
-            "202": {
-                "enabled": True,
-                "use_gpu": False,
-                "display_name": definition["display_name"],
-                "params": old_params,
-            }
-        }
-        RecipeManager().validate(recipe)
-
         image = np.random.default_rng(202).integers(
             0, 256, size=(51, 67, 3), dtype=np.uint8
         )
-        baseline = Detector202(params=definition["default_params"])
+        baseline = Detector202(params=Detector202.default_params)
         legacy = Detector202(params=old_params)
         np.testing.assert_array_equal(
             baseline._make_binary(image), legacy._make_binary(image)

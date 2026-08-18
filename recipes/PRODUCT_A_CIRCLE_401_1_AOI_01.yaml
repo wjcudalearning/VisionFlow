@@ -19,14 +19,14 @@ tile:
 decision:
   mode: "all_detectors_must_pass"
   important_detectors:
-    - "401-1"
+    - "401-CS-AP-1"
   max_ng_count: 0
 
 detectors:
-  "401-1":
+  "401-CS-AP-1":
     enabled: true
     use_gpu: false
-    display_name: "401-1 adaptive circle contour detector"
+    display_name: "401-CS-AP-1 adaptive circle contour detector"
     params:
       threshold_method: "adaptive_mean"
       max_value: 255

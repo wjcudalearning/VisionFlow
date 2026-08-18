@@ -34,7 +34,7 @@ NUMERIC_FIELDS = (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Profile detector 401 over every Template Anchor Grid ROI."
+        description="Profile detector 401-AS-SN-1 over every Template Anchor Grid ROI."
     )
     parser.add_argument("--image", required=True)
     parser.add_argument("--recipe", required=True)
@@ -62,8 +62,8 @@ def _benchmark_recipe(source: dict, recipe_path: Path, *, gpu: bool, dll: str) -
     recipe = deepcopy(source)
     _absolute_template_paths(recipe, recipe_path)
     for detector_id, config in recipe["detectors"].items():
-        config["enabled"] = detector_id == "401"
-        config["use_gpu"] = bool(gpu and detector_id == "401")
+        config["enabled"] = detector_id == "401-AS-SN-1"
+        config["use_gpu"] = bool(gpu and detector_id == "401-AS-SN-1")
     recipe["gpu"] = {
         **(recipe.get("gpu", {}) or {}),
         "mode": "cuda" if gpu else "cpu",
@@ -92,7 +92,7 @@ def _run_metrics(result: dict, previous_gpu: dict | None = None) -> tuple[dict, 
     execution = result.get("execution", {})
     pipeline = execution.get("performance", {})
     stages = pipeline.get("stages_sec", {})
-    detector_stages = pipeline.get("detector_stages_sec", {}).get("401", {})
+    detector_stages = pipeline.get("detector_stages_sec", {}).get("401-AS-SN-1", {})
     detectors = pipeline.get("detectors_sec", {})
     gpu = execution.get("gpu", {})
     gpu_metrics = gpu.get("metrics", {})
@@ -107,7 +107,7 @@ def _run_metrics(result: dict, previous_gpu: dict | None = None) -> tuple[dict, 
     adaptive_ms = _delta(native, previous, "adaptive_integral_ms")
     threshold_ms = _delta(native, previous, "threshold_ms")
     grayscale_ms = max(0.0, kernel_ms - gaussian_ms - morphology_ms - adaptive_ms - threshold_ms)
-    detector_status = gpu.get("detectors", {}).get("401", {})
+    detector_status = gpu.get("detectors", {}).get("401-AS-SN-1", {})
     metrics = {
         "template_match_ms": float(stages.get("template_match", 0.0)) * 1000.0,
         "roi_generation_ms": float(stages.get("roi_generation", 0.0)) * 1000.0,
@@ -126,7 +126,7 @@ def _run_metrics(result: dict, previous_gpu: dict | None = None) -> tuple[dict, 
         "cpu_find_contours_ms": float(detector_stages.get("find_contours", 0.0)) * 1000.0,
         "detector_postprocess_ms": float(detector_stages.get("geometry_analysis", 0.0)) * 1000.0,
         "total_gpu_pipeline_ms": float(detector_stages.get("preprocess", 0.0)) * 1000.0,
-        "total_detector_ms": float(detectors.get("401", 0.0)) * 1000.0,
+        "total_detector_ms": float(detectors.get("401-AS-SN-1", 0.0)) * 1000.0,
         "pipeline_before_reporting_ms": float(result.get("duration_sec", 0.0)) * 1000.0,
         "reporting_ms": float(stages.get("reporting_total", 0.0)) * 1000.0,
         "pipeline_end_to_end_ms": float(pipeline.get("end_to_end_sec", 0.0)) * 1000.0,
@@ -182,8 +182,8 @@ def main() -> int:
     image_path = Path(args.image).resolve()
     recipe_path = Path(args.recipe).resolve()
     source = RecipeManager().load(recipe_path)
-    if "401" not in source.get("detectors", {}):
-        raise SystemExit("Recipe does not contain detector 401")
+    if "401-AS-SN-1" not in source.get("detectors", {}):
+        raise SystemExit("Recipe does not contain detector 401-AS-SN-1")
     if not str(source.get("tile", {}).get("template_path", "")).strip():
         raise SystemExit("Recipe is not a Template Anchor Grid recipe (tile.template_path is empty)")
 

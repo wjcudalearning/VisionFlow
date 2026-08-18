@@ -16,9 +16,9 @@ from detectors.detector_900_domain import (
 
 
 class Detector900(BaseDetector):
-    detector_id = "900"
+    detector_id = "900-CS-AP-1"
     detector_name = "dual_frame_spacing_detector"
-    display_name = "900 dual frame spacing detector"
+    display_name = "900-CS-AP-1 dual frame spacing detector"
     default_params = {
         "max_value": 255,
         "outer_threshold": 160,

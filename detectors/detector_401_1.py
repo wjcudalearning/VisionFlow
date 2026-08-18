@@ -10,9 +10,9 @@ from detectors.base_detector import BaseDetector
 
 
 class Detector401_1(BaseDetector):
-    detector_id = "401-1"
+    detector_id = "401-CS-AP-1"
     detector_name = "adaptive_circle_contour_detector"
-    display_name = "401-1 adaptive circle contour detector"
+    display_name = "401-CS-AP-1 adaptive circle contour detector"
     default_params = {
         "threshold_method": "adaptive_mean",
         "max_value": 255,

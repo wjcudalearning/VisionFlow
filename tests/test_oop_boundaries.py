@@ -125,11 +125,13 @@ class OopBoundaryContractTests(unittest.TestCase):
                 version="1",
                 tile={"mode": "grid"},
                 gpu={"mode": "cpu"},
-                detectors={"900": {"enabled": True}},
+                detectors={"900-CS-AP-1": {"enabled": True}},
                 pixel_size_um_per_px=4.0,
             )
         )
-        self.assertEqual(recipe["decision"]["important_detectors"], ["900"])
+        self.assertEqual(
+            recipe["decision"]["important_detectors"], ["900-CS-AP-1"]
+        )
         self.assertEqual(recipe["output"]["pixel_size_um_per_px"], 4.0)
 
     def test_detector_900_geometry_uses_typed_candidates(self):

@@ -10,9 +10,9 @@ from detectors.base_detector import BaseDetector
 
 
 class Detector401(BaseDetector):
-    detector_id = "401"
+    detector_id = "401-AS-SN-1"
     detector_name = "401_negative"
-    display_name = "401_ negative"
+    display_name = "401-AS-SN-1 negative detector"
     default_params = {
         "roi_inset_px": 100,
         "blur_size": 15,

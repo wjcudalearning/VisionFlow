@@ -19,14 +19,14 @@ tile:
 decision:
   mode: "all_detectors_must_pass"
   important_detectors:
-    - "900"
+    - "900-CS-AP-1"
   max_ng_count: 0
 
 detectors:
-  "900":
+  "900-CS-AP-1":
     enabled: true
     use_gpu: false
-    display_name: "900 dual frame spacing detector"
+    display_name: "900-CS-AP-1 dual frame spacing detector"
     params:
       max_value: 255
       outer_threshold: 160

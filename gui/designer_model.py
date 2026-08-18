@@ -9,7 +9,7 @@ from core.recipe_manager import RecipeManager
 @dataclass(slots=True)
 class DesignerEditorState:
     mode: str = "eng"
-    active_detector: str = "401-1"
+    active_detector: str = "401-CS-AP-1"
     dirty: bool = False
     loading_recipe: bool = False
     validation_state: str = "saved"

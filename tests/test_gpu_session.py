@@ -58,7 +58,7 @@ class _ResidentRuntime:
 
 
 class _RoiCapturingDetector:
-    detector_id = "401"
+    detector_id = "401-AS-SN-1"
     detector_name = "fake"
     display_name = "fake"
     use_gpu = True
@@ -157,8 +157,8 @@ class GpuExecutionSessionTests(unittest.TestCase):
         }
         for config in recipe["detectors"].values():
             config["enabled"] = False
-        recipe["detectors"]["401"]["enabled"] = True
-        recipe["detectors"]["401"]["use_gpu"] = True
+        recipe["detectors"]["401-AS-SN-1"]["enabled"] = True
+        recipe["detectors"]["401-AS-SN-1"]["use_gpu"] = True
         runtime = _ResidentRuntime()
         session = GpuExecutionSession(runtime, requested=True, config=recipe["gpu"])
         detector = _RoiCapturingDetector()

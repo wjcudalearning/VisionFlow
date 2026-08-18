@@ -381,7 +381,7 @@ class PipelineProfilerTests(unittest.TestCase):
         profiler = PipelineProfiler()
         with profiler.measure("tiling"):
             pass
-        with profiler.measure("detector:401"):
+        with profiler.measure("detector:401-AS-SN-1"):
             pass
         with profiler.measure("report:json"):
             pass
@@ -390,19 +390,22 @@ class PipelineProfilerTests(unittest.TestCase):
 
         self.assertEqual(snapshot["schema_version"], 1)
         self.assertIn("tiling", snapshot["stages_sec"])
-        self.assertIn("401", snapshot["detectors_sec"])
+        self.assertIn("401-AS-SN-1", snapshot["detectors_sec"])
         self.assertIn("json", snapshot["reporting_sec"])
         self.assertGreaterEqual(snapshot["end_to_end_sec"], 0.0)
 
     def test_detector_stage_and_python_loop_overhead_are_reported(self):
         profiler = PipelineProfiler()
         profiler.add_duration("detectors_total", 0.030)
-        profiler.add_duration("detector:401", 0.020)
-        profiler.add_duration("detector_stage:401:find_contours", 0.004)
+        profiler.add_duration("detector:401-AS-SN-1", 0.020)
+        profiler.add_duration("detector_stage:401-AS-SN-1:find_contours", 0.004)
 
         snapshot = profiler.snapshot()
 
-        self.assertEqual(snapshot["detector_stages_sec"]["401"]["find_contours"], 0.004)
+        self.assertEqual(
+            snapshot["detector_stages_sec"]["401-AS-SN-1"]["find_contours"],
+            0.004,
+        )
         self.assertEqual(snapshot["stages_sec"]["python_tile_detector_loop"], 0.01)
 
     def test_pipeline_progress_deduplicates_equal_percent_and_profiles_callback(self):
@@ -1163,7 +1166,7 @@ class BenchmarkMetadataTests(unittest.TestCase):
                 "recipe_source_sha256": "cpu-source",
                 "effective_recipe_sha256": "cpu-effective",
                 "app": {"commit": "abc123", "dirty": True, "source": "git"},
-                "detector_params": {"401-1": {"threshold": 20}},
+                "detector_params": {"401-CS-AP-1": {"threshold": 20}},
             },
             "final_result": "PASS",
             "summary": {"tile_count": 1, "ng_count": 0},
@@ -1281,9 +1284,9 @@ class CpuFallbackRegressionTests(unittest.TestCase):
                 "fallback_to_cpu": True,
             },
             "tile": {"mode": "grid", "width": 64, "height": 64, "overlap_x": 0, "overlap_y": 0},
-            "decision": {"mode": "all_detectors_must_pass", "important_detectors": ["401-1"], "max_ng_count": 0},
+            "decision": {"mode": "all_detectors_must_pass", "important_detectors": ["401-CS-AP-1"], "max_ng_count": 0},
             "detectors": {
-                "401-1": {
+                "401-CS-AP-1": {
                     "enabled": True,
                     "use_gpu": False,
                     "display_name": "fallback regression",
@@ -1335,7 +1338,7 @@ class CpuFallbackRegressionTests(unittest.TestCase):
             fallback_recipe = deepcopy(cpu_recipe)
             fallback_recipe["gpu"]["tiling"] = True
             fallback_recipe["gpu"]["dll_path"] = str(root / "definitely_missing.dll")
-            fallback_recipe["detectors"]["401-1"]["use_gpu"] = True
+            fallback_recipe["detectors"]["401-CS-AP-1"]["use_gpu"] = True
             cpu_path = root / "cpu.yaml"
             fallback_path = root / "fallback.yaml"
             cpu_path.write_text(yaml.safe_dump(cpu_recipe, sort_keys=False), encoding="utf-8")
@@ -1349,7 +1352,10 @@ class CpuFallbackRegressionTests(unittest.TestCase):
         self.assertFalse(fallback_result["execution"]["gpu"]["tiling"]["active"])
         self.assertEqual(fallback_result["execution"]["gpu"]["metrics"]["call_count"], 0)
         self.assertIn("performance", cpu_result["execution"])
-        self.assertIn("401-1", cpu_result["execution"]["performance"]["detectors_sec"])
+        self.assertIn(
+            "401-CS-AP-1",
+            cpu_result["execution"]["performance"]["detectors_sec"],
+        )
 
     def test_missing_gpu_without_cpu_fallback_fails_explicitly(self):
         with tempfile.TemporaryDirectory(prefix="visionflow_strict_gpu_") as temporary:

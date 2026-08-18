@@ -19,14 +19,14 @@ tile:
 decision:
   mode: "all_detectors_must_pass"
   important_detectors:
-    - "401"
+    - "401-AS-SN-1"
   max_ng_count: 0
 
 detectors:
-  "401":
+  "401-AS-SN-1":
     enabled: true
     use_gpu: false
-    display_name: "401_ negative"
+    display_name: "401-AS-SN-1 negative detector"
     params:
       roi_inset_px: 100
       blur_size: 15

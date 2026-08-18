@@ -50,7 +50,7 @@ class GuiWorkflowTests(unittest.TestCase):
                 "execution": {
                     "gpu": {
                         "tiling": {"requested": False, "active": False, "device_name": "RTX 3090"},
-                        "detectors": {"401": {"requested": True, "active": True, "fallback_reason": ""}},
+                        "detectors": {"401-AS-SN-1": {"requested": True, "active": True, "fallback_reason": ""}},
                     }
                 }
             }

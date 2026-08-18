@@ -19,14 +19,14 @@ tile:
 decision:
   mode: "all_detectors_must_pass"
   important_detectors:
-    - "401-2"
+    - "401-CS-AP-2"
   max_ng_count: 0
 
 detectors:
-  "401-2":
+  "401-CS-AP-2":
     enabled: true
     use_gpu: false
-    display_name: "401-2 adaptive white ratio detector"
+    display_name: "401-CS-AP-2 adaptive white ratio detector"
     params:
       max_value: 255
       blur_size: 25

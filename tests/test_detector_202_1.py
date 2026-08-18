@@ -174,7 +174,7 @@ def _reference_automatic_cnr(gray: np.ndarray):
 class Detector2021ContractTests(unittest.TestCase):
     def test_registration_defaults_and_recipe_round_trip(self):
         manager = DetectorManager()
-        definition = manager.definitions()["202-1"]
+        definition = manager.definitions()["202-CS-SN-1"]
         expected_keys = {
             "center_mask_enabled",
             "center_mask_use_image_center",
@@ -198,16 +198,16 @@ class Detector2021ContractTests(unittest.TestCase):
         self.assertEqual(definition["default_params"]["edge_inset_top"], 50)
         self.assertEqual(definition["default_params"]["edge_inset_bottom"], 20)
         self.assertEqual(set(definition["param_spec"]), expected_keys)
-        self.assertIsInstance(manager.create("202-1"), Detector202_1)
+        self.assertIsInstance(manager.create("202-CS-SN-1"), Detector202_1)
 
         recipe = yaml.safe_load(
             (ROOT / "recipes/PRODUCT_A_NEGATIVE_401_AOI_01.yaml").read_text(
                 encoding="utf-8"
             )
         )
-        recipe["decision"]["important_detectors"] = ["202-1"]
+        recipe["decision"]["important_detectors"] = ["202-CS-SN-1"]
         recipe["detectors"] = {
-            "202-1": {
+            "202-CS-SN-1": {
                 "enabled": True,
                 "use_gpu": False,
                 "display_name": definition["display_name"],

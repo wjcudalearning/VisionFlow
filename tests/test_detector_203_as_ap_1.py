@@ -135,22 +135,22 @@ class Detector203AsAp1ContractTests(unittest.TestCase):
             "max_area": 0.0,
         }
         manager = DetectorManager()
-        definition = manager.definitions()["203-AS-AP-1"]
+        definition = manager.definitions()["203-AS-SN-1"]
 
         self.assertEqual(definition["default_params"], expected)
         self.assertEqual(
             definition["detector_name"], "adaptive_inverse_contour_detector"
         )
-        self.assertIsInstance(manager.create("203-AS-AP-1"), Detector203AsAp1)
+        self.assertIsInstance(manager.create("203-AS-SN-1"), Detector203AsAp1)
 
         recipe = yaml.safe_load(
             (ROOT / "recipes/PRODUCT_A_NEGATIVE_401_AOI_01.yaml").read_text(
                 encoding="utf-8"
             )
         )
-        recipe["decision"]["important_detectors"] = ["203-AS-AP-1"]
+        recipe["decision"]["important_detectors"] = ["203-AS-SN-1"]
         recipe["detectors"] = {
-            "203-AS-AP-1": {
+            "203-AS-SN-1": {
                 "enabled": True,
                 "use_gpu": False,
                 "display_name": definition["display_name"],

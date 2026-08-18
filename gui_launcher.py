@@ -56,11 +56,11 @@ def _packaged_smoke_recipe() -> dict:
         "tile": {"mode": "grid", "width": 64, "height": 64, "overlap_x": 0, "overlap_y": 0},
         "decision": {
             "mode": "all_detectors_must_pass",
-            "important_detectors": ["401-1"],
+            "important_detectors": ["401-CS-AP-1"],
             "max_ng_count": 0,
         },
         "detectors": {
-            "401-1": {
+            "401-CS-AP-1": {
                 "enabled": True,
                 "use_gpu": False,
                 "display_name": "packaged fallback smoke",
@@ -126,7 +126,7 @@ def run_packaged_gpu_fallback_smoke_test() -> int:
             dll_path=str(root / "definitely_missing.dll"),
             fallback_to_cpu=True,
         )
-        fallback_recipe["detectors"]["401-1"]["use_gpu"] = True
+        fallback_recipe["detectors"]["401-CS-AP-1"]["use_gpu"] = True
         strict_recipe = deepcopy(fallback_recipe)
         strict_recipe["gpu"].update(mode="cuda", fallback_to_cpu=False)
 

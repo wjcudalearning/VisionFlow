@@ -34,21 +34,21 @@ class StrictRecipeContractTests(unittest.TestCase):
         self.recipe = yaml.safe_load((ROOT / "recipes/PRODUCT_A_NEGATIVE_401_AOI_01.yaml").read_text(encoding="utf-8"))
 
     def test_rejects_unknown_detector_parameter(self):
-        self.recipe["detectors"]["401"]["params"]["morph_kernal"] = 5
+        self.recipe["detectors"]["401-AS-SN-1"]["params"]["morph_kernal"] = 5
         with self.assertRaisesRegex(RecipeError, "unknown keys: morph_kernal"):
             RecipeManager().validate(self.recipe)
 
     def test_rejects_wrong_type_range_enum_and_unknown_detector(self):
         invalid = deepcopy(self.recipe)
-        invalid["detectors"]["401"]["params"]["morph_kernel"] = 4
+        invalid["detectors"]["401-AS-SN-1"]["params"]["morph_kernel"] = 4
         with self.assertRaisesRegex(RecipeError, "must be odd"):
             RecipeManager().validate(invalid)
         invalid = deepcopy(self.recipe)
-        invalid["detectors"]["401"]["params"]["binary_inv"] = 1
+        invalid["detectors"]["401-AS-SN-1"]["params"]["binary_inv"] = 1
         with self.assertRaisesRegex(RecipeError, "must be bool"):
             RecipeManager().validate(invalid)
         invalid = deepcopy(self.recipe)
-        invalid["detectors"]["401"]["params"]["contour_mode"] = "typo"
+        invalid["detectors"]["401-AS-SN-1"]["params"]["contour_mode"] = "typo"
         with self.assertRaisesRegex(RecipeError, "must be one of"):
             RecipeManager().validate(invalid)
         invalid = deepcopy(self.recipe)
@@ -57,10 +57,64 @@ class StrictRecipeContractTests(unittest.TestCase):
             RecipeManager().validate(invalid)
 
     def test_gui_definitions_expose_the_runtime_parameter_schema(self):
-        definition = DetectorManager().definitions()["401"]
+        definition = DetectorManager().definitions()["401-AS-SN-1"]
         self.assertEqual(set(definition["param_spec"]), set(definition["default_params"]))
         self.assertTrue(definition["param_spec"]["morph_kernel"]["odd"])
         self.assertFalse(definition["param_spec"]["morph_kernel"]["engineer_visible"])
+
+    def test_load_migrates_all_legacy_detector_ids_and_default_display_names(self):
+        aliases = RecipeManager.LEGACY_DETECTOR_ID_ALIASES
+        definitions = DetectorManager().definitions()
+        legacy_displays = {
+            "202-1": "202-1 自動 CNR 偵測器",
+            "203-AS-AP-1": "203-AS-AP-1 adaptive inverse contour detector",
+            "401": "401_ negative",
+            "401-1": "401-1 adaptive circle contour detector",
+            "401-2": "401-2 adaptive white ratio detector",
+            "900": "900 dual frame spacing detector",
+        }
+        recipe = deepcopy(self.recipe)
+        recipe["decision"]["important_detectors"] = list(aliases)
+        recipe["detectors"] = {
+            legacy_id: {
+                "enabled": True,
+                "use_gpu": False,
+                "display_name": legacy_displays[legacy_id],
+                "params": deepcopy(definitions[current_id]["default_params"]),
+            }
+            for legacy_id, current_id in aliases.items()
+        }
+
+        with tempfile.TemporaryDirectory(prefix="legacy_detector_recipe_") as temporary:
+            path = Path(temporary) / "legacy.yaml"
+            path.write_text(
+                yaml.safe_dump(recipe, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+            loaded = RecipeManager().load(path)
+
+        self.assertEqual(set(loaded["detectors"]), set(aliases.values()))
+        self.assertEqual(
+            loaded["decision"]["important_detectors"],
+            list(aliases.values()),
+        )
+        for detector_id, config in loaded["detectors"].items():
+            self.assertEqual(config["display_name"], definitions[detector_id]["display_name"])
+
+    def test_legacy_alias_conflict_and_removed_202_are_rejected(self):
+        recipe = deepcopy(self.recipe)
+        current = deepcopy(recipe["detectors"]["401-AS-SN-1"])
+        recipe["detectors"]["401"] = current
+        with tempfile.TemporaryDirectory(prefix="detector_alias_conflict_") as temporary:
+            path = Path(temporary) / "conflict.yaml"
+            path.write_text(yaml.safe_dump(recipe), encoding="utf-8")
+            with self.assertRaisesRegex(RecipeError, "both legacy and current"):
+                RecipeManager().load(path)
+
+        removed = deepcopy(self.recipe)
+        removed["detectors"] = {"202": current}
+        with self.assertRaisesRegex(RecipeError, "not registered: 202"):
+            RecipeManager().validate(removed)
 
     def test_pixel_size_is_optional_positive_and_backward_compatible(self):
         self.recipe["output"].pop("pixel_size_um_per_px", None)
@@ -89,7 +143,7 @@ class ReporterAreaCalibrationTests(unittest.TestCase):
         "tiles": [{
             "tile": {"tile_id": "T1"},
             "detectors": [{
-                "detector_id": "401",
+                "detector_id": "401-AS-SN-1",
                 "score": 0.9,
                 "defects": [{
                     "type": "dark_region",
@@ -156,7 +210,10 @@ class ProvenanceAndDatasetTests(unittest.TestCase):
         self.assertEqual(provenance["effective_recipe_sha256"], canonical_sha256(recipe))
         self.assertEqual(len(provenance["effective_recipe_sha256"]), 64)
         self.assertIn("commit", provenance["app"])
-        self.assertEqual(provenance["detector_params"]["401"], recipe["detectors"]["401"]["params"])
+        self.assertEqual(
+            provenance["detector_params"]["401-AS-SN-1"],
+            recipe["detectors"]["401-AS-SN-1"]["params"],
+        )
 
     def test_pipeline_writes_ng_tile_image_and_review_sidecar(self):
         with tempfile.TemporaryDirectory(prefix="visionflow_sidecar_") as temporary:
@@ -181,11 +238,11 @@ class ProvenanceAndDatasetTests(unittest.TestCase):
 
 class ProductionGoldenDefectTests(unittest.TestCase):
     CASES = (
-        ("PRODUCT_A_AOI_01.yaml", "401-1"),
-        ("PRODUCT_A_CIRCLE_401_1_AOI_01.yaml", "401-1"),
-        ("PRODUCT_A_NEGATIVE_401_AOI_01.yaml", "401"),
-        ("PRODUCT_A_WHITE_RATIO_401_2_AOI_01.yaml", "401-2"),
-        ("PRODUCT_A_FRAME_900_AOI_01.yaml", "900"),
+        ("PRODUCT_A_AOI_01.yaml", "401-CS-AP-1"),
+        ("PRODUCT_A_CIRCLE_401_1_AOI_01.yaml", "401-CS-AP-1"),
+        ("PRODUCT_A_NEGATIVE_401_AOI_01.yaml", "401-AS-SN-1"),
+        ("PRODUCT_A_WHITE_RATIO_401_2_AOI_01.yaml", "401-CS-AP-2"),
+        ("PRODUCT_A_FRAME_900_AOI_01.yaml", "900-CS-AP-1"),
     )
 
     def test_every_production_recipe_has_deterministic_pass_and_ng_golden(self):
@@ -209,10 +266,10 @@ class ProductionGoldenDefectTests(unittest.TestCase):
 
     def test_each_production_detector_has_at_least_five_golden_cases(self):
         recipes = {
-            "401": "PRODUCT_A_NEGATIVE_401_AOI_01.yaml",
-            "401-1": "PRODUCT_A_AOI_01.yaml",
-            "401-2": "PRODUCT_A_WHITE_RATIO_401_2_AOI_01.yaml",
-            "900": "PRODUCT_A_FRAME_900_AOI_01.yaml",
+            "401-AS-SN-1": "PRODUCT_A_NEGATIVE_401_AOI_01.yaml",
+            "401-CS-AP-1": "PRODUCT_A_AOI_01.yaml",
+            "401-CS-AP-2": "PRODUCT_A_WHITE_RATIO_401_2_AOI_01.yaml",
+            "900-CS-AP-1": "PRODUCT_A_FRAME_900_AOI_01.yaml",
         }
         for detector_id, recipe_name in recipes.items():
             recipe = RecipeManager().load(ROOT / "recipes" / recipe_name)
@@ -246,17 +303,17 @@ class ProductionGoldenDefectTests(unittest.TestCase):
 
     @staticmethod
     def _image(detector_id: str, defect: bool) -> np.ndarray:
-        if detector_id == "401":
+        if detector_id == "401-AS-SN-1":
             image = np.zeros((512, 512, 3), np.uint8) if not defect else np.full((512, 512, 3), 255, np.uint8)
             if defect:
                 cv2.rectangle(image, (220, 220), (260, 250), (0, 0, 0), -1)
             return image
-        if detector_id == "401-1":
+        if detector_id == "401-CS-AP-1":
             image = np.full((512, 512, 3), 255, np.uint8)
             if defect:
                 cv2.circle(image, (256, 256), 12, (0, 0, 0), -1)
             return image
-        if detector_id == "401-2":
+        if detector_id == "401-CS-AP-2":
             return np.zeros((512 if defect else 1, 512, 3), np.uint8)
         image = np.zeros((1300, 1200, 3), np.uint8)
         if not defect:
@@ -266,7 +323,7 @@ class ProductionGoldenDefectTests(unittest.TestCase):
 
     @classmethod
     def _five_cases(cls, detector_id: str):
-        if detector_id == "401":
+        if detector_id == "401-AS-SN-1":
             cases = [("uniform_black_pass", np.zeros((512, 512, 3), np.uint8), True)]
             for width, height, expected in ((40, 30, False), (20, 20, False), (5, 5, False)):
                 image = np.full((512, 512, 3), 255, np.uint8)
@@ -276,14 +333,14 @@ class ProductionGoldenDefectTests(unittest.TestCase):
             cv2.rectangle(bright, (220, 220), (260, 250), (255, 255, 255), -1)
             cases.append(("bright_on_black_pass", bright, True))
             return cases
-        if detector_id == "401-1":
+        if detector_id == "401-CS-AP-1":
             cases = [("clean_white", np.full((512, 512, 3), 255, np.uint8), True)]
             for radius, expected in ((10, False), (12, False), (14, True), (30, True)):
                 image = np.full((512, 512, 3), 255, np.uint8)
                 cv2.circle(image, (256, 256), radius, (0, 0, 0), -1)
                 cases.append((f"circle_r{radius}", image, expected))
             return cases
-        if detector_id == "401-2":
+        if detector_id == "401-CS-AP-2":
             gradient = np.tile(np.arange(256, dtype=np.uint8), (512, 2))
             gradient = np.dstack((gradient, gradient, gradient))
             rectangle = np.zeros((512, 512, 3), np.uint8)
@@ -315,7 +372,7 @@ class ProductionGoldenDefectTests(unittest.TestCase):
 
     @staticmethod
     def _sort_key(detector_id: str):
-        if detector_id == "401-2":
+        if detector_id == "401-CS-AP-2":
             return lambda item: item["metadata"]["white_pixel_ratio"] * -1
         return lambda item: (
             -item.get("area", 0),
@@ -325,10 +382,10 @@ class ProductionGoldenDefectTests(unittest.TestCase):
 
     def _assert_expected_bbox(self, detector_id: str, bbox: list[int]) -> None:
         expected = {
-            "401": (219, 219, 43, 33),
-            "401-1": (239, 239, 35, 35),
-            "401-2": (0, 0, 512, 512),
-            "900": (0, 0, 1200, 1300),
+            "401-AS-SN-1": (219, 219, 43, 33),
+            "401-CS-AP-1": (239, 239, 35, 35),
+            "401-CS-AP-2": (0, 0, 512, 512),
+            "900-CS-AP-1": (0, 0, 1200, 1300),
         }[detector_id]
         for actual, target in zip(bbox, expected):
             self.assertLessEqual(abs(actual - target), 2)

@@ -41,9 +41,9 @@ class _CnrCandidate:
 class Detector202_1(Detector202):
     """Automatic CNR candidate detector based on AcceptanceChecker."""
 
-    detector_id = "202-1"
+    detector_id = "202-CS-SN-1"
     detector_name = "automatic_cnr_detector"
-    display_name = "202-1 自動 CNR 偵測器"
+    display_name = "202-CS-SN-1 自動 CNR 偵測器"
     default_params = {
         key: Detector202.default_params[key] for key in _MASK_PARAM_KEYS
     }

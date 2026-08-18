@@ -2,11 +2,12 @@ from __future__ import annotations
 
 # detector_id -> Chinese display label.
 DETECTOR_ZH = {
-    "202": "202 凸多邊形 NG 檢測",
-    "203-AS-AP-1": "自適應反相輪廓檢測",
-    "401": "401_ negative",
-    "401-1": "401-1 圓形 NG 檢測",
-    "401-2": "401-2 白色比例 NG 檢測",
+    "202-CS-SN-1": "自動 CNR 檢測",
+    "203-AS-SN-1": "自適應反相輪廓檢測",
+    "401-AS-SN-1": "反相矩形 NG 檢測",
+    "401-CS-AP-1": "圓形 NG 檢測",
+    "401-CS-AP-2": "白色比例 NG 檢測",
+    "900-CS-AP-1": "雙框間距檢測",
     "yolox": "YOLOX 物件偵測",
 }
 

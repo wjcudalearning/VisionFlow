@@ -54,6 +54,22 @@ _RECIPE_CACHE = _RecipeCache()
 
 class RecipeManager:
     REQUIRED_TOP_LEVEL_KEYS = {"recipe_name", "product_id", "machine_id", "version", "tile", "decision", "detectors", "output"}
+    LEGACY_DETECTOR_ID_ALIASES = {
+        "202-1": "202-CS-SN-1",
+        "203-AS-AP-1": "203-AS-SN-1",
+        "401": "401-AS-SN-1",
+        "401-1": "401-CS-AP-1",
+        "401-2": "401-CS-AP-2",
+        "900": "900-CS-AP-1",
+    }
+    LEGACY_DEFAULT_DISPLAY_NAMES = {
+        "202-1 自動 CNR 偵測器": "202-CS-SN-1 自動 CNR 偵測器",
+        "203-AS-AP-1 adaptive inverse contour detector": "203-AS-SN-1 adaptive inverse contour detector",
+        "401_ negative": "401-AS-SN-1 negative detector",
+        "401-1 adaptive circle contour detector": "401-CS-AP-1 adaptive circle contour detector",
+        "401-2 adaptive white ratio detector": "401-CS-AP-2 adaptive white ratio detector",
+        "900 dual frame spacing detector": "900-CS-AP-1 dual frame spacing detector",
+    }
 
     def load(self, path: Path) -> dict[str, Any]:
         recipe_path = Path(path)
@@ -67,9 +83,41 @@ class RecipeManager:
         with recipe_path.open("r", encoding="utf-8") as handle:
             recipe = yaml.safe_load(handle) or {}
 
+        self._normalize_legacy_detector_ids(recipe)
         self.validate(recipe)
         _RECIPE_CACHE.store(recipe_path, recipe)
         return deepcopy(recipe)
+
+    @classmethod
+    def _normalize_legacy_detector_ids(cls, recipe: dict[str, Any]) -> None:
+        detectors = recipe.get("detectors")
+        if not isinstance(detectors, dict):
+            return
+
+        for legacy_id, current_id in cls.LEGACY_DETECTOR_ID_ALIASES.items():
+            if legacy_id not in detectors:
+                continue
+            if current_id in detectors:
+                raise RecipeError(
+                    "Recipe contains both legacy and current detector IDs: "
+                    f"{legacy_id}, {current_id}"
+                )
+            config = detectors.pop(legacy_id)
+            if isinstance(config, dict):
+                display_name = config.get("display_name")
+                if display_name in cls.LEGACY_DEFAULT_DISPLAY_NAMES:
+                    config["display_name"] = cls.LEGACY_DEFAULT_DISPLAY_NAMES[display_name]
+            detectors[current_id] = config
+
+        decision = recipe.get("decision")
+        if not isinstance(decision, dict):
+            return
+        important = decision.get("important_detectors")
+        if isinstance(important, list):
+            decision["important_detectors"] = [
+                cls.LEGACY_DETECTOR_ID_ALIASES.get(str(detector_id), detector_id)
+                for detector_id in important
+            ]
 
     def validate(self, recipe: dict[str, Any]) -> None:
         missing = self.REQUIRED_TOP_LEVEL_KEYS - set(recipe)

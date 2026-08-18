@@ -52,13 +52,13 @@ def _format_bytes(value: float) -> str:
 
 def analyze_report(report: dict) -> dict:
     if report.get("schema_version") != 1:
-        raise ProfileAnalysisError("只支援 detector 401 profiler schema_version=1")
+        raise ProfileAnalysisError("只支援 detector 401-AS-SN-1 profiler schema_version=1")
     checks = report.get("checks")
     cpu = report.get("cpu", {}).get("summary")
     warm = report.get("warm_gpu", {}).get("summary")
     cold = report.get("cold_gpu")
     if not isinstance(checks, dict) or not isinstance(cpu, dict) or not isinstance(warm, dict):
-        raise ProfileAnalysisError("JSON 不是完整的 detector 401 profiler 報告")
+        raise ProfileAnalysisError("JSON 不是完整的 detector 401-AS-SN-1 profiler 報告")
     if not isinstance(cold, dict):
         raise ProfileAnalysisError("JSON 缺少 cold_gpu")
 
@@ -246,7 +246,7 @@ def analyze_report(report: dict) -> dict:
 
 
 def render_analysis(analysis: dict) -> str:
-    lines = ["=== Detector 401 CPU/GPU Profiling 自動判讀 ===", ""]
+    lines = ["=== Detector 401-AS-SN-1 CPU/GPU Profiling 自動判讀 ===", ""]
     if analysis["valid"]:
         lines.append("資料有效性：PASS（ROI、PASS/NG 與 fallback gate 均通過）")
     else:
@@ -325,7 +325,7 @@ def render_analysis(analysis: dict) -> str:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="離線判讀 Detector 401 profiler JSON。")
+    parser = argparse.ArgumentParser(description="離線判讀 Detector 401-AS-SN-1 profiler JSON。")
     parser.add_argument("profile", help="profile_401_pipeline.py 產生的 JSON")
     parser.add_argument("--output", help="另存繁體中文判讀文字")
     parser.add_argument("--json-output", help="另存機器可讀的判讀 JSON")

@@ -292,9 +292,9 @@ class DesignerScreen(QWidget):
         self._param_widgets: dict[str, dict[str, QWidget]] = {}
         self._enabled: dict[str, bool] = {detector_id: False for detector_id in self.detector_definitions}
         self._gpu_enabled: dict[str, bool] = {detector_id: False for detector_id in self.detector_definitions}
-        self._enabled["401-1"] = True
+        self._enabled["401-CS-AP-1"] = True
         self._row_widgets: dict[str, dict] = {}
-        self._active_detector = "401-1"
+        self._active_detector = "401-CS-AP-1"
         self.mode = "eng"
         self._dirty = False
         self._loading_recipe = False
@@ -834,7 +834,7 @@ class DesignerScreen(QWidget):
 
         header_row = QHBoxLayout()
         header_row.setSpacing(8)
-        self.active_id_label = QLabel("401-1")
+        self.active_id_label = QLabel("401-CS-AP-1")
         self.active_id_label.setProperty("mono", "true")
         self.active_id_label.setStyleSheet("font-weight: 700; font-size: 14px;")
         self.active_zh_label = QLabel("")
@@ -862,7 +862,7 @@ class DesignerScreen(QWidget):
         body_layout.addWidget(params_scroll, 1)
 
         panel.add_widget(body, 1)
-        self._select_detector("401-1")
+        self._select_detector("401-CS-AP-1")
         return panel
 
     def _build_detector_row(self, detector_id: str) -> QWidget:

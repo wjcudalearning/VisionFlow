@@ -4,9 +4,9 @@ import cv2
 
 
 class Detector900DebugRenderer:
-    """Render Detector 900 diagnostic metadata without coupling Reporter to the detector."""
+    """Render Detector 900-CS-AP-1 diagnostics without coupling Reporter to it."""
 
-    detector_id = "900"
+    detector_id = "900-CS-AP-1"
 
     def render(self, image, defect: dict, line_width: int) -> None:
         metadata = defect.get("metadata", {})
@@ -105,7 +105,7 @@ class Detector900DebugRenderer:
         debug_pair = metadata.get("debug_pair") or {}
         edge_gaps = debug_pair.get("edge_gaps") if isinstance(debug_pair, dict) else None
         lines = [
-            "Detector 900 NG debug",
+            "Detector 900-CS-AP-1 NG debug",
             f"reason: {metadata.get('reason', '')}",
             "outer pass/raw/fail: "
             f"{metadata.get('outer_candidate_count', 0)}/"

@@ -10,9 +10,9 @@ from detectors.base_detector import BaseDetector
 
 
 class Detector401_2(BaseDetector):
-    detector_id = "401-2"
+    detector_id = "401-CS-AP-2"
     detector_name = "adaptive_white_ratio_detector"
-    display_name = "401-2 adaptive white ratio detector"
+    display_name = "401-CS-AP-2 adaptive white ratio detector"
     default_params = {
         "max_value": 255,
         "blur_size": 25,

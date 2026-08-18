@@ -11,9 +11,9 @@ from detectors.base_detector import BaseDetector
 
 
 class Detector203AsAp1(BaseDetector):
-    detector_id = "203-AS-AP-1"
+    detector_id = "203-AS-SN-1"
     detector_name = "adaptive_inverse_contour_detector"
-    display_name = "203-AS-AP-1 adaptive inverse contour detector"
+    display_name = "203-AS-SN-1 adaptive inverse contour detector"
 
     default_params = {
         "edge_mask_enabled": True,
