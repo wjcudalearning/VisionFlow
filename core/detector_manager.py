@@ -9,6 +9,7 @@ from detectors.detector_203_as_ap_1 import Detector203AsAp1
 from detectors.detector_401 import Detector401
 from detectors.detector_401_1 import Detector401_1
 from detectors.detector_401_2 import Detector401_2
+from detectors.detector_505_as_sn_1 import Detector505AsSn1
 from detectors.detector_900 import Detector900
 from detectors.detector_yolox import DetectorYolox
 
@@ -21,6 +22,7 @@ class DetectorManager:
             Detector401.detector_id: Detector401,
             Detector401_1.detector_id: Detector401_1,
             Detector401_2.detector_id: Detector401_2,
+            Detector505AsSn1.detector_id: Detector505AsSn1,
             Detector900.detector_id: Detector900,
             DetectorYolox.detector_id: DetectorYolox,
         }
