@@ -18,7 +18,8 @@ $skillNames = @(
     'aoi-verify-push',
     'aoi-detector-development',
     'aoi-cuda-validate',
-    'aoi-release'
+    'aoi-release',
+    'aoi-weekly-report'
 )
 $destinationRoot = Join-Path $CodexHome 'skills'
 $existingSkills = @(

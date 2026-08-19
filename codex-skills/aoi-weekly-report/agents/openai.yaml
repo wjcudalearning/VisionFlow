@@ -1,0 +1,4 @@
+interface:
+  display_name: "AOI Weekly Report"
+  short_description: "Create AOI reports on the Thursday-to-Wednesday cycle"
+  default_prompt: "Use $aoi-weekly-report to write this week's AOI project report."

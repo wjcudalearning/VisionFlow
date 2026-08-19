@@ -1,11 +1,12 @@
 # AOI Codex Skills 可攜備份
 
-此資料夾保存 AOI_CVbased 專案使用的四個 Codex skills，供移機、重灌或另一台開發機安裝：
+此資料夾保存 AOI_CVbased 專案使用的五個 Codex skills，供移機、重灌或另一台開發機安裝：
 
 - `aoi-verify-push`：專案共用驗證、Todo、commit 與 push 流程。
 - `aoi-detector-development`：Detector 開發與 CPU／CUDA fallback 契約。
 - `aoi-cuda-validate`：CUDA source、DLL、RTX 3090 與效能驗證。
 - `aoi-release`：Windows 打包與 GitHub Release 發布流程。
+- `aoi-weekly-report`：依星期四至星期三週期產生、提交並推送週報；本機不重跑程式驗證。
 
 ## 新機安裝
 
