@@ -17,6 +17,7 @@ from core.preprocess_plan import (
     UnsupportedPreprocessPlan,
 )
 from core.recipe_manager import RecipeManager
+from detectors.detector_503_cs_sn_1 import Detector503CsSn1
 from detectors.detector_506_cs_sn_1 import Detector506CsSn1
 
 
@@ -81,6 +82,12 @@ class _FailingThresholdRuntime(_PrimitiveRuntime):
     def threshold(self, *_args):
         self.calls.append("threshold")
         raise RuntimeError("injected detector 506-CS-SN-1 threshold failure")
+
+
+class _Failing503ThresholdRuntime(_PrimitiveRuntime):
+    def threshold(self, *_args):
+        self.calls.append("threshold")
+        raise RuntimeError("injected detector 503-CS-SN-1 threshold failure")
 
 
 class _UnavailableRuntime:
@@ -449,6 +456,141 @@ class Detector506CsSn1ResultTests(unittest.TestCase):
         )
         self.assertEqual(result["defects"][0]["confidence"], 1.0)
         self.assertEqual(result["defects"][1]["metadata"]["shape"], "polygon")
+
+
+class Detector503CsSn1IdentityTests(unittest.TestCase):
+    def test_registration_defaults_schema_and_recipe_round_trip(self):
+        manager = DetectorManager()
+        definition = manager.definitions()["503-CS-SN-1"]
+
+        self.assertIsInstance(manager.create("503-CS-SN-1"), Detector503CsSn1)
+        self.assertEqual(
+            definition["default_params"],
+            manager.definitions()["506-CS-SN-1"]["default_params"],
+        )
+        self.assertEqual(
+            set(definition["param_spec"]), set(definition["default_params"])
+        )
+        self.assertEqual(definition["default_params"]["threshold_value"], 200)
+
+        recipe = yaml.safe_load(
+            (ROOT / "recipes/PRODUCT_A_NEGATIVE_401_AOI_01.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        recipe["decision"]["important_detectors"] = ["503-CS-SN-1"]
+        recipe["detectors"] = {
+            "503-CS-SN-1": {
+                "enabled": True,
+                "use_gpu": False,
+                "display_name": definition["display_name"],
+                "params": deepcopy(definition["default_params"]),
+            }
+        }
+        RecipeManager().validate(recipe)
+
+    def test_center_and_four_side_masks_match_shared_contract(self):
+        params = {
+            "center_mask_width": 2,
+            "center_mask_height": 2,
+            "edge_inset_all": 1,
+            "edge_inset_right": 3,
+            "edge_inset_bottom": 2,
+        }
+        binary = np.full((10, 12), 255, np.uint8)
+
+        actual = Detector503CsSn1(params=params)._apply_edge_mask(binary)
+        expected = Detector506CsSn1(params=params)._apply_edge_mask(binary)
+
+        np.testing.assert_array_equal(actual, expected)
+        self.assertEqual(cv2.countNonZero(actual[3:7, 4:8]), 0)
+        self.assertEqual(cv2.countNonZero(actual[:, -3:]), 0)
+
+    def test_cpu_native_primitive_and_failure_routes_preserve_result(self):
+        params = {
+            "center_mask_width": 3,
+            "center_mask_height": 4,
+            "edge_inset_all": 2,
+        }
+        image = np.random.default_rng(50311).integers(
+            0, 256, size=(71, 89, 3), dtype=np.uint8
+        )
+        cpu = Detector503CsSn1(params=params)
+        cpu_binary = cpu._make_binary(image)
+        self.assertEqual(cpu.last_preprocess_capability["route"], "cpu")
+        self.assertEqual(cpu.preprocess_plan_name, "503_cs_sn_1_preprocess")
+
+        native_runtime = _NativePlanRuntime()
+        native = Detector503CsSn1(
+            params=params, use_gpu=True, gpu_runtime=native_runtime
+        )
+        np.testing.assert_array_equal(native._make_binary(image), cpu_binary)
+        self.assertEqual(native.last_preprocess_capability["route"], "native_plan")
+
+        primitive_runtime = _PrimitiveRuntime()
+        primitive = Detector503CsSn1(
+            params=params, use_gpu=True, gpu_runtime=primitive_runtime
+        )
+        np.testing.assert_array_equal(primitive._make_binary(image), cpu_binary)
+        self.assertEqual(primitive_runtime.calls, ["gray", "threshold"])
+
+        missing_runtime = _MissingThresholdRuntime()
+        missing = Detector503CsSn1(
+            params=params, use_gpu=True, gpu_runtime=missing_runtime
+        )
+        np.testing.assert_array_equal(missing._make_binary(image), cpu_binary)
+        self.assertEqual(missing.last_preprocess_capability["route"], "fallback")
+
+        strict_runtime = _MissingThresholdRuntime()
+        strict_runtime.fallback_to_cpu = False
+        strict = Detector503CsSn1(
+            params=params, use_gpu=True, gpu_runtime=strict_runtime
+        )
+        with self.assertRaisesRegex(
+            UnsupportedPreprocessPlan, "missing runtime primitive: threshold"
+        ):
+            strict.run(image)
+
+        unavailable = Detector503CsSn1(
+            params=params, use_gpu=True, gpu_runtime=_UnavailableRuntime()
+        ).run(image)
+        self.assertEqual(
+            unavailable["defects"],
+            Detector503CsSn1(params=params).run(image)["defects"],
+        )
+        self.assertEqual(
+            unavailable["execution"]["fallback_reason"],
+            "visionflow_cuda.dll is missing",
+        )
+
+        failing_runtime = _Failing503ThresholdRuntime()
+        failing = Detector503CsSn1(
+            params=params, use_gpu=True, gpu_runtime=failing_runtime
+        )
+        actual = failing.run(image)
+        expected = Detector503CsSn1(params=params).run(image)
+        self.assertEqual(actual["defects"], expected["defects"])
+        self.assertEqual(
+            actual["execution"]["fallback_reason"],
+            "injected detector 503-CS-SN-1 threshold failure",
+        )
+
+    def test_actual_preprocess_pass_ng_and_identity_metadata(self):
+        detector = Detector503CsSn1(
+            params={"center_mask_enabled": False, "edge_mask_enabled": False}
+        )
+        image = np.full((120, 160, 3), 100, dtype=np.uint8)
+        self.assertTrue(detector.run(image)["pass"])
+
+        polygon = np.array([[60, 80], [80, 35], [105, 55], [95, 90]], np.int32)
+        cv2.fillPoly(image, [polygon], (240, 240, 240))
+        result = detector.run(image)
+
+        self.assertFalse(result["pass"])
+        self.assertEqual(result["detector_id"], "503-CS-SN-1")
+        self.assertEqual(len(result["defects"]), 1)
+        self.assertEqual(result["defects"][0]["type"], "503_cs_sn_1_polygon_ng")
+        self.assertEqual(result["defects"][0]["metadata"]["threshold_value"], 200)
 
 
 if __name__ == "__main__":

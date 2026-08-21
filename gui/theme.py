@@ -41,6 +41,7 @@ DEFECT_COLOR_FALLBACK = "#ff5d52"
 DEFECT_TYPE_LABELS = {
     "202-1_auto_cnr_ng": "202-CS-SN-1 自動 CNR NG",
     "203_as_ap_1_contour_ng": "203-AS-SN-1 輪廓 NG",
+    "503_cs_sn_1_polygon_ng": "503-CS-SN-1 多邊形 NG",
     "505_as_sn_1_polygon_ng": "505-AS-SN-1 多邊形 NG",
     "506_cs_sn_1_polygon_ng": "506-CS-SN-1 多邊形 NG",
     "blob": "Blob",
