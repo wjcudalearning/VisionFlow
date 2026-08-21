@@ -92,6 +92,7 @@ class StrictRecipeContractTests(unittest.TestCase):
             "401-CS-AP-1": {"roi_inset_px", "min_area", "max_area"},
             "401-CS-AP-2": {"roi_inset_px", "min_area", "max_area"},
             "503-CS-AP-1": {
+                "center_mask_width", "center_mask_height",
                 "edge_inset_all", "edge_inset_left", "edge_inset_right",
                 "edge_inset_top", "edge_inset_bottom", "min_area", "max_area",
             },
@@ -143,6 +144,8 @@ class StrictRecipeContractTests(unittest.TestCase):
                 "contour_mode", "white_pixel_ratio_threshold",
             },
             "503-CS-AP-1": {
+                "center_mask_enabled", "center_mask_use_image_center",
+                "center_mask_x", "center_mask_y",
                 "edge_mask_enabled", "threshold_value", "max_value",
                 "binary_inv", "contour_mode", "approx_epsilon_ratio",
                 "min_vertices",

@@ -18,6 +18,12 @@ class Detector503CsAp1(Detector505AsSn1):
     preprocess_plan_name = "503_cs_ap_1_preprocess"
 
     default_params = {
+        "center_mask_enabled": True,
+        "center_mask_use_image_center": True,
+        "center_mask_x": 0,
+        "center_mask_y": 0,
+        "center_mask_width": 0,
+        "center_mask_height": 0,
         "edge_mask_enabled": True,
         "edge_inset_all": 0,
         "edge_inset_left": 0,
@@ -36,6 +42,34 @@ class Detector503CsAp1(Detector505AsSn1):
     PARAM_SPEC = specs_from_defaults(
         default_params,
         {
+            "center_mask_enabled": {
+                "parameter_group": PARAMETER_GROUP_INNER,
+                "label": "啟用中心屏蔽",
+            },
+            "center_mask_use_image_center": {
+                "parameter_group": PARAMETER_GROUP_INNER,
+                "label": "使用影像中心",
+            },
+            "center_mask_x": {
+                "minimum": 0,
+                "parameter_group": PARAMETER_GROUP_INNER,
+                "label": "自訂中心 X",
+            },
+            "center_mask_y": {
+                "minimum": 0,
+                "parameter_group": PARAMETER_GROUP_INNER,
+                "label": "自訂中心 Y",
+            },
+            "center_mask_width": {
+                "minimum": 0,
+                "parameter_group": PARAMETER_GROUP_OUTER,
+                "label": "中心屏蔽半寬 X",
+            },
+            "center_mask_height": {
+                "minimum": 0,
+                "parameter_group": PARAMETER_GROUP_OUTER,
+                "label": "中心屏蔽半高 Y",
+            },
             "edge_mask_enabled": {
                 "parameter_group": PARAMETER_GROUP_INNER,
                 "label": "啟用四邊屏蔽",
@@ -109,3 +143,64 @@ class Detector503CsAp1(Detector505AsSn1):
             },
         },
     )
+
+    def detect(self, image) -> list[dict]:
+        defects = super().detect(image)
+        height, width = image.shape[:2]
+        center_mask = self._effective_center_mask(width, height)
+        for defect in defects:
+            metadata = defect["metadata"]
+            metadata.update(
+                {
+                    "center_mask_enabled": bool(
+                        self.params.get("center_mask_enabled", True)
+                    ),
+                    "center_mask_use_image_center": bool(
+                        self.params.get("center_mask_use_image_center", True)
+                    ),
+                    "center_mask_center": center_mask["center"],
+                    "center_mask_half_extents": center_mask["half_extents"],
+                    "effective_center_mask_bbox": center_mask["bbox"],
+                    "mask_order": (
+                        "gray_global_binary_inv_center_edge_mask_polygon"
+                        if bool(self.params.get("binary_inv", False))
+                        else "gray_global_binary_center_edge_mask_polygon"
+                    ),
+                }
+            )
+        return defects
+
+    def _apply_edge_mask(self, binary):
+        height, width = binary.shape[:2]
+        masked = binary.copy()
+        center_mask = self._effective_center_mask(width, height)
+        if bool(self.params.get("center_mask_enabled", True)):
+            x, y, mask_width, mask_height = center_mask["bbox"]
+            if mask_width > 0 and mask_height > 0:
+                masked[y : y + mask_height, x : x + mask_width] = 0
+        return super()._apply_edge_mask(masked)
+
+    def _effective_center_mask(self, width: int, height: int) -> dict:
+        if bool(self.params.get("center_mask_use_image_center", True)):
+            center_x = width // 2
+            center_y = height // 2
+        else:
+            center_x = int(self.params.get("center_mask_x", width // 2))
+            center_y = int(self.params.get("center_mask_y", height // 2))
+
+        half_width = max(0, int(self.params.get("center_mask_width", 0)))
+        half_height = max(0, int(self.params.get("center_mask_height", 0)))
+        x_start = min(width, max(0, center_x - half_width))
+        x_stop = min(width, max(0, center_x + half_width))
+        y_start = min(height, max(0, center_y - half_height))
+        y_stop = min(height, max(0, center_y + half_height))
+        return {
+            "center": [center_x, center_y],
+            "half_extents": [half_width, half_height],
+            "bbox": [
+                x_start,
+                y_start,
+                max(0, x_stop - x_start),
+                max(0, y_stop - y_start),
+            ],
+        }

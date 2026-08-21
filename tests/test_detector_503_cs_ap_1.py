@@ -102,6 +102,12 @@ class _DeviceRoi:
 class Detector503CsAp1ContractTests(unittest.TestCase):
     def test_defaults_registration_and_recipe_round_trip(self):
         expected = {
+            "center_mask_enabled": True,
+            "center_mask_use_image_center": True,
+            "center_mask_x": 0,
+            "center_mask_y": 0,
+            "center_mask_width": 0,
+            "center_mask_height": 0,
             "edge_mask_enabled": True,
             "edge_inset_all": 0,
             "edge_inset_left": 0,
@@ -140,9 +146,11 @@ class Detector503CsAp1ContractTests(unittest.TestCase):
         }
         RecipeManager().validate(recipe)
 
-    def test_four_side_mask_is_exact_and_does_not_mutate_input(self):
+    def test_center_and_four_side_masks_are_exact_and_do_not_mutate_input(self):
         detector = Detector503CsAp1(
             params={
+                "center_mask_width": 2,
+                "center_mask_height": 2,
                 "edge_inset_all": 2,
                 "edge_inset_left": 1,
                 "edge_inset_right": 3,
@@ -156,21 +164,38 @@ class Detector503CsAp1ContractTests(unittest.TestCase):
 
         expected = np.zeros_like(binary)
         expected[2:8, 2:9] = 255
+        expected[3:7, 4:8] = 0
         np.testing.assert_array_equal(actual, expected)
         np.testing.assert_array_equal(binary, np.full((10, 12), 255, np.uint8))
 
         disabled = Detector503CsAp1(
-            params={"edge_mask_enabled": False}
+            params={"center_mask_enabled": False, "edge_mask_enabled": False}
         )._apply_edge_mask(binary)
         np.testing.assert_array_equal(disabled, binary)
 
-    def test_oversized_edge_mask_is_clipped(self):
+        custom_center = Detector503CsAp1(
+            params={
+                "center_mask_use_image_center": False,
+                "center_mask_x": 3,
+                "center_mask_y": 4,
+                "center_mask_width": 2,
+                "center_mask_height": 3,
+                "edge_mask_enabled": False,
+            }
+        )._apply_edge_mask(binary)
+        expected_custom = binary.copy()
+        expected_custom[1:7, 1:5] = 0
+        np.testing.assert_array_equal(custom_center, expected_custom)
+
+    def test_oversized_center_and_edge_masks_are_clipped(self):
         detector = Detector503CsAp1(
             params={
                 "edge_inset_left": 50,
                 "edge_inset_right": 50,
                 "edge_inset_top": 50,
                 "edge_inset_bottom": 50,
+                "center_mask_width": 100,
+                "center_mask_height": 100,
             }
         )
         actual = detector._apply_edge_mask(np.full((7, 9), 255, np.uint8))
@@ -181,6 +206,8 @@ class Detector503CsAp1PreprocessTests(unittest.TestCase):
     @staticmethod
     def _params():
         return {
+            "center_mask_width": 4,
+            "center_mask_height": 6,
             "edge_inset_left": 2,
             "edge_inset_right": 3,
             "edge_inset_top": 4,
@@ -201,6 +228,18 @@ class Detector503CsAp1PreprocessTests(unittest.TestCase):
             int(params.get("max_value", 255)),
             threshold_type,
         )[1]
+        center_x = binary.shape[1] // 2
+        center_y = binary.shape[0] // 2
+        half_width = int(params.get("center_mask_width", 0))
+        half_height = int(params.get("center_mask_height", 0))
+        binary[
+            max(0, center_y - half_height) : min(
+                binary.shape[0], center_y + half_height
+            ),
+            max(0, center_x - half_width) : min(
+                binary.shape[1], center_x + half_width
+            ),
+        ] = 0
         binary[: params["edge_inset_top"], :] = 0
         binary[-params["edge_inset_bottom"] :, :] = 0
         binary[:, : params["edge_inset_left"]] = 0
@@ -370,6 +409,12 @@ class Detector503CsAp1ResultTests(unittest.TestCase):
         self.assertEqual(defect["type"], "503_cs_ap_1_polygon_ng")
         self.assertEqual(defect["metadata"]["threshold_value"], 200)
         self.assertEqual(defect["metadata"]["threshold_method"], "global_binary")
+        self.assertTrue(defect["metadata"]["center_mask_enabled"])
+        self.assertEqual(defect["metadata"]["center_mask_half_extents"], [0, 0])
+        self.assertEqual(
+            defect["metadata"]["mask_order"],
+            "gray_global_binary_center_edge_mask_polygon",
+        )
         self.assertGreaterEqual(defect["metadata"]["vertex_count"], 3)
         self.assertTrue(100.0 <= defect["area"] <= 100000.0)
 
