@@ -17,7 +17,7 @@ from core.preprocess_plan import (
     UnsupportedPreprocessPlan,
 )
 from core.recipe_manager import RecipeManager
-from detectors.detector_503_cs_ap_1 import Detector503CsAp1
+from detectors.detector_506_cs_sn_1 import Detector506CsSn1
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,7 +37,7 @@ class _NativePlanRuntime:
 
     @staticmethod
     def native_plan_capability(_plan, _image):
-        return True, "fake native plan supports detector 503-CS-AP-1"
+        return True, "fake native plan supports detector 506-CS-SN-1"
 
     def execute_plan(self, image, plan, device_roi=None):
         self.calls += 1
@@ -80,7 +80,7 @@ class _MissingThresholdRuntime:
 class _FailingThresholdRuntime(_PrimitiveRuntime):
     def threshold(self, *_args):
         self.calls.append("threshold")
-        raise RuntimeError("injected detector 503-CS-AP-1 threshold failure")
+        raise RuntimeError("injected detector 506-CS-SN-1 threshold failure")
 
 
 class _UnavailableRuntime:
@@ -99,7 +99,7 @@ class _DeviceRoi:
         return self.token
 
 
-class Detector503CsAp1ContractTests(unittest.TestCase):
+class Detector506CsSn1ContractTests(unittest.TestCase):
     def test_defaults_registration_and_recipe_round_trip(self):
         expected = {
             "center_mask_enabled": True,
@@ -124,20 +124,23 @@ class Detector503CsAp1ContractTests(unittest.TestCase):
             "max_area": 100000.0,
         }
         manager = DetectorManager()
-        definition = manager.definitions()["503-CS-AP-1"]
+        definition = manager.definitions()["506-CS-SN-1"]
 
         self.assertEqual(definition["default_params"], expected)
         self.assertEqual(definition["detector_name"], "global_polygon_detector")
-        self.assertIsInstance(manager.create("503-CS-AP-1"), Detector503CsAp1)
+        self.assertIsInstance(manager.create("506-CS-SN-1"), Detector506CsSn1)
+        self.assertNotIn("503-CS-AP-1", manager.definitions())
+        with self.assertRaisesRegex(KeyError, "not registered: 503-CS-AP-1"):
+            manager.create("503-CS-AP-1")
 
         recipe = yaml.safe_load(
             (ROOT / "recipes/PRODUCT_A_NEGATIVE_401_AOI_01.yaml").read_text(
                 encoding="utf-8"
             )
         )
-        recipe["decision"]["important_detectors"] = ["503-CS-AP-1"]
+        recipe["decision"]["important_detectors"] = ["506-CS-SN-1"]
         recipe["detectors"] = {
-            "503-CS-AP-1": {
+            "506-CS-SN-1": {
                 "enabled": True,
                 "use_gpu": False,
                 "display_name": definition["display_name"],
@@ -147,7 +150,7 @@ class Detector503CsAp1ContractTests(unittest.TestCase):
         RecipeManager().validate(recipe)
 
     def test_center_and_four_side_masks_are_exact_and_do_not_mutate_input(self):
-        detector = Detector503CsAp1(
+        detector = Detector506CsSn1(
             params={
                 "center_mask_width": 2,
                 "center_mask_height": 2,
@@ -168,12 +171,12 @@ class Detector503CsAp1ContractTests(unittest.TestCase):
         np.testing.assert_array_equal(actual, expected)
         np.testing.assert_array_equal(binary, np.full((10, 12), 255, np.uint8))
 
-        disabled = Detector503CsAp1(
+        disabled = Detector506CsSn1(
             params={"center_mask_enabled": False, "edge_mask_enabled": False}
         )._apply_edge_mask(binary)
         np.testing.assert_array_equal(disabled, binary)
 
-        custom_center = Detector503CsAp1(
+        custom_center = Detector506CsSn1(
             params={
                 "center_mask_use_image_center": False,
                 "center_mask_x": 3,
@@ -188,7 +191,7 @@ class Detector503CsAp1ContractTests(unittest.TestCase):
         np.testing.assert_array_equal(custom_center, expected_custom)
 
     def test_oversized_center_and_edge_masks_are_clipped(self):
-        detector = Detector503CsAp1(
+        detector = Detector506CsSn1(
             params={
                 "edge_inset_left": 50,
                 "edge_inset_right": 50,
@@ -202,7 +205,7 @@ class Detector503CsAp1ContractTests(unittest.TestCase):
         self.assertEqual(cv2.countNonZero(actual), 0)
 
 
-class Detector503CsAp1PreprocessTests(unittest.TestCase):
+class Detector506CsSn1PreprocessTests(unittest.TestCase):
     @staticmethod
     def _params():
         return {
@@ -247,10 +250,10 @@ class Detector503CsAp1PreprocessTests(unittest.TestCase):
         return binary
 
     def test_cpu_output_matches_direct_opencv_in_approved_order(self):
-        image = np.random.default_rng(50301).integers(
+        image = np.random.default_rng(50601).integers(
             0, 256, size=(73, 91, 3), dtype=np.uint8
         )
-        detector = Detector503CsAp1(params=self._params())
+        detector = Detector506CsSn1(params=self._params())
 
         actual = detector._make_binary(image)
         expected = self._opencv_reference(image, self._params())
@@ -265,10 +268,10 @@ class Detector503CsAp1PreprocessTests(unittest.TestCase):
             "max_value": 200,
             "binary_inv": True,
         }
-        image = np.random.default_rng(50302).integers(
+        image = np.random.default_rng(50602).integers(
             0, 256, size=(75, 93, 3), dtype=np.uint8
         )
-        detector = Detector503CsAp1(params=params)
+        detector = Detector506CsSn1(params=params)
 
         np.testing.assert_array_equal(
             detector._make_binary(image), self._opencv_reference(image, params)
@@ -287,16 +290,16 @@ class Detector503CsAp1PreprocessTests(unittest.TestCase):
 
     def test_native_plan_and_resident_roi_preserve_cpu_result(self):
         runtime = _NativePlanRuntime()
-        detector = Detector503CsAp1(
+        detector = Detector506CsSn1(
             params=self._params(), use_gpu=True, gpu_runtime=runtime
         )
-        image = np.random.default_rng(50303).integers(
+        image = np.random.default_rng(50603).integers(
             0, 256, size=(71, 89, 3), dtype=np.uint8
         )
         device_roi = _DeviceRoi()
 
         result = detector.run(image, device_roi=device_roi)
-        expected = Detector503CsAp1(params=self._params()).run(image)
+        expected = Detector506CsSn1(params=self._params()).run(image)
 
         self.assertEqual(result["defects"], expected["defects"])
         self.assertEqual(
@@ -312,32 +315,32 @@ class Detector503CsAp1PreprocessTests(unittest.TestCase):
 
     def test_legacy_primitives_preserve_cpu_output_and_order(self):
         runtime = _PrimitiveRuntime()
-        detector = Detector503CsAp1(
+        detector = Detector506CsSn1(
             params=self._params(), use_gpu=True, gpu_runtime=runtime
         )
-        image = np.random.default_rng(50304).integers(
+        image = np.random.default_rng(50604).integers(
             0, 256, size=(67, 83, 3), dtype=np.uint8
         )
 
         actual = detector._make_binary(image)
-        expected = Detector503CsAp1(params=self._params())._make_binary(image)
+        expected = Detector506CsSn1(params=self._params())._make_binary(image)
 
         np.testing.assert_array_equal(actual, expected)
         self.assertEqual(runtime.calls, ["gray", "threshold"])
         self.assertEqual(detector.last_preprocess_capability["route"], "primitive")
 
     def test_missing_threshold_falls_back_or_errors_in_strict_cuda(self):
-        image = np.random.default_rng(50305).integers(
+        image = np.random.default_rng(50605).integers(
             0, 256, size=(69, 87, 3), dtype=np.uint8
         )
-        detector = Detector503CsAp1(
+        detector = Detector506CsSn1(
             params=self._params(),
             use_gpu=True,
             gpu_runtime=_MissingThresholdRuntime(),
         )
 
         actual = detector._make_binary(image)
-        expected = Detector503CsAp1(params=self._params())._make_binary(image)
+        expected = Detector506CsSn1(params=self._params())._make_binary(image)
 
         np.testing.assert_array_equal(actual, expected)
         self.assertIn("missing runtime primitive: threshold", detector.gpu_fallback_reason)
@@ -345,14 +348,14 @@ class Detector503CsAp1PreprocessTests(unittest.TestCase):
 
         runtime = _MissingThresholdRuntime()
         runtime.fallback_to_cpu = False
-        strict = Detector503CsAp1(use_gpu=True, gpu_runtime=runtime)
+        strict = Detector506CsSn1(use_gpu=True, gpu_runtime=runtime)
         with self.assertRaisesRegex(
             UnsupportedPreprocessPlan, "missing runtime primitive: threshold"
         ):
             strict.run(np.zeros((61, 79, 3), dtype=np.uint8))
 
     def test_missing_gpu_uses_cpu_with_explicit_reason(self):
-        detector = Detector503CsAp1(
+        detector = Detector506CsSn1(
             params={"edge_mask_enabled": False},
             use_gpu=True,
             gpu_runtime=_UnavailableRuntime(),
@@ -373,28 +376,28 @@ class Detector503CsAp1PreprocessTests(unittest.TestCase):
     def test_gpu_failure_restarts_complete_detector_on_cpu(self):
         runtime = _FailingThresholdRuntime()
         params = {"edge_mask_enabled": False}
-        detector = Detector503CsAp1(
+        detector = Detector506CsSn1(
             params=params, use_gpu=True, gpu_runtime=runtime
         )
         image = np.full((120, 160, 3), 100, dtype=np.uint8)
         cv2.rectangle(image, (65, 45), (94, 74), (240, 240, 240), thickness=-1)
 
         actual = detector.run(image)
-        expected = Detector503CsAp1(params=params).run(image)
+        expected = Detector506CsSn1(params=params).run(image)
 
         self.assertEqual(actual["pass"], expected["pass"])
         self.assertEqual(actual["defects"], expected["defects"])
         self.assertFalse(actual["execution"]["gpu_active"])
         self.assertEqual(
             actual["execution"]["fallback_reason"],
-            "injected detector 503-CS-AP-1 threshold failure",
+            "injected detector 506-CS-SN-1 threshold failure",
         )
         self.assertEqual(runtime.calls, ["gray", "threshold"])
 
 
-class Detector503CsAp1ResultTests(unittest.TestCase):
+class Detector506CsSn1ResultTests(unittest.TestCase):
     def test_actual_preprocess_clean_pass_and_bright_polygon_ng(self):
-        detector = Detector503CsAp1(params={"edge_mask_enabled": False})
+        detector = Detector506CsSn1(params={"edge_mask_enabled": False})
         image = np.full((120, 160, 3), 100, dtype=np.uint8)
 
         self.assertTrue(detector.run(image)["pass"])
@@ -406,7 +409,7 @@ class Detector503CsAp1ResultTests(unittest.TestCase):
         self.assertFalse(result["pass"])
         self.assertEqual(len(result["defects"]), 1)
         defect = result["defects"][0]
-        self.assertEqual(defect["type"], "503_cs_ap_1_polygon_ng")
+        self.assertEqual(defect["type"], "506_cs_sn_1_polygon_ng")
         self.assertEqual(defect["metadata"]["threshold_value"], 200)
         self.assertEqual(defect["metadata"]["threshold_method"], "global_binary")
         self.assertTrue(defect["metadata"]["center_mask_enabled"])
@@ -428,7 +431,7 @@ class Detector503CsAp1ResultTests(unittest.TestCase):
         too_small = np.array(
             [[[1, 1]], [[10, 1]], [[10, 10]], [[1, 10]]], dtype=np.int32
         )
-        detector = Detector503CsAp1(params={"edge_mask_enabled": False})
+        detector = Detector506CsSn1(params={"edge_mask_enabled": False})
 
         with (
             patch.object(

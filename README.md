@@ -10,7 +10,7 @@ VisionFlow AOI 不只是單一 Detector 範例，而是一套可實際延伸的�
 - PySide6 桌面 GUI。
 - YAML 配方載入、驗證、編輯與儲存。
 - 固定網格、模板定位網格、輪廓及模板比對四種切圖方式。
-- `202-CS-SN-1`、`203-AS-SN-1`、`401-AS-SN-1`、`401-CS-AP-1`、`401-CS-AP-2`、`503-CS-AP-1`、`505-AS-SN-1`、`900-CS-AP-1` 八個傳統電腦視覺 Detector，以及 ONNX Runtime `yolox` Detector。
+- `202-CS-SN-1`、`203-AS-SN-1`、`401-AS-SN-1`、`401-CS-AP-1`、`401-CS-AP-2`、`505-AS-SN-1`、`506-CS-SN-1`、`900-CS-AP-1` 八個傳統電腦視覺 Detector，以及 ONNX Runtime `yolox` Detector。
 - 單張檢測、批次資料夾檢測及新檔案監控。
 - OP、Engineer、Admin 三種 GUI 操作模式。
 - Overlay、NG 小圖、缺陷 CSV、矩陣 CSV、JSON 與輪替日誌。
@@ -157,8 +157,8 @@ AOI_CVbased/
 |   |-- detector_401.py             # 401-AS-SN-1 負極旋轉矩形檢測
 |   |-- detector_401_1.py           # 401-CS-AP-1 自適應圓形輪廓檢測
 |   |-- detector_401_2.py           # 401-CS-AP-2 白像素比例檢測
-|   |-- detector_503_cs_ap_1.py     # 503-CS-AP-1 固定二值化多邊形檢測
 |   |-- detector_505_as_sn_1.py     # 505-AS-SN-1 固定反相多邊形檢測
+|   |-- detector_506_cs_sn_1.py     # 506-CS-SN-1 固定二值化多邊形檢測
 |   |-- detector_900.py             # 900-CS-AP-1 雙框間距檢測
 |   |-- detector_900_domain.py      # 900-CS-AP-1 typed config、candidate 與 geometry
 |   |-- detector_900_renderer.py    # 900-CS-AP-1 專屬 NG debug overlay
@@ -421,8 +421,8 @@ tile:
 | `401-AS-SN-1` | 反相矩形 NG 檢測 | `401` |
 | `401-CS-AP-1` | 圓形 NG 檢測 | `401-1` |
 | `401-CS-AP-2` | 白色比例 NG 檢測 | `401-2` |
-| `503-CS-AP-1` | 固定二值化多邊形檢測 | 不適用 |
 | `505-AS-SN-1` | 固定反相多邊形檢測 | 不適用 |
+| `506-CS-SN-1` | 固定二值化多邊形檢測 | 不適用 |
 | `900-CS-AP-1` | 雙框間距檢測 | `900` |
 | `yolox` | YOLOX 物件偵測 | 不變 |
 
@@ -444,8 +444,8 @@ Recipe Designer 會依共同 parameter schema 將每個 Detector 參數分成兩
 | `401-AS-SN-1` | ROI 內縮、最小／最大面積 | blur、adaptive threshold、反相、morphology、contour mode |
 | `401-CS-AP-1` | ROI 內縮、最小／最大面積 | threshold、blur、morphology、縮放、圓度與填充比 |
 | `401-CS-AP-2` | ROI 內縮、最小／最大面積 | threshold、blur、contour mode、白像素比例 |
-| `503-CS-AP-1` | 中心屏蔽半寬／半高、四邊內縮、最小／最大面積 | 中心／邊緣屏蔽開關、中心定位、固定 threshold／反相／最大值、輪廓模式及多邊形近似設定 |
 | `505-AS-SN-1` | 四邊內縮、最小／最大面積 | 邊緣屏蔽、固定 threshold／反相／最大值、輪廓模式及多邊形近似設定 |
+| `506-CS-SN-1` | 中心屏蔽半寬／半高、四邊內縮、最小／最大面積 | 中心／邊緣屏蔽開關、中心定位、固定 threshold／反相／最大值、輪廓模式及多邊形近似設定 |
 | `900-CS-AP-1` | 內外框寬高／容差、最大邊距、ROI 內縮 | 內外框 threshold、反相與 contour mode |
 | `yolox` | 最小框面積 | 模型、信心、NMS、NG 類別、最大偵測數、backend、precision |
 
@@ -469,13 +469,13 @@ Recipe Designer 會依共同 parameter schema 將每個 Detector 參數分成兩
 - 面積：`min_area`／`max_area` 預設皆為 `0`，代表不限制；只排除面積為零的輪廓。
 - 缺陷類型：`203_as_ap_1_contour_ng`
 
-### `503-CS-AP-1`：固定二值化多邊形檢測
+### `506-CS-SN-1`：固定二值化多邊形檢測
 
-- 檔案：`detectors/detector_503_cs_ap_1.py`
+- 檔案：`detectors/detector_506_cs_sn_1.py`
 - 預設流程：Gray → 固定門檻 `200` 的一般二值化 → 中心與四邊排除屏蔽 → `RETR_LIST` contours → `2%` perimeter 多邊形近似；不使用自適應二值化、Gaussian blur 或形態學。
 - 多邊形至少需要 `3` 個頂點，面積上下限預設為含邊界的 `100`～`100000`；抓到任一符合條件的多邊形即 NG，沒有符合候選即 PASS。
 - 中心與四邊屏蔽皆預設啟用；中心預設使用影像中心，半寬／半高為 `0`，四邊共同／左／右／上／下內縮亦皆為 `0`，避免未調參時排除有效像素。中心半寬／半高、四邊內縮與面積上下限是工程外參；屏蔽開關、中心定位、threshold、反相、輪廓模式及多邊形設定是管理內參。
-- 缺陷類型：`503_cs_ap_1_polygon_ng`
+- 缺陷類型：`506_cs_sn_1_polygon_ng`
 
 ### `505-AS-SN-1`：固定反相多邊形檢測
 

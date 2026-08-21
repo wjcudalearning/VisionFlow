@@ -8,14 +8,14 @@ from core.parameter_schema import (
 from detectors.detector_505_as_sn_1 import Detector505AsSn1
 
 
-class Detector503CsAp1(Detector505AsSn1):
+class Detector506CsSn1(Detector505AsSn1):
     """Fixed-threshold polygon detector with configurable edge exclusion masks."""
 
-    detector_id = "503-CS-AP-1"
+    detector_id = "506-CS-SN-1"
     detector_name = "global_polygon_detector"
-    display_name = "503-CS-AP-1 global polygon detector"
-    defect_type = "503_cs_ap_1_polygon_ng"
-    preprocess_plan_name = "503_cs_ap_1_preprocess"
+    display_name = "506-CS-SN-1 global polygon detector"
+    defect_type = "506_cs_sn_1_polygon_ng"
+    preprocess_plan_name = "506_cs_sn_1_preprocess"
 
     default_params = {
         "center_mask_enabled": True,
