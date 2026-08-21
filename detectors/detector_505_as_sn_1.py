@@ -18,6 +18,8 @@ class Detector505AsSn1(BaseDetector):
     detector_id = "505-AS-SN-1"
     detector_name = "global_inverse_polygon_detector"
     display_name = "505-AS-SN-1 global inverse polygon detector"
+    defect_type = "505_as_sn_1_polygon_ng"
+    preprocess_plan_name = "505_as_sn_1_preprocess"
 
     default_params = {
         "edge_mask_enabled": True,
@@ -156,7 +158,7 @@ class Detector505AsSn1(BaseDetector):
             vertices = polygon.reshape(-1, 2).astype(int)
             defects.append(
                 {
-                    "type": "505_as_sn_1_polygon_ng",
+                    "type": self.defect_type,
                     "bbox_local": [int(x), int(y), int(width), int(height)],
                     "area": float(np.round(area, 3)),
                     "confidence": 1.0,
@@ -174,13 +176,26 @@ class Detector505AsSn1(BaseDetector):
                             else "global_binary"
                         ),
                         "threshold_value": int(
-                            self.params.get("threshold_value", 120)
+                            self.params.get(
+                                "threshold_value",
+                                self.default_params["threshold_value"],
+                            )
                         ),
-                        "max_value": int(self.params.get("max_value", 255)),
+                        "max_value": int(
+                            self.params.get(
+                                "max_value", self.default_params["max_value"]
+                            )
+                        ),
                         "contour_mode": contour_mode,
-                        "min_area": float(self.params.get("min_area", 100.0)),
+                        "min_area": float(
+                            self.params.get(
+                                "min_area", self.default_params["min_area"]
+                            )
+                        ),
                         "max_area": float(
-                            self.params.get("max_area", 100000.0)
+                            self.params.get(
+                                "max_area", self.default_params["max_area"]
+                            )
                         ),
                         "edge_mask_enabled": bool(
                             self.params.get("edge_mask_enabled", True)
@@ -208,11 +223,17 @@ class Detector505AsSn1(BaseDetector):
         return defects
 
     def _make_binary(self, image: np.ndarray) -> np.ndarray:
-        threshold_value = int(self.params.get("threshold_value", 120))
-        max_value = int(self.params.get("max_value", 255))
-        binary_inv = bool(self.params.get("binary_inv", True))
+        threshold_value = int(
+            self.params.get("threshold_value", self.default_params["threshold_value"])
+        )
+        max_value = int(
+            self.params.get("max_value", self.default_params["max_value"])
+        )
+        binary_inv = bool(
+            self.params.get("binary_inv", self.default_params["binary_inv"])
+        )
         signature = (
-            "505_as_sn_1_preprocess",
+            self.preprocess_plan_name,
             threshold_value,
             max_value,
             binary_inv,
@@ -221,7 +242,7 @@ class Detector505AsSn1(BaseDetector):
             image,
             signature,
             lambda: PreprocessPlan(
-                name="505_as_sn_1_preprocess",
+                name=self.preprocess_plan_name,
                 operations=(
                     Gray(),
                     Threshold(threshold_value, max_value, binary_inv),
@@ -229,9 +250,9 @@ class Detector505AsSn1(BaseDetector):
             ),
         )
         binary = self.execute_preprocess_plan(image, plan)
-        self._record_debug_image("505-AS-SN-1_binary", binary)
+        self._record_debug_image(f"{self.detector_id}_binary", binary)
         masked = self._apply_edge_mask(binary)
-        self._record_debug_image("505-AS-SN-1_masked_binary", masked)
+        self._record_debug_image(f"{self.detector_id}_masked_binary", masked)
         return masked
 
     def _apply_edge_mask(self, binary: np.ndarray) -> np.ndarray:
@@ -273,8 +294,12 @@ class Detector505AsSn1(BaseDetector):
         }
 
     def _passes_area_filter(self, area: float) -> bool:
-        min_area = float(self.params.get("min_area", 100.0))
-        max_area = float(self.params.get("max_area", 100000.0))
+        min_area = float(
+            self.params.get("min_area", self.default_params["min_area"])
+        )
+        max_area = float(
+            self.params.get("max_area", self.default_params["max_area"])
+        )
         if min_area and area < min_area:
             return False
         if max_area and area > max_area:
