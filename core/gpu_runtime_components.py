@@ -108,6 +108,13 @@ class GpuCapabilities:
         return self.has_exports(("vf_context_set_timing_enabled", "vf_context_last_timings"))
 
     @property
+    def analysis_scratch_trim(self) -> bool:
+        """Optional safe trim that preserves resident, plan and deferred-result lifetimes."""
+        return self.has_exports(
+            ("vf_context_memory_stats_v2", "vf_context_trim_analysis_scratch")
+        )
+
+    @property
     def roi_batch(self) -> bool:
         return bool(
             self.resident_roi

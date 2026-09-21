@@ -60,3 +60,16 @@ class VfCudaContextMemoryStatsV1(ctypes.Structure):
         ("cnr_mask_bytes", ctypes.c_uint64),
         ("cnr_candidate_bytes", ctypes.c_uint64),
     ]
+
+
+class VfCudaContextMemoryStatsV2(ctypes.Structure):
+    _fields_ = VfCudaContextMemoryStatsV1._fields_ + [
+        ("peak_plan_bytes", ctypes.c_uint64),
+        ("peak_resident_bytes", ctypes.c_uint64),
+        ("peak_template_match_bytes", ctypes.c_uint64),
+        ("peak_contour_bytes", ctypes.c_uint64),
+        ("peak_median_bytes", ctypes.c_uint64),
+        ("peak_gaussian_f32_bytes", ctypes.c_uint64),
+        ("peak_cnr_mask_bytes", ctypes.c_uint64),
+        ("peak_cnr_candidate_bytes", ctypes.c_uint64),
+    ]

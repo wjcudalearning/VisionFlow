@@ -67,6 +67,10 @@ OPTIONAL_EXPORT_GROUPS = {
     },
     "timings": {"vf_context_set_timing_enabled", "vf_context_last_timings"},
     "context_memory_stats": {"vf_context_memory_stats_v1"},
+    "analysis_scratch_trim": {
+        "vf_context_memory_stats_v2",
+        "vf_context_trim_analysis_scratch",
+    },
 }
 OPTIONAL_GENERIC_PLAN_EXPORTS = OPTIONAL_EXPORT_GROUPS["generic_plan"]
 OPTIONAL_RESIDENT_ROI_EXPORTS = OPTIONAL_EXPORT_GROUPS["resident_roi"]

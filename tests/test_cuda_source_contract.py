@@ -204,6 +204,9 @@ class CudaSourceContractTests(unittest.TestCase):
         self.assertIn("vf_context_last_timings", header)
         self.assertIn("typedef struct VfCudaContextMemoryStatsV1", header)
         self.assertIn("vf_context_memory_stats_v1", header)
+        self.assertIn("typedef struct VfCudaContextMemoryStatsV2", header)
+        self.assertIn("vf_context_memory_stats_v2", header)
+        self.assertIn("vf_context_trim_analysis_scratch", header)
         self.assertIn("context_memory_breakdown", source)
         self.assertIn("cnr_candidate_bytes", source)
         self.assertIn("record_timing_event", source)
@@ -213,6 +216,26 @@ class CudaSourceContractTests(unittest.TestCase):
         self.assertIn("TIMING_ADAPTIVE_START", source)
         self.assertIn("TIMING_THRESHOLD_START", source)
         self.assertIn("TIMING_MORPHOLOGY_START", source)
+
+    def test_analysis_scratch_trim_preserves_externally_referenced_lifetimes(self):
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "gpu" / "visionflow_cuda.cu").read_text(encoding="utf-8")
+        smoke = (root / "gpu" / "test_cuda_api.cu").read_text(encoding="utf-8")
+        trim = self._function_body(
+            source, "VF_CUDA_API int vf_context_trim_analysis_scratch("
+        )
+
+        self.assertIn("stream_result(persistent->stream)", trim)
+        for family in ("median_", "gaussian_f32_", "cnr_mask_", "cand_"):
+            self.assertIn(f"&persistent->{family}", trim)
+        for protected in (
+            "resident_data", "plan_", "match_", "contour_", "find_contours_"
+        ):
+            self.assertNotIn(f"&persistent->{protected}", trim)
+        self.assertIn("peak_memory_bytes", source)
+        self.assertIn("vf_context_memory_stats_v2(context", smoke)
+        self.assertIn("vf_context_trim_analysis_scratch(context", smoke)
+        self.assertIn("median_after_trim", smoke)
 
     def test_grow_only_reserve_keeps_previous_pointer_when_allocation_fails(self):
         root = Path(__file__).resolve().parents[1]

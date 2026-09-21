@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 from core.gpu_abi import (
     VfCudaContextMemoryStatsV1 as _VfCudaContextMemoryStatsV1,
+    VfCudaContextMemoryStatsV2 as _VfCudaContextMemoryStatsV2,
     VfCudaTimingsV1 as _VfCudaTimingsV1, VfDagOutputV1 as _VfDagOutputV1,
     VfDagPlanDescV1 as _VfDagPlanDescV1, VfPlanDescV1 as _VfPlanDescV1,
     VfPlanOperatorV1 as _VfPlanOperatorV1, VfRoiV1 as _VfRoiV1,
@@ -192,6 +193,10 @@ class GpuRuntime:
         return self._capabilities.host_register
 
     @property
+    def supports_analysis_scratch_trim(self) -> bool:
+        return self._capabilities.analysis_scratch_trim
+
+    @property
     def supports_roi_batch(self) -> bool:
         return self._capabilities.roi_batch
 
@@ -253,6 +258,7 @@ class GpuRuntime:
                 "file_order_upload": self.supports_file_order_upload,
                 "host_register": self.supports_host_register,
                 "timing_control": self._capabilities.timing_control,
+                "analysis_scratch_trim": self.supports_analysis_scratch_trim,
                 "roi_batch": self.supports_roi_batch,
                 "fused_401_2": self.supports_fused_401_2,
                 "template_match": self.supports_template_match,
@@ -1506,6 +1512,17 @@ class GpuRuntime:
                 ctypes.POINTER(_VfCudaContextMemoryStatsV1),
             ]
             memory_stats.restype = ctypes.c_int
+        memory_stats_v2 = getattr(self._dll, "vf_context_memory_stats_v2", None)
+        if memory_stats_v2 is not None:
+            memory_stats_v2.argtypes = [
+                ctypes.c_void_p,
+                ctypes.POINTER(_VfCudaContextMemoryStatsV2),
+            ]
+            memory_stats_v2.restype = ctypes.c_int
+        trim_analysis = getattr(self._dll, "vf_context_trim_analysis_scratch", None)
+        if trim_analysis is not None:
+            trim_analysis.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint64)]
+            trim_analysis.restype = ctypes.c_int
         timings = getattr(self._dll, "vf_context_last_timings", None)
         if timings is not None:
             timings.argtypes = [ctypes.c_void_p, ctypes.POINTER(_VfCudaTimingsV1)]
@@ -1918,6 +1935,54 @@ class GpuRuntime:
                 "accounting": "inactive",
                 "breakdown": {},
             }
+        detailed_v2 = getattr(self._dll, "vf_context_memory_stats_v2", None)
+        if detailed_v2 is not None:
+            value = _VfCudaContextMemoryStatsV2()
+            value.struct_size = ctypes.sizeof(_VfCudaContextMemoryStatsV2)
+            value.version = 2
+            result = int(detailed_v2(self._context, ctypes.byref(value)))
+            if result == 0:
+                names = (
+                    "plan", "resident", "template_match", "contour", "median",
+                    "gaussian_f32", "cnr_mask", "cnr_candidate",
+                )
+                breakdown = {
+                    f"{name}_bytes": int(getattr(value, f"{name}_bytes"))
+                    for name in names
+                }
+                peak_breakdown = {
+                    f"{name}_bytes": int(getattr(value, f"peak_{name}_bytes"))
+                    for name in names
+                }
+                return {
+                    "active": True,
+                    "reserved_bytes": int(value.reserved_bytes),
+                    "peak_reserved_bytes": int(value.peak_reserved_bytes),
+                    "allocation_count": int(value.allocation_count),
+                    "accounting": "detailed_v2",
+                    "breakdown": breakdown,
+                    "peak_breakdown": peak_breakdown,
+                    "buffer_lifecycle": {
+                        "plan_bytes": "compiled_plan_context",
+                        "resident_bytes": "resident_generation",
+                        "template_match_bytes": "retained_debug_result",
+                        "contour_bytes": "deferred_download_result",
+                        "median_bytes": "operation_scratch_trimmable",
+                        "gaussian_f32_bytes": "operation_scratch_trimmable",
+                        "cnr_mask_bytes": "operation_scratch_trimmable",
+                        "cnr_candidate_bytes": "operation_scratch_trimmable",
+                    },
+                }
+            return {
+                "active": True,
+                "reserved_bytes": None,
+                "peak_reserved_bytes": None,
+                "allocation_count": None,
+                "accounting": "detailed_v2_error",
+                "breakdown": {},
+                "peak_breakdown": {},
+                "error_code": result,
+            }
         detailed = getattr(self._dll, "vf_context_memory_stats_v1", None)
         if detailed is not None:
             value = _VfCudaContextMemoryStatsV1()
@@ -1983,6 +2048,31 @@ class GpuRuntime:
             "accounting": "legacy_total",
             "breakdown": {},
         }
+
+    def trim_analysis_scratch(self) -> dict:
+        """Release operation-local analysis scratch while preserving resident and deferred results."""
+        with self._lock:
+            trim = getattr(self._dll, "vf_context_trim_analysis_scratch", None)
+            if trim is None or self._context is None:
+                return {"supported": False, "released_bytes": 0}
+            before = self._context_stats_unlocked()
+            released = ctypes.c_uint64()
+            result = int(trim(self._context, ctypes.byref(released)))
+            if result != 0:
+                raise self._native_error("vf_context_trim_analysis_scratch", result)
+            after = self._context_stats_unlocked()
+            return {
+                "supported": True,
+                "released_bytes": int(released.value),
+                "reserved_bytes_before": before.get("reserved_bytes"),
+                "reserved_bytes_after": after.get("reserved_bytes"),
+                "preserved_bytes": {
+                    key: after.get("breakdown", {}).get(key)
+                    for key in (
+                        "plan_bytes", "resident_bytes", "template_match_bytes", "contour_bytes"
+                    )
+                },
+            }
 
     def _native_timings_unlocked(self) -> dict | None:
         if self._context is None or self._dll is None:

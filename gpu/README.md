@@ -812,6 +812,28 @@ RTX 3090 正式尺寸（202-CS-SN-1，4 張批量各 3 次，median）：
 操作（其間開始的檢測在 session 上排隊）。offscreen `MainWindow` 全新 process 各 3 次，第一次檢測使用者等待
 median 467.8 ms（無自動預熱）→ 268.9 ms（自動預熱後），與第二次 266 ms 相當，判定全部 NG／558 defects。
 
+### Persistent context scratch 生命週期與主動 trim
+
+`vf_context_memory_stats_v2` 在 v1 current breakdown 上加入八個 buffer family 的 high-water mark；
+`GpuRuntime.performance_stats()` 同時輸出 `peak_breakdown` 與 `buffer_lifecycle`。生命週期分成：
+
+- `plan`：compiled plan context，plan handle 存活時不得移動或釋放。
+- `resident`：resident generation，ROI／anchor 呼叫仍可能引用。
+- `template_match`：保留給 debug download 的結果。
+- `contour`：保留給 deferred download 的結果。
+- `median`、`gaussian_f32`、`cnr_mask`、`cnr_candidate`：單次同步操作結束後不再由外部引用，可由
+  `vf_context_trim_analysis_scratch`／`GpuRuntime.trim_analysis_scratch()` 明確釋放。
+
+trim 會先同步 context stream，再只釋放後四類 analysis scratch；不會自動插入 production 熱路徑。
+舊 DLL 缺少 optional exports 時回報 `supported=false`，原行為不變。沒有採用 arena／alias：正式
+`vf_cnr_candidates_u8_roi` 會在同一次操作中同時使用 Gaussian、median、CNR mask 與 candidate buffers，
+它們並非互斥；plan、resident、template debug 與 contour deferred output 又有跨呼叫引用，不能安全共用。
+
+RTX 3090、16384×13000 BGR、6 個 2000×12000 ROI、`202-CS-SN-1` 實測：trim 前 context
+1,764,966,693 bytes；明確釋放 1,121,519,341 bytes 後剩 643,447,352 bytes。保留內容為 resident
+638,976,000、plan 266,240、Template Anchor debug 4,205,112 bytes；四類 analysis scratch 全部歸零，
+各 family peak 不變。原檢測仍為 NG／558 defects，trim 後以小型 median 重新配置得到正確值 5.0。
+
 ### v1.7.0 CUDA-enabled 發行範圍
 
 v1.7.0 為 Sapera LT 相機綁定與現場診斷版本，**未修改任何 CUDA source/header**（自 v1.6.3 建置點 `96ab85f`

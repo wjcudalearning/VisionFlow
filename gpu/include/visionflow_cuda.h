@@ -137,6 +137,32 @@ typedef struct VfCudaContextMemoryStatsV1 {
     uint64_t cnr_candidate_bytes;
 } VfCudaContextMemoryStatsV1;
 
+/* Optional v2 accounting adds per-family high-water marks. The current byte fields retain the
+ * exact v1 meaning. Peaks survive an explicit scratch trim until the context is destroyed. */
+typedef struct VfCudaContextMemoryStatsV2 {
+    uint32_t struct_size;
+    uint32_t version;
+    uint64_t reserved_bytes;
+    uint64_t peak_reserved_bytes;
+    uint64_t allocation_count;
+    uint64_t plan_bytes;
+    uint64_t resident_bytes;
+    uint64_t template_match_bytes;
+    uint64_t contour_bytes;
+    uint64_t median_bytes;
+    uint64_t gaussian_f32_bytes;
+    uint64_t cnr_mask_bytes;
+    uint64_t cnr_candidate_bytes;
+    uint64_t peak_plan_bytes;
+    uint64_t peak_resident_bytes;
+    uint64_t peak_template_match_bytes;
+    uint64_t peak_contour_bytes;
+    uint64_t peak_median_bytes;
+    uint64_t peak_gaussian_f32_bytes;
+    uint64_t peak_cnr_mask_bytes;
+    uint64_t peak_cnr_candidate_bytes;
+} VfCudaContextMemoryStatsV2;
+
 VF_CUDA_API int vf_gpu_abi_version(void);
 VF_CUDA_API int vf_gpu_device_count(void);
 VF_CUDA_API int vf_gpu_compute_capability(void);
@@ -150,6 +176,12 @@ VF_CUDA_API int vf_context_stats(
     void* context, uint64_t* reserved_bytes, uint64_t* allocation_count);
 VF_CUDA_API int vf_context_memory_stats_v1(
     void* context, VfCudaContextMemoryStatsV1* stats);
+VF_CUDA_API int vf_context_memory_stats_v2(
+    void* context, VfCudaContextMemoryStatsV2* stats);
+/* Releases operation-local analysis scratch only. Resident pixels, compiled-plan scratch,
+ * Template Anchor debug state and deferred contour results remain valid. */
+VF_CUDA_API int vf_context_trim_analysis_scratch(
+    void* context, uint64_t* released_bytes);
 /* Optional diagnostics control. Disabled mode skips CUDA event recording on the hot path.
  * Older DLLs without this export retain their historical always-on timing behavior. */
 VF_CUDA_API int vf_context_set_timing_enabled(void* context, int enabled);

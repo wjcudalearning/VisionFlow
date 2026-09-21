@@ -316,6 +316,55 @@ int main() {
         std::cerr << "Detailed context memory accounting missed an exercised buffer family\n";
         return 11;
     }
+    VfCudaContextMemoryStatsV2 memory_before_trim{};
+    memory_before_trim.struct_size = sizeof(VfCudaContextMemoryStatsV2);
+    memory_before_trim.version = 2;
+    int memory_v2_result = result == VF_CUDA_OK
+        ? vf_context_memory_stats_v2(context, &memory_before_trim)
+        : result;
+    const uint64_t protected_before_trim =
+        memory_before_trim.plan_bytes + memory_before_trim.resident_bytes +
+        memory_before_trim.template_match_bytes + memory_before_trim.contour_bytes;
+    const uint64_t analysis_before_trim =
+        memory_before_trim.median_bytes + memory_before_trim.gaussian_f32_bytes +
+        memory_before_trim.cnr_mask_bytes + memory_before_trim.cnr_candidate_bytes;
+    uint64_t released_analysis_bytes = 0;
+    int trim_result = result == VF_CUDA_OK
+        ? vf_context_trim_analysis_scratch(context, &released_analysis_bytes)
+        : result;
+    VfCudaContextMemoryStatsV2 memory_after_trim{};
+    memory_after_trim.struct_size = sizeof(VfCudaContextMemoryStatsV2);
+    memory_after_trim.version = 2;
+    int memory_after_trim_result = result == VF_CUDA_OK
+        ? vf_context_memory_stats_v2(context, &memory_after_trim)
+        : result;
+    const uint64_t protected_after_trim =
+        memory_after_trim.plan_bytes + memory_after_trim.resident_bytes +
+        memory_after_trim.template_match_bytes + memory_after_trim.contour_bytes;
+    const uint64_t analysis_after_trim =
+        memory_after_trim.median_bytes + memory_after_trim.gaussian_f32_bytes +
+        memory_after_trim.cnr_mask_bytes + memory_after_trim.cnr_candidate_bytes;
+    if (result == VF_CUDA_OK &&
+        (memory_v2_result != VF_CUDA_OK || trim_result != VF_CUDA_OK ||
+         memory_after_trim_result != VF_CUDA_OK || analysis_before_trim == 0 ||
+         released_analysis_bytes != analysis_before_trim || analysis_after_trim != 0 ||
+         protected_after_trim != protected_before_trim ||
+         memory_after_trim.peak_median_bytes < memory_before_trim.median_bytes ||
+         memory_after_trim.peak_gaussian_f32_bytes < memory_before_trim.gaussian_f32_bytes ||
+         memory_after_trim.peak_cnr_mask_bytes < memory_before_trim.cnr_mask_bytes ||
+         memory_after_trim.peak_cnr_candidate_bytes < memory_before_trim.cnr_candidate_bytes)) {
+        std::cerr << "Analysis scratch trim changed a protected lifetime or lost its high-water mark\n";
+        return 11;
+    }
+    const float median_input[5]{9.0f, -1.0f, 5.0f, 3.0f, 7.0f};
+    float median_after_trim = 0.0f;
+    if (result == VF_CUDA_OK) {
+        result = vf_median_f32(context, median_input, 5, &median_after_trim);
+    }
+    if (result == VF_CUDA_OK && median_after_trim != 5.0f) {
+        std::cerr << "Analysis scratch failed to reallocate after trim\n";
+        return 11;
+    }
     // A real device OOM must not leave a stale error for the next ROI batch.
     const int oom_side = 4096;
     std::vector<uint8_t> oom_source(static_cast<size_t>(oom_side) * oom_side, 7);

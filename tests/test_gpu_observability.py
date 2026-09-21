@@ -16,6 +16,7 @@ from core.gpu_runtime import (
     GpuRuntime,
     GpuRuntimeError,
     _VfCudaContextMemoryStatsV1,
+    _VfCudaContextMemoryStatsV2,
     _VfCudaTimingsV1,
 )
 from core.performance import PipelineProfiler
@@ -152,6 +153,40 @@ class _DetailedMemoryDll(_FusedDll):
         value.gaussian_f32_bytes = 96
         value.cnr_mask_bytes = 200
         value.cnr_candidate_bytes = 200
+        return 0
+
+
+class _TrimMemoryDll(_DetailedMemoryDll):
+    def __init__(self, trim_result=0):
+        super().__init__()
+        self.trim_result = trim_result
+        self.analysis = [100, 96, 200, 200]
+        self.vf_context_memory_stats_v2 = _Function(self._memory_stats_v2)
+        self.vf_context_trim_analysis_scratch = _Function(self._trim)
+
+    def _memory_stats_v2(self, _context, stats):
+        value = stats._obj
+        if value.struct_size != ctypes.sizeof(_VfCudaContextMemoryStatsV2) or value.version != 2:
+            return 1
+        current = [1000, 2000, 300, 200, *self.analysis]
+        peaks = [1000, 2000, 300, 200, 100, 96, 200, 200]
+        value.reserved_bytes = sum(current)
+        value.peak_reserved_bytes = sum(peaks)
+        value.allocation_count = 7
+        names = (
+            "plan", "resident", "template_match", "contour", "median",
+            "gaussian_f32", "cnr_mask", "cnr_candidate",
+        )
+        for name, current_bytes, peak_bytes in zip(names, current, peaks):
+            setattr(value, f"{name}_bytes", current_bytes)
+            setattr(value, f"peak_{name}_bytes", peak_bytes)
+        return 0
+
+    def _trim(self, _context, released):
+        if self.trim_result:
+            return self.trim_result
+        released._obj.value = sum(self.analysis)
+        self.analysis = [0, 0, 0, 0]
         return 0
 
 
@@ -611,6 +646,68 @@ class GpuRuntimeMetricsTests(unittest.TestCase):
         self.assertEqual(context["breakdown"]["resident_bytes"], 2000)
         self.assertEqual(context["breakdown"]["cnr_candidate_bytes"], 200)
         runtime.close()
+
+    def test_v2_memory_stats_report_high_water_and_safe_lifetimes(self):
+        runtime = GpuRuntime(enabled=False)
+        runtime._dll = _TrimMemoryDll()
+        runtime.device_count = 1
+        runtime._load_optional_context()
+
+        context = runtime.performance_stats()["persistent_context"]
+
+        self.assertTrue(runtime.supports_analysis_scratch_trim)
+        self.assertEqual(context["accounting"], "detailed_v2")
+        self.assertEqual(sum(context["breakdown"].values()), context["reserved_bytes"])
+        self.assertEqual(context["peak_breakdown"]["cnr_candidate_bytes"], 200)
+        self.assertEqual(
+            context["buffer_lifecycle"]["resident_bytes"], "resident_generation"
+        )
+        self.assertEqual(
+            context["buffer_lifecycle"]["median_bytes"], "operation_scratch_trimmable"
+        )
+        runtime.close()
+
+    def test_analysis_scratch_trim_preserves_protected_families_and_peaks(self):
+        runtime = GpuRuntime(enabled=False)
+        runtime._dll = _TrimMemoryDll()
+        runtime.device_count = 1
+        runtime._load_optional_context()
+        before = runtime.performance_stats()["persistent_context"]
+
+        result = runtime.trim_analysis_scratch()
+        after = runtime.performance_stats()["persistent_context"]
+
+        self.assertEqual(result["released_bytes"], 596)
+        self.assertEqual(result["reserved_bytes_before"] - result["reserved_bytes_after"], 596)
+        self.assertEqual(
+            result["preserved_bytes"],
+            {
+                "plan_bytes": 1000,
+                "resident_bytes": 2000,
+                "template_match_bytes": 300,
+                "contour_bytes": 200,
+            },
+        )
+        for key in ("median_bytes", "gaussian_f32_bytes", "cnr_mask_bytes", "cnr_candidate_bytes"):
+            self.assertEqual(after["breakdown"][key], 0)
+            self.assertEqual(after["peak_breakdown"][key], before["peak_breakdown"][key])
+        runtime.close()
+
+    def test_analysis_scratch_trim_is_optional_and_propagates_native_errors(self):
+        legacy = GpuRuntime(enabled=False)
+        legacy._dll = _DetailedMemoryDll()
+        legacy.device_count = 1
+        legacy._load_optional_context()
+        self.assertEqual(legacy.trim_analysis_scratch(), {"supported": False, "released_bytes": 0})
+        legacy.close()
+
+        failing = GpuRuntime(enabled=False)
+        failing._dll = _TrimMemoryDll(trim_result=2)
+        failing.device_count = 1
+        failing._load_optional_context()
+        with self.assertRaisesRegex(GpuRuntimeError, "vf_context_trim_analysis_scratch failed"):
+            failing.trim_analysis_scratch()
+        failing.close()
 
     def test_generic_native_plan_is_cached_and_destroyed_before_context(self):
         runtime = GpuRuntime(enabled=False)

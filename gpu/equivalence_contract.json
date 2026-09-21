@@ -17,6 +17,8 @@
     "vf_context_destroy",
     "vf_context_stats",
     "vf_context_memory_stats_v1",
+    "vf_context_memory_stats_v2",
+    "vf_context_trim_analysis_scratch",
     "vf_context_set_timing_enabled",
     "vf_context_last_timings",
     "vf_host_register_u8",

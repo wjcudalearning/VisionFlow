@@ -234,6 +234,7 @@ struct PersistentContext {
     size_t cand_seq_std_capacity = 0;
     unsigned long long allocation_count = 0;
     uint64_t peak_reserved_bytes = 0;
+    uint64_t peak_memory_bytes[8]{};
     cudaStream_t stream = nullptr;
     cudaError_t initialization_error = cudaSuccess;
     cudaEvent_t timing_events[TIMING_EVENT_COUNT]{};
@@ -427,6 +428,15 @@ ContextMemoryBreakdown context_memory_breakdown(const PersistentContext* context
 ContextMemoryBreakdown update_context_memory_peak(PersistentContext* context) {
     ContextMemoryBreakdown memory = context_memory_breakdown(context);
     context->peak_reserved_bytes = std::max(context->peak_reserved_bytes, memory.total());
+    const uint64_t current[8] = {
+        memory.plan_bytes, memory.resident_bytes, memory.template_match_bytes,
+        memory.contour_bytes, memory.median_bytes, memory.gaussian_f32_bytes,
+        memory.cnr_mask_bytes, memory.cnr_candidate_bytes,
+    };
+    for (int index = 0; index < 8; ++index) {
+        context->peak_memory_bytes[index] =
+            std::max(context->peak_memory_bytes[index], current[index]);
+    }
     return memory;
 }
 
@@ -2906,6 +2916,14 @@ VF_CUDA_API int vf_context_create(void** context) {
     return VF_CUDA_OK;
 }
 
+template <typename T>
+void release_device_buffer(T** pointer, size_t* capacity) {
+    if (pointer == nullptr || capacity == nullptr) return;
+    visionflow_cuda::free_device(*pointer);
+    *pointer = nullptr;
+    *capacity = 0;
+}
+
 VF_CUDA_API int vf_context_set_timing_enabled(void* context, int enabled) {
     if (context == nullptr || (enabled != 0 && enabled != 1)) {
         return VF_CUDA_INVALID_ARGUMENT;
@@ -2973,6 +2991,110 @@ VF_CUDA_API int vf_context_memory_stats_v1(
     output.cnr_mask_bytes = memory.cnr_mask_bytes;
     output.cnr_candidate_bytes = memory.cnr_candidate_bytes;
     *stats = output;
+    return VF_CUDA_OK;
+}
+
+VF_CUDA_API int vf_context_memory_stats_v2(
+    void* context,
+    VfCudaContextMemoryStatsV2* stats) {
+    if (context == nullptr || stats == nullptr ||
+        stats->struct_size != sizeof(VfCudaContextMemoryStatsV2) || stats->version != 2) {
+        return VF_CUDA_INVALID_ARGUMENT;
+    }
+    PersistentContext* persistent = static_cast<PersistentContext*>(context);
+    const ContextMemoryBreakdown memory = update_context_memory_peak(persistent);
+    VfCudaContextMemoryStatsV2 output{};
+    output.struct_size = sizeof(VfCudaContextMemoryStatsV2);
+    output.version = 2;
+    output.reserved_bytes = memory.total();
+    output.peak_reserved_bytes = persistent->peak_reserved_bytes;
+    output.allocation_count = persistent->allocation_count;
+    output.plan_bytes = memory.plan_bytes;
+    output.resident_bytes = memory.resident_bytes;
+    output.template_match_bytes = memory.template_match_bytes;
+    output.contour_bytes = memory.contour_bytes;
+    output.median_bytes = memory.median_bytes;
+    output.gaussian_f32_bytes = memory.gaussian_f32_bytes;
+    output.cnr_mask_bytes = memory.cnr_mask_bytes;
+    output.cnr_candidate_bytes = memory.cnr_candidate_bytes;
+    output.peak_plan_bytes = persistent->peak_memory_bytes[0];
+    output.peak_resident_bytes = persistent->peak_memory_bytes[1];
+    output.peak_template_match_bytes = persistent->peak_memory_bytes[2];
+    output.peak_contour_bytes = persistent->peak_memory_bytes[3];
+    output.peak_median_bytes = persistent->peak_memory_bytes[4];
+    output.peak_gaussian_f32_bytes = persistent->peak_memory_bytes[5];
+    output.peak_cnr_mask_bytes = persistent->peak_memory_bytes[6];
+    output.peak_cnr_candidate_bytes = persistent->peak_memory_bytes[7];
+    *stats = output;
+    return VF_CUDA_OK;
+}
+
+VF_CUDA_API int vf_context_trim_analysis_scratch(
+    void* context,
+    uint64_t* released_bytes) {
+    if (context == nullptr || released_bytes == nullptr) return VF_CUDA_INVALID_ARGUMENT;
+    PersistentContext* persistent = static_cast<PersistentContext*>(context);
+    int result = visionflow_cuda::stream_result(persistent->stream);
+    if (result != VF_CUDA_OK) return result;
+    const ContextMemoryBreakdown before = update_context_memory_peak(persistent);
+
+    release_device_buffer(&persistent->median_values, &persistent->median_value_capacity);
+    release_device_buffer(&persistent->median_keys, &persistent->median_key_capacity);
+    release_device_buffer(&persistent->median_sorted_keys, &persistent->median_sorted_key_capacity);
+    release_device_buffer(&persistent->median_sort_scratch, &persistent->median_sort_scratch_capacity);
+    release_device_buffer(&persistent->median_nan_flag, &persistent->median_nan_flag_capacity);
+    release_device_buffer(&persistent->gaussian_f32_input, &persistent->gaussian_f32_input_capacity);
+    release_device_buffer(
+        &persistent->gaussian_f32_intermediate, &persistent->gaussian_f32_intermediate_capacity);
+    release_device_buffer(&persistent->gaussian_f32_output, &persistent->gaussian_f32_output_capacity);
+    release_device_buffer(&persistent->cnr_mask_image, &persistent->cnr_mask_image_capacity);
+    release_device_buffer(&persistent->cnr_mask_background, &persistent->cnr_mask_background_capacity);
+    release_device_buffer(&persistent->cnr_mask_residual, &persistent->cnr_mask_residual_capacity);
+    release_device_buffer(&persistent->cnr_mask_absdev, &persistent->cnr_mask_absdev_capacity);
+    release_device_buffer(&persistent->cnr_mask_mask, &persistent->cnr_mask_mask_capacity);
+
+    release_device_buffer(&persistent->cand_mask_scratch, &persistent->cand_mask_scratch_capacity);
+    release_device_buffer(&persistent->ccl_parent, &persistent->ccl_parent_capacity);
+    release_device_buffer(&persistent->cand_words, &persistent->cand_words_capacity);
+    release_device_buffer(&persistent->cand_ramp, &persistent->cand_ramp_capacity);
+    release_device_buffer(&persistent->cand_foreground, &persistent->cand_foreground_capacity);
+    release_device_buffer(&persistent->cand_keys, &persistent->cand_keys_capacity);
+    release_device_buffer(&persistent->cand_sorted_keys, &persistent->cand_sorted_keys_capacity);
+    release_device_buffer(&persistent->cand_sorted_pixels, &persistent->cand_sorted_pixels_capacity);
+    release_device_buffer(&persistent->cand_roots, &persistent->cand_roots_capacity);
+    release_device_buffer(&persistent->cand_areas, &persistent->cand_areas_capacity);
+    release_device_buffer(&persistent->cand_offsets, &persistent->cand_offsets_capacity);
+    release_device_buffer(&persistent->cand_boxes, &persistent->cand_boxes_capacity);
+    release_device_buffer(&persistent->cand_keep, &persistent->cand_keep_capacity);
+    release_device_buffer(&persistent->cand_kept, &persistent->cand_kept_capacity);
+    release_device_buffer(&persistent->cand_windows, &persistent->cand_windows_capacity);
+    release_device_buffer(&persistent->cand_window_sizes, &persistent->cand_window_sizes_capacity);
+    release_device_buffer(&persistent->cand_gather_offsets, &persistent->cand_gather_offsets_capacity);
+    release_device_buffer(&persistent->cand_gather, &persistent->cand_gather_capacity);
+    release_device_buffer(&persistent->cand_out_ints, &persistent->cand_out_ints_capacity);
+    release_device_buffer(&persistent->cand_out_floats, &persistent->cand_out_floats_capacity);
+    release_device_buffer(&persistent->cand_cub_scratch, &persistent->cand_cub_scratch_capacity);
+    release_device_buffer(&persistent->cand_flags, &persistent->cand_flags_capacity);
+    release_device_buffer(&persistent->cand_values, &persistent->cand_values_capacity);
+    release_device_buffer(&persistent->cand_value_offsets, &persistent->cand_value_offsets_capacity);
+    release_device_buffer(
+        &persistent->cand_background_counts, &persistent->cand_background_counts_capacity);
+    release_device_buffer(
+        &persistent->cand_background_offsets, &persistent->cand_background_offsets_capacity);
+    release_device_buffer(&persistent->cand_segment_ends, &persistent->cand_segment_ends_capacity);
+    release_device_buffer(&persistent->cand_seq_start, &persistent->cand_seq_start_capacity);
+    release_device_buffer(&persistent->cand_seq_length, &persistent->cand_seq_length_capacity);
+    release_device_buffer(&persistent->cand_leaf_counts, &persistent->cand_leaf_counts_capacity);
+    release_device_buffer(&persistent->cand_leaf_offsets, &persistent->cand_leaf_offsets_capacity);
+    release_device_buffer(&persistent->cand_leaf_start, &persistent->cand_leaf_start_capacity);
+    release_device_buffer(&persistent->cand_leaf_length, &persistent->cand_leaf_length_capacity);
+    release_device_buffer(&persistent->cand_leaf_sequence, &persistent->cand_leaf_sequence_capacity);
+    release_device_buffer(&persistent->cand_leaf_values, &persistent->cand_leaf_values_capacity);
+    release_device_buffer(&persistent->cand_seq_mean, &persistent->cand_seq_mean_capacity);
+    release_device_buffer(&persistent->cand_seq_std, &persistent->cand_seq_std_capacity);
+
+    const ContextMemoryBreakdown after = context_memory_breakdown(persistent);
+    *released_bytes = before.total() - after.total();
     return VF_CUDA_OK;
 }
 

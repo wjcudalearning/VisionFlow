@@ -193,7 +193,7 @@ def validate_context_reuse_matrix(runtime: GpuRuntime) -> list[dict]:
             "Persistent context allocated again after shape/channel/parameter matrix warm-up: "
             f"warmed={warmed}, reused={reused}"
         )
-    if reused.get("accounting") == "detailed_v1":
+    if reused.get("accounting") in {"detailed_v1", "detailed_v2"}:
         breakdown = reused.get("breakdown", {})
         if sum(int(value) for value in breakdown.values()) != reused.get("reserved_bytes"):
             raise AssertionError(f"CUDA context memory breakdown does not sum to total: {reused}")
@@ -201,6 +201,54 @@ def validate_context_reuse_matrix(runtime: GpuRuntime) -> list[dict]:
             raise AssertionError(f"CUDA context peak memory is below current memory: {reused}")
     print(f"PASS context reuse matrix: warmed={warmed}, reused={reused}")
     return metrics
+
+
+def validate_analysis_scratch_trim(runtime: GpuRuntime) -> dict:
+    """Exercise explicit large-to-small trim without invalidating persistent context state."""
+    if not runtime.supports_analysis_scratch_trim:
+        print("SKIP analysis scratch trim: optional CUDA exports are unavailable")
+        return {"supported": False}
+    values = np.arange(262145, dtype=np.float32)[::-1].copy()
+    expected_large = np.median(values).astype(np.float32)
+    actual_large = runtime.median_f32(values)
+    if actual_large != expected_large:
+        raise AssertionError(
+            f"Large median before scratch trim differs: actual={actual_large} expected={expected_large}"
+        )
+    before = runtime.performance_stats()["persistent_context"]
+    protected = ("plan_bytes", "resident_bytes", "template_match_bytes", "contour_bytes")
+    analysis = ("median_bytes", "gaussian_f32_bytes", "cnr_mask_bytes", "cnr_candidate_bytes")
+    trim = runtime.trim_analysis_scratch()
+    after = runtime.performance_stats()["persistent_context"]
+    if trim["released_bytes"] <= 0:
+        raise AssertionError(f"Analysis scratch trim released no memory: before={before} trim={trim}")
+    if any(int(after["breakdown"].get(key, -1)) != 0 for key in analysis):
+        raise AssertionError(f"Analysis scratch remained allocated after trim: {after}")
+    if any(before["breakdown"].get(key) != after["breakdown"].get(key) for key in protected):
+        raise AssertionError(f"Analysis scratch trim changed a protected buffer family: {trim}")
+    if any(
+        int(after["peak_breakdown"].get(key, 0)) < int(before["breakdown"].get(key, 0))
+        for key in analysis
+    ):
+        raise AssertionError(f"Analysis scratch trim lost a family high-water mark: {after}")
+    small = np.array([9.0, -1.0, 5.0, 3.0, 7.0], dtype=np.float32)
+    actual_small = runtime.median_f32(small)
+    if actual_small != np.float32(5.0):
+        raise AssertionError(f"Median failed after scratch reallocation: {actual_small}")
+    result = {
+        "supported": True,
+        "large_elements": int(values.size),
+        "released_bytes": int(trim["released_bytes"]),
+        "reserved_bytes_before": int(before["reserved_bytes"]),
+        "reserved_bytes_after": int(after["reserved_bytes"]),
+        "protected_bytes": {key: int(after["breakdown"][key]) for key in protected},
+        "peak_analysis_bytes": {
+            key: int(after["peak_breakdown"][key]) for key in analysis
+        },
+        "small_result": float(actual_small),
+    }
+    print(f"PASS analysis scratch trim: {result}")
+    return result
 
 
 def validate_primitives(runtime: GpuRuntime) -> list[dict]:
@@ -1175,6 +1223,7 @@ def main() -> int:
         f"path={runtime.dll_path}"
     )
     validation = validate_primitives(runtime)
+    analysis_scratch_trim = validate_analysis_scratch_trim(runtime)
     benchmark_result = benchmark(runtime, args.benchmark, args.warmup)
     crossover_result = benchmark_crossover(runtime, args.benchmark, args.warmup) if args.crossover else {}
     morphology_result = (
@@ -1204,6 +1253,7 @@ def main() -> int:
                     "device": runtime.device_name,
                     "compute_capability": runtime.compute_capability,
                     "validation": validation,
+                    "analysis_scratch_trim": analysis_scratch_trim,
                     "benchmark": benchmark_result,
                     "crossover": crossover_result,
                     "morphology_profile": morphology_result,
