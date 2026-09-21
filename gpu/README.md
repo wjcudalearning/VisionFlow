@@ -387,6 +387,23 @@ v1.6.0 發行檔仍有此問題；判斷 v1.6.0 的 anchor 位置請以 `gpu_met
 影像曾呼叫 CUDA export，不會讓本輪純 CPU 路徑誤報為 device；本輪零 CUDA 呼叫時也不沿用上一輪的
 `native_timings_ms`。
 
+### 2026-09-21 resident working-set admission
+
+Pipeline 不再只用 `image.nbytes` 判斷 resident upload 是否能放進專用 VRAM。上傳前會用
+`resident-working-set-v1` 估算 resident frame、最大 tile 的 linear-plan scratch、DAG output、Detector
+scratch、Template Anchor scratch、既有 grow-only context/resident 容量、實際單一 execution slot，以及
+`max(256 MiB, total VRAM 5%)` safety headroom。若 `free_bytes < required_free_bytes`：
+
+- `gpu.mode: auto` 不執行 H2D，該次所有 native CUDA Detector 完整改走 CPU；
+- `gpu.mode: cuda` 以 `resident_capacity_precheck_rejected` 明確失敗；
+- `execution.gpu.resident_image.device_memory_before_upload` 保存完整估算 breakdown，並以
+  `failure_kind=capacity_precheck` 和真實 upload 的 `allocation_oom`／`allocation_error` 分開。
+
+RTX 3090 的 16384×13000 BGR／6×2000×12000 ROI／`202-CS-SN-1` strict CUDA smoke，估算完整 working
+set 4,550,223,882 bytes、上傳前 free 24,465,375,232 bytes，正常准入；執行後 detailed-v1 context
+reserved 1,764,966,693 bytes（resident 638,976,000 bytes），8 次 native calls、H2D 638,980,096 bytes、
+D2H 22,340 bytes，558 defects 且無 fallback。這是合成正式尺寸驗證，不取代 Todo 中標為【實物】的真圖驗收。
+
 RTX 3090、同一正式尺寸基準（16384×13000、6 ROI、`202-CS-SN-1`，warm-up 1＋量測 3 輪）：
 
 | 階段 | v1.6.0 CPU | 修正後 CPU | v1.6.0 GPU | 修正後 GPU |

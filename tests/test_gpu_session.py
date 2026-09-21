@@ -609,9 +609,17 @@ class GpuExecutionSessionTests(unittest.TestCase):
         (first, first_detector), (second, second_detector) = results
         self.assertIn("out of memory", errors_after_run[0])
         self.assertFalse(first["execution"]["gpu"]["resident_image"]["active"])
+        first_memory = first["execution"]["gpu"]["resident_image"]["device_memory_before_upload"]
+        self.assertTrue(first_memory["upload_attempted"])
+        self.assertEqual(first_memory["upload_result"], "allocation_failed")
+        self.assertEqual(first_memory["failure_kind"], "allocation_oom")
         self.assertTrue(all(roi is None for roi in first_detector.device_rois))
         self.assertEqual(errors_after_run[1], "")
         self.assertTrue(second["execution"]["gpu"]["resident_image"]["active"])
+        self.assertEqual(
+            second["execution"]["gpu"]["resident_image"]["device_memory_before_upload"]["upload_result"],
+            "success",
+        )
         self.assertTrue(all(roi is not None for roi in second_detector.device_rois))
         self.assertEqual(first["final_result"], second["final_result"])
         self.assertEqual(runtime.upload_calls, 2)
@@ -634,7 +642,7 @@ class GpuExecutionSessionTests(unittest.TestCase):
             encoded, buffer = cv2.imencode(".png", image)
             self.assertTrue(encoded)
             image_path.write_bytes(buffer.tobytes())
-            for label, free_bytes in (("low", image.nbytes - 1), ("ample", image.nbytes * 4)):
+            for label, free_bytes in (("low", image.nbytes - 1), ("ample", 4 << 30)):
                 runtime = _ResidentRuntime(free_bytes=free_bytes)
                 session = GpuExecutionSession(runtime, requested=True, config=recipe["gpu"])
                 pipeline = AOIPipeline(
@@ -650,10 +658,48 @@ class GpuExecutionSessionTests(unittest.TestCase):
                     result = pipeline.run(image_path)
                 reports[label] = result["execution"]["gpu"]["resident_image"]
 
-        self.assertTrue(reports["low"]["active"])
+        self.assertFalse(reports["low"]["active"])
         self.assertTrue(reports["low"]["device_memory_before_upload"]["dedicated_vram_low"])
         self.assertEqual(reports["low"]["device_memory_before_upload"]["upload_bytes"], image.nbytes)
+        self.assertEqual(
+            reports["low"]["device_memory_before_upload"]["admission_decision"],
+            "capacity_precheck_rejected",
+        )
+        self.assertFalse(reports["low"]["device_memory_before_upload"]["upload_attempted"])
+        self.assertEqual(reports["low"]["device_memory_before_upload"]["failure_kind"], "capacity_precheck")
         self.assertFalse(reports["ample"]["device_memory_before_upload"]["dedicated_vram_low"])
+        self.assertTrue(reports["ample"]["active"])
+
+    def test_strict_cuda_rejects_insufficient_resident_working_set_before_upload(self):
+        recipe_path = ROOT / "recipes" / "PRODUCT_A_NEGATIVE_401_AOI_01.yaml"
+        recipe = deepcopy(AOIPipeline(recipe_path, ROOT / "outputs").recipe_manager.load(recipe_path))
+        recipe["gpu"] = {
+            "mode": "cuda", "dll_path": "fake_resident.dll", "fallback_to_cpu": False, "tiling": False
+        }
+        for config in recipe["detectors"].values():
+            config["enabled"] = False
+        recipe["detectors"]["401-AS-SN-1"].update(enabled=True, use_gpu=True)
+        runtime = _ResidentRuntime(free_bytes=1)
+        runtime.fallback_to_cpu = False
+        session = GpuExecutionSession(runtime, requested=True, config=recipe["gpu"])
+        output_overrides = {
+            key: False for key in ("save_overlay", "save_ng_tiles", "save_csv", "save_matrix_csv", "save_json")
+        }
+
+        with tempfile.TemporaryDirectory(prefix="visionflow_vram_strict_") as temporary:
+            image_path = Path(temporary) / "input.png"
+            encoded, buffer = cv2.imencode(".png", np.zeros((600, 700, 3), dtype=np.uint8))
+            self.assertTrue(encoded)
+            image_path.write_bytes(buffer.tobytes())
+            pipeline = AOIPipeline(
+                recipe_path, Path(temporary), output_overrides=output_overrides, gpu_session=session
+            )
+            pipeline.recipe_manager.load = Mock(return_value=recipe)
+            pipeline.detector_manager.create_enabled = Mock(return_value=[_RoiCapturingDetector()])
+            with self.assertRaisesRegex(GpuRuntimeError, "resident_capacity_precheck_rejected"):
+                pipeline.run(image_path)
+
+        self.assertEqual(runtime.upload_calls, 0)
 
     def test_latency_and_throughput_sessions_select_distinct_queue_policy(self):
         recipe_path = ROOT / "recipes" / "PRODUCT_A_NEGATIVE_401_AOI_01.yaml"

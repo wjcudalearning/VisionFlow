@@ -30,7 +30,7 @@ SPLIT_LABELS = {
     "aggregation_and_reporting": "彙總與報表",
 }
 
-VRAM_LOW_NOTICE = "可用顯示卡記憶體低於整圖上傳大小，驅動可能改用共享系統記憶體而使檢測變慢。"
+VRAM_LOW_NOTICE = "可用顯示卡記憶體不足以容納完整 GPU working set，本次已在上傳前改走 CPU fallback。"
 
 
 def format_ms(seconds: float | int | None) -> str:

@@ -11,6 +11,7 @@ from core.aggregator import Aggregator
 from core.detector_manager import DetectorManager
 from core.image_loader import frame_to_bgr, load_image
 from core.gpu_metrics import performance_stats_delta
+from core.gpu_memory_admission import estimate_resident_working_set
 from core.gpu_runtime import GpuRuntime, GpuRuntimeError
 from core.gpu_session import GpuExecutionSession
 from core.logging_system import LogMixin
@@ -159,6 +160,7 @@ class AOIPipeline(LogMixin):
         with profiler.measure("initialization"):
             resident_image = None
             resident_upload_memory = {}
+            resident_fallback_reason = ""
             crossover_policy = getattr(gpu_runtime, "crossover_policy", None)
             resident_skip_key = (provenance.get("effective_recipe_sha256", ""), tuple(image.shape))
             resident_skipped_by_crossover = bool(
@@ -172,9 +174,42 @@ class AOIPipeline(LogMixin):
                 and not resident_skipped_by_crossover
             ):
                 try:
-                    resident_upload_memory = self._check_resident_upload_memory(gpu_runtime, image)
-                    resident_image = gpu_runtime.upload_image(image)
+                    resident_upload_memory = self._check_resident_upload_memory(
+                        gpu_runtime, image, tile_config, detector_configs
+                    )
+                    if resident_upload_memory["admitted"]:
+                        resident_upload_memory["upload_attempted"] = True
+                        resident_image = gpu_runtime.upload_image(image)
+                        resident_upload_memory["upload_result"] = "success"
+                    else:
+                        resident_fallback_reason = (
+                            "resident_capacity_precheck_rejected: dedicated VRAM free "
+                            f"{resident_upload_memory['free_bytes']} bytes is below the required "
+                            f"{resident_upload_memory['required_free_bytes']} bytes"
+                        )
+                        resident_upload_memory.update(
+                            upload_attempted=False,
+                            upload_result="capacity_precheck_rejected",
+                            failure_kind="capacity_precheck",
+                            failure_reason=resident_fallback_reason,
+                        )
+                        gpu_runtime.fallback_or_raise(GpuRuntimeError(resident_fallback_reason))
                 except Exception as exc:
+                    if resident_fallback_reason:
+                        # A strict-CUDA capacity rejection raised from fallback_or_raise().
+                        raise
+                    resident_fallback_reason = str(exc)
+                    lowered = resident_fallback_reason.lower()
+                    resident_upload_memory.update(
+                        upload_attempted=True,
+                        upload_result="allocation_failed",
+                        failure_kind=(
+                            "allocation_oom"
+                            if "out of memory" in lowered or "error 1002" in lowered
+                            else "allocation_error"
+                        ),
+                        failure_reason=resident_fallback_reason,
+                    )
                     gpu_runtime.fallback_or_raise(exc)
             # Without a resident image the tilers can only use CUDA through per-tile `vf_crop_u8`, and
             # every such call uploads the whole decoded source again (RTX 3090, 16384x13000 with six
@@ -195,6 +230,12 @@ class AOIPipeline(LogMixin):
                     config["use_gpu"] = False
             debug_images_requested = bool(recipe["output"].get("save_debug_images", False))
             detectors = self.detector_manager.create_enabled(detector_configs, gpu_runtime=gpu_runtime)
+            if resident_fallback_reason:
+                # The resident path failed before Detector execution. Keep use_gpu=True for honest
+                # requested/fallback telemetry, but make every native Detector restart wholly on CPU.
+                for detector in detectors:
+                    if detector.use_gpu and self.detector_manager.uses_native_cuda_runtime(detector.detector_id):
+                        detector.gpu_fallback_reason = resident_fallback_reason
             self._apply_debug_flag(detectors, debug_images_requested)
         self.logger.info("Detectors initialized: count=%s ids=%s", len(detectors), [d.detector_id for d in detectors])
         self._progress(15, "Detector 已初始化")
@@ -333,24 +374,39 @@ class AOIPipeline(LogMixin):
         self._progress(100, "檢測完成")
         return serializable_result
 
-    def _check_resident_upload_memory(self, gpu_runtime, image) -> dict:
-        """Record dedicated VRAM before the whole-image upload.
-
-        Windows drivers default to CUDA sysmem fallback: when dedicated VRAM is exhausted the
-        upload spills into shared system memory instead of failing (RTX 3090, 2026-09-14:
-        16384x13000 upload 0.08 s -> 0.9-2.0 s under contention), so only warn and report.
-        """
+    def _check_resident_upload_memory(
+        self, gpu_runtime, image, tile_config: dict, detector_configs: dict
+    ) -> dict:
+        """Admit a resident upload only when its complete estimated working set fits."""
         memory = gpu_runtime.memory_info()
-        upload_bytes = int(image.nbytes)
-        low = 0 < memory["total_bytes"] and memory["free_bytes"] < upload_bytes
+        stats = gpu_runtime.performance_stats()
+        estimate = estimate_resident_working_set(
+            tuple(int(value) for value in image.shape),
+            int(image.nbytes),
+            tile_config,
+            detector_configs,
+            total_device_bytes=int(memory.get("total_bytes", 0) or 0),
+            context_stats=stats.get("persistent_context"),
+        )
+        known = int(memory.get("total_bytes", 0) or 0) > 0
+        low = known and int(memory.get("free_bytes", 0) or 0) < estimate.required_free_bytes
+        decision = "capacity_precheck_rejected" if low else ("accepted" if known else "memory_info_unavailable")
         if low:
             self.logger.warning(
-                "CUDA dedicated VRAM is below the resident upload size: free=%s bytes upload=%s bytes; "
-                "the driver may spill into shared system memory and slow inspection",
+                "CUDA resident working set rejected before upload: free=%s bytes required_free=%s bytes "
+                "working_set=%s bytes; this inspection will use CPU fallback",
                 memory["free_bytes"],
-                upload_bytes,
+                estimate.required_free_bytes,
+                estimate.estimated_working_set_bytes,
             )
-        return {**memory, "upload_bytes": upload_bytes, "dedicated_vram_low": low}
+        return {
+            **memory,
+            **estimate.to_dict(),
+            "upload_bytes": int(image.nbytes),
+            "dedicated_vram_low": bool(low),
+            "admitted": not low,
+            "admission_decision": decision,
+        }
 
     def _build_gpu_runtime(self, gpu_config: dict, gpu_requested: bool):
         if self.gpu_session is not None:
