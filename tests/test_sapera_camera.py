@@ -600,6 +600,36 @@ class ConnectSequenceTests(SaperaCameraTestBase):
         self.assertIn("E-0602", failed)
         self.assertIn("5000 Hz 時上限約 199 µs", failed["E-0602"].detail)
 
+    def test_ccf_built_for_another_camera_is_reported_as_e0611(self):
+        """Field `W=640 H=480` on a 16384 px Linea: the CCF belongs to a different camera."""
+
+        self.interop.features["Width"] = "16384"
+        self.interop.format = BufferFormat(width=640, height=480, pixel_depth=8, pitch=640)
+        status = self.connect()
+
+        failed = {note.code: note for note in self.camera.apply_notes() if note.code}
+        self.assertIn("E-0611", failed)
+        self.assertIn("CCF 給板卡 640×480，相機是 16384 px", failed["E-0611"].detail)
+        self.assertIn("line_scan.ccf", failed["E-0611"].detail)
+        self.assertEqual(self.camera.apply_readbacks()["CAMW"], "16384")
+        self.assertEqual(status.state, CameraState.IDLE, "the mismatch is reported, not fatal")
+
+    def test_matching_ccf_width_reports_no_mismatch(self):
+        self.interop.features["Width"] = "8"  # the fake buffer format is 8x4
+        self.connect()
+
+        self.assertNotIn("E-0611", [note.code for note in self.camera.apply_notes()])
+
+    def test_board_line_trigger_follows_the_rate_the_camera_accepted(self):
+        """Field `LR=300 BLR=30`: the board kept the requested rate while the camera ran at 300."""
+
+        self.interop.feature_int_range = lambda device, name: (300, 48000) if name == "AcquisitionLineRate" else (None, None)
+        self.connect(internal_line_rate_hz=30)
+
+        self.assertIn(("INT_LINE_TRIGGER_FREQ", 300), self.int_writes())
+        readbacks = self.camera.apply_readbacks()
+        self.assertEqual((readbacks["LR"], readbacks["BLR"]), ("300", "300"))
+
     def test_apply_readbacks_report_what_the_hardware_holds_after_connect(self):
         self.make_linea_selectors_read_only()
         self.interop.features["TriggerMode"] = "On"

@@ -21,6 +21,7 @@ from devices.ccd_models import (
 )
 from devices.interfaces import FrameListener, LineScanCamera, TriggerListener
 from devices.sapera_api import (
+    DEVICE_WIDTH_FEATURES,
     BUFFER_WITH_TRASH_CLASS,
     CONTINUOUS_TRIGGER_SELECTORS,
     DEVICE_EXPOSURE_FEATURES,
@@ -78,7 +79,7 @@ class ApplyNote:
 
 # Keys of pply_readbacks(), in the order the diagnosis prints them: camera TriggerMode, camera line
 # rate and its reported range, board INT_LINE_TRIGGER_FREQ, exposure, gain, buffer width/height.
-READBACK_KEYS = ("TM", "LR", "LRMIN", "LRMAX", "BLR", "EXP", "GAIN", "W", "H")
+READBACK_KEYS = ("TM", "LR", "LRMIN", "LRMAX", "BLR", "EXP", "GAIN", "CAMW", "CCF", "W", "H", "CROP")
 
 
 class _ApplyLog:
@@ -86,6 +87,10 @@ class _ApplyLog:
         self.notes: list[ApplyNote] = []
         # Short ASCII key -> value actually read from the hardware, for the field's copyable row.
         self.readbacks: dict[str, str] = {}
+        # Line rate the camera accepted (may be clamped to its range) and the camera's own image
+        # width; the board line trigger and the CCF check below use them.
+        self.applied_line_rate: int | None = None
+        self.camera_width: int | None = None
 
     def ok(self, item: str, detail: str) -> None:
         self.notes.append(ApplyNote(item, detail))
@@ -98,13 +103,13 @@ def _fmt(value) -> str:
     return "無法讀取" if value is None else str(value)
 
 
-def _short_value(value) -> str:
-    """A readback for the copyable ASCII row: `?` when unreadable, no spaces, at most 12 chars."""
+def _short_value(value, limit: int = 12) -> str:
+    """A readback for the copyable ASCII row: `?` when unreadable, no spaces, `limit` chars at most."""
 
     if value is None:
         return "?"
     text = "".join(str(value).split())
-    return text[:12] or "?"
+    return text[:limit] or "?"
 
 
 class SaperaLineScanCamera(LineScanCamera):
@@ -452,6 +457,7 @@ class SaperaLineScanCamera(LineScanCamera):
             line_rate = acquisition.internal_line_rate_hz if trigger.mode == TriggerMode.CONTINUOUS else None
             applied |= self._write_exposure(interop, device, acquisition.exposure_time, log, line_rate)
             applied |= self._write_gain(interop, device, acquisition.gain, log)
+            log.camera_width = self._read_camera_width(interop, device, log)
             if trigger.mode != TriggerMode.CONTINUOUS:
                 applied |= self._write_trigger_features(interop, device, trigger.mode, log)
             if applied and not self._quiet(lambda: interop.update_features(device)):
@@ -513,6 +519,7 @@ class SaperaLineScanCamera(LineScanCamera):
                 readback = self._quiet(lambda: interop.get_feature_string(device, LINE_RATE_FEATURE), None)
                 log.ok("Internal Line Rate", f"{LINE_RATE_FEATURE}={rate}（{kind}）寫入前 {_fmt(before)} 讀回 {_fmt(readback)}")
                 log.readbacks["LR"] = _short_value(readback)
+                log.applied_line_rate = rate
                 return True
         access = self._quiet(lambda: interop.feature_access_mode(device, LINE_RATE_FEATURE), None)
         log.fail(
@@ -559,6 +566,23 @@ class SaperaLineScanCamera(LineScanCamera):
         current = self._quiet(lambda: interop.get_feature_string(device, tried[0]), None) if tried else None
         log.readbacks["EXP"] = _short_value(current) if tried else "na"
         return False
+
+    def _read_camera_width(self, interop, device, log: _ApplyLog) -> int | None:
+        """The camera's own line width, so a CCF built for another camera can be named in S6."""
+
+        for feature in DEVICE_WIDTH_FEATURES:
+            if not self._quiet(lambda feature=feature: interop.feature_available(device, feature)):
+                continue
+            value = self._quiet(lambda feature=feature: interop.get_feature_string(device, feature), None)
+            try:
+                width = int(str(value).strip())
+            except (TypeError, ValueError):
+                continue
+            if width > 0:
+                log.readbacks["CAMW"] = str(width)
+                return width
+        log.readbacks["CAMW"] = "?"
+        return None
 
     def _write_gain(self, interop, device, gain: float, log: _ApplyLog) -> bool:
         text = str(int(gain))  # xx_ccd sends the truncated integer as a string.
@@ -713,6 +737,7 @@ class SaperaLineScanCamera(LineScanCamera):
 
     def _open_acquisition(self, interop, connection, acquisition, trigger, log: _ApplyLog) -> None:
         target = f"{connection.server_name}#{connection.resource_index}、CCF {connection.config_file_path}"
+        log.readbacks["CCF"] = _short_value(Path(connection.config_file_path).name or None, 24)
         location = interop.location(connection.server_name, connection.resource_index)
         try:
             self._acquisition = interop.new_acquisition(
@@ -730,11 +755,21 @@ class SaperaLineScanCamera(LineScanCamera):
             )
         acq = self._acquisition
         if trigger.mode == TriggerMode.CONTINUOUS:
-            self._set_internal_line_rate(interop, acq, acquisition.internal_line_rate_hz, log)
+            # Field `BLR=30` while the camera ran at 300: the board must follow the rate the camera
+            # accepted, not the requested one, or the two sides disagree about the line rate.
+            self._set_internal_line_rate(
+                interop, acq, log.applied_line_rate or acquisition.internal_line_rate_hz, log
+            )
         if self._set_int(interop, acq, "CROP_HEIGHT", acquisition.length_lines):
             log.ok("Length", f"CROP_HEIGHT={acquisition.length_lines} 讀回 {_fmt(self._get_int(interop, acq, 'CROP_HEIGHT'))}")
         else:
-            log.fail("E-0604", "Length", f"CROP_HEIGHT={acquisition.length_lines} 寫入失敗")
+            log.fail(
+                "E-0604",
+                "Length",
+                f"CROP_HEIGHT={acquisition.length_lines} 寫入失敗，讀回 "
+                f"{_fmt(self._get_int(interop, acq, 'CROP_HEIGHT'))}（CCF 的影像高度可能比要求的 Length 小）",
+            )
+        log.readbacks["CROP"] = _short_value(self._get_int(interop, acq, "CROP_HEIGHT"))
         if trigger.mode != TriggerMode.CONTINUOUS:
             self._apply_external_line_trigger(interop, acq, trigger, log)
         one_frame = 1 if trigger.external_frame_one_frame else 0
@@ -770,6 +805,15 @@ class SaperaLineScanCamera(LineScanCamera):
                 f"PIXEL_DEPTH={fmt.pixel_depth}、{fmt.width}×{fmt.height}、PITCH={fmt.pitch}；只支援 8-bit 單色",
             )
         log.ok("影像格式", f"{fmt.width}×{fmt.height}、8-bit、PITCH={fmt.pitch}、{self._memory_type}")
+        if log.camera_width and int(fmt.width) != int(log.camera_width):
+            # Field `W=640 H=480` on a 16384 px Linea: the selected CCF belongs to another camera, so
+            # the board never assembles a frame (`E-0702`) and CROP_HEIGHT is out of range (`E-0604`).
+            log.fail(
+                "E-0611",
+                "CCF 影像寬度",
+                f"CCF 給板卡 {fmt.width}×{fmt.height}，相機是 {log.camera_width} px；"
+                f"請在 CamExpert 為這台相機產生／選擇 CCF（目前 {Path(connection.config_file_path).name}）",
+            )
         log.readbacks["W"], log.readbacks["H"] = str(fmt.width), str(fmt.height)
         with self._state_lock:
             self._format = fmt

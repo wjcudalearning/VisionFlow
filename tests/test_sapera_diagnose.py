@@ -436,7 +436,8 @@ class AllStepsPassTests(DiagnoseHarness):
 
         self.assertEqual(
             report.readback_text,
-            "TM=Off LR=5000 LRMIN=? LRMAX=? BLR=5000 EXP=1200 GAIN=1 W=8 H=4 IMG=8x4 MEAN=14.0",
+            "TM=Off LR=5000 LRMIN=? LRMAX=? BLR=5000 EXP=1200 GAIN=1 CAMW=? CCF=line_scan.ccf"
+            " W=8 H=4 CROP=4 IMG=8x4 MEAN=14.0",
         )
         self.assertTrue(report.readback_text.isascii())
         text = Path(report.report_path).read_text(encoding="utf-8")

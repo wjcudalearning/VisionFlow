@@ -89,6 +89,7 @@ ERROR_MESSAGES = {
     "E-0608": "板卡內部線觸發（INT_LINE_TRIGGER）寫入失敗",
     "E-0609": "相機 TriggerMode 讀回與要求不符（連續要 Off、外部要 On）",
     "E-0610": "相機 TriggerMode 無法寫入也無法讀回",
+    "E-0611": "CCF 影像寬度與相機不符",
     "E-0701": "Snap 啟動失敗",
     "E-0702": "等待影像逾時",
     "E-0703": "影像複製失敗",
@@ -206,6 +207,9 @@ ACQ_EVENTS = EXTERNAL_TRIGGER_EVENTS + TRIGGER_TIMING_EVENTS
 # Sapera name is scattered through the binding (Todo P11 "以 8.60 為目標 API"). The candidate lists
 # are tried in order because not every camera exposes the same selector or source spelling.
 DEVICE_LINE_RATE_FEATURE = "AcquisitionLineRate"
+# Camera-side image width, read to compare with the width the CCF gives the board (field: a 640x480
+# CCF on a 16384 px Linea). GenICam SFNC order: current AOI width, sensor maximum, sensor width.
+DEVICE_WIDTH_FEATURES = ("Width", "WidthMax", "SensorWidth")
 DEVICE_GAIN_FEATURE = "Gain"
 DEVICE_EXPOSURE_FEATURES = (
     "ExposureTime",
