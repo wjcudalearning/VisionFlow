@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.gpu_runtime import GpuRuntime  # noqa: E402
+from core.gpu_equivalence import compare_arrays  # noqa: E402
 from core.pipeline import AOIPipeline  # noqa: E402
 from core.preprocess_plan import (  # noqa: E402
     AdaptiveMean,
@@ -88,27 +89,13 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def compare(name: str, actual: np.ndarray, expected: np.ndarray, max_diff: int = 0, mismatch_ratio: float = 0.0) -> dict:
-    if actual.shape != expected.shape or actual.dtype != expected.dtype:
-        raise AssertionError(
-            f"{name}: shape/dtype mismatch actual={actual.shape}/{actual.dtype}, expected={expected.shape}/{expected.dtype}"
-        )
-    delta = np.abs(actual.astype(np.int16) - expected.astype(np.int16))
-    observed_max = int(delta.max(initial=0))
-    observed_ratio = float(np.count_nonzero(delta) / max(delta.size, 1))
-    out_of_tolerance_ratio = float(np.count_nonzero(delta > max_diff) / max(delta.size, 1))
-    if out_of_tolerance_ratio > mismatch_ratio:
-        raise AssertionError(
-            f"{name}: max_diff={observed_max} (limit {max_diff}), mismatch_ratio={observed_ratio:.6f} "
-            f"out_of_tolerance_ratio={out_of_tolerance_ratio:.6f} (limit {mismatch_ratio:.6f})"
-        )
-    result = {
-        "name": name,
-        "max_diff": observed_max,
-        "mean_diff": round(float(delta.mean()), 6),
-        "mismatch_ratio": round(observed_ratio, 6),
-        "out_of_tolerance_ratio": round(out_of_tolerance_ratio, 6),
-    }
+def compare(
+    name: str,
+    actual: np.ndarray,
+    expected: np.ndarray,
+    contract_id: str = "comparison.bit_exact",
+) -> dict:
+    result = compare_arrays(name, actual, expected, contract_id)
     print(f"PASS {name}: {result}")
     return result
 
@@ -153,12 +140,9 @@ def validate_area_resize_matrix(runtime: GpuRuntime) -> dict:
             plan = PreprocessPlan((Resize(target_width, target_height, "area"),), name=label)
             outputs["native"] = runtime.execute_plan(contiguous, plan)
         for route, actual in outputs.items():
-            if actual.shape != expected.shape or not np.array_equal(actual, expected):
-                delta = np.abs(actual.astype(np.int16) - expected.astype(np.int16))
-                raise AssertionError(
-                    f"{route}_{label}: INTER_AREA mismatch max_diff={int(delta.max(initial=0))} "
-                    f"pixels={int(np.count_nonzero(delta))}"
-                )
+            compare(
+                f"{route}_{label}", actual, expected, "preprocess.resize_area_u8"
+            )
             compared += 1
         pixels += int(expected.size)
     result = {"name": "resize_area_matrix", "outputs": compared, "target_pixels": pixels, "max_diff": 0}
@@ -225,14 +209,21 @@ def validate_primitives(runtime: GpuRuntime) -> list[dict]:
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     binary = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY)[1]
     metrics = []
-    metrics.append(compare("bgr_to_rgb", runtime.bgr_to_rgb(bgr), cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)))
-    metrics.append(compare("bgr_to_gray", runtime.bgr_to_gray(bgr), gray, max_diff=1))
-    metrics.append(compare("crop_bgr", runtime.crop(bgr, 17, 13, 91, 67), bgr[13:80, 17:108]))
+    metrics.append(compare(
+        "bgr_to_rgb", runtime.bgr_to_rgb(bgr), cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB),
+        "preprocess.bgr_to_rgb_u8",
+    ))
+    metrics.append(compare("bgr_to_gray", runtime.bgr_to_gray(bgr), gray, "preprocess.gray_u8"))
+    metrics.append(compare(
+        "crop_bgr", runtime.crop(bgr, 17, 13, 91, 67), bgr[13:80, 17:108],
+        "preprocess.crop_u8",
+    ))
     metrics.append(
         compare(
             "resize_gray",
             runtime.resize_gray(gray, 96, 64),
             cv2.resize(gray, (96, 64), interpolation=cv2.INTER_AREA),
+            "preprocess.resize_area_u8",
         )
     )
     metrics.append(validate_area_resize_matrix(runtime))
@@ -241,11 +232,13 @@ def validate_primitives(runtime: GpuRuntime) -> list[dict]:
             "gaussian_blur_gray",
             runtime.gaussian_blur(gray, 5),
             cv2.GaussianBlur(gray, (5, 5), 0),
-            max_diff=2,
-            mismatch_ratio=0.001,
+            "preprocess.gaussian_u8",
         )
     )
-    metrics.append(compare("global_threshold", runtime.threshold(gray, 128, 255, False), binary))
+    metrics.append(compare(
+        "global_threshold", runtime.threshold(gray, 128, 255, False), binary,
+        "preprocess.threshold_u8",
+    ))
     structured_gray = {
         "random_odd": rng.integers(0, 256, size=(65, 97), dtype=np.uint8),
         "black": np.zeros((63, 79), dtype=np.uint8),
@@ -261,8 +254,7 @@ def validate_primitives(runtime: GpuRuntime) -> list[dict]:
                     f"gaussian_{case_name}_k{kernel_size}",
                     runtime.gaussian_blur(case, kernel_size),
                     expected_gaussian,
-                    max_diff=2,
-                    mismatch_ratio=0.001,
+                    "preprocess.gaussian_u8",
                 )
             )
     expected_gaussian_bgr = cv2.GaussianBlur(bgr, (15, 15), 0)
@@ -271,8 +263,7 @@ def validate_primitives(runtime: GpuRuntime) -> list[dict]:
             "gaussian_bgr_k15",
             runtime.gaussian_blur(bgr, 15),
             expected_gaussian_bgr,
-            max_diff=2,
-            mismatch_ratio=0.001,
+            "preprocess.gaussian_u8",
         )
     )
     adaptive_cases = (
@@ -299,8 +290,7 @@ def validate_primitives(runtime: GpuRuntime) -> list[dict]:
                 f"adaptive_{case_name}",
                 runtime.adaptive_threshold(case, block_size, adaptive_c, 255, invert),
                 expected_adaptive,
-                max_diff=0,
-                mismatch_ratio=0.02,
+                "preprocess.adaptive_mean_u8",
             )
         )
     if runtime.supports_fused_401_2:
@@ -318,8 +308,7 @@ def validate_primitives(runtime: GpuRuntime) -> list[dict]:
                 "fused_401_2_bgr",
                 runtime.preprocess_401_2(bgr, 25, 35, -2.0, 255, True),
                 fused_expected,
-                max_diff=0,
-                mismatch_ratio=0.02,
+                "preprocess.adaptive_mean_u8",
             )
         )
         first_context_stats = runtime.performance_stats()["persistent_context"]
@@ -329,8 +318,7 @@ def validate_primitives(runtime: GpuRuntime) -> list[dict]:
                 "fused_401_2_bgr_reused_context",
                 repeated,
                 fused_expected,
-                max_diff=0,
-                mismatch_ratio=0.02,
+                "preprocess.adaptive_mean_u8",
             )
         )
         second_context_stats = runtime.performance_stats()["persistent_context"]
@@ -356,7 +344,10 @@ def validate_primitives(runtime: GpuRuntime) -> list[dict]:
             if operation == "dilate"
             else cv2.erode(binary, kernel, iterations=1)
         )
-        metrics.append(compare(f"morphology_{operation}", runtime.morphology(binary, operation, 3, 1), expected))
+        metrics.append(compare(
+            f"morphology_{operation}", runtime.morphology(binary, operation, 3, 1), expected,
+            "preprocess.morphology_u8",
+        ))
     # The 5x5 path uses a shared-memory separable kernel. Cover partial CUDA
     # blocks, neutral borders, BGR channels, and repeated open/close passes.
     morphology_rng = np.random.default_rng(20260914)
@@ -373,12 +364,18 @@ def validate_primitives(runtime: GpuRuntime) -> list[dict]:
                 iterations=iterations,
             )
             label = f"morphology_k5_{operation}_i{iterations}_{'x'.join(map(str, shape))}"
-            metrics.append(compare(label, runtime.morphology(source, operation, 5, iterations), expected))
+            metrics.append(compare(
+                label, runtime.morphology(source, operation, 5, iterations), expected,
+                "preprocess.morphology_u8",
+            ))
             if runtime.supports_native_plan:
                 plan = PreprocessPlan(
                     (Morphology(operation, 5, iterations),), name=label,
                 )
-                metrics.append(compare(f"native_{label}", runtime.execute_plan(source, plan), expected))
+                metrics.append(compare(
+                    f"native_{label}", runtime.execute_plan(source, plan), expected,
+                    "preprocess.morphology_u8",
+                ))
     strided_morphology = morphology_rng.integers(
         0, 256, (67, 139, 3), dtype=np.uint8,
     )[1:-1, 1:-1:2]
@@ -389,7 +386,7 @@ def validate_primitives(runtime: GpuRuntime) -> list[dict]:
     metrics.append(compare(
         "morphology_k5_strided_bgr", runtime.morphology(
             strided_morphology, "open", 5, 10,
-        ), strided_expected,
+        ), strided_expected, "preprocess.morphology_u8",
     ))
     if runtime.supports_native_plan:
         strided_plan = PreprocessPlan(
@@ -398,6 +395,7 @@ def validate_primitives(runtime: GpuRuntime) -> list[dict]:
         metrics.append(compare(
             "native_morphology_k5_strided_bgr",
             runtime.execute_plan(strided_morphology, strided_plan), strided_expected,
+            "preprocess.morphology_u8",
         ))
     if runtime.supports_native_plan:
         native_plans = (
@@ -425,8 +423,7 @@ def validate_primitives(runtime: GpuRuntime) -> list[dict]:
                     plan.name,
                     actual,
                     expected,
-                    max_diff=0,
-                    mismatch_ratio=0.02 if "401" in plan.name else 0.001,
+                    "preprocess.adaptive_mean_u8" if "401" in plan.name else "preprocess.gaussian_u8",
                 )
             )
             if after_first["call_count"] != before_calls + 1:
@@ -438,8 +435,7 @@ def validate_primitives(runtime: GpuRuntime) -> list[dict]:
                     f"{plan.name}_reused",
                     repeated,
                     expected,
-                    max_diff=0,
-                    mismatch_ratio=0.02 if "401" in plan.name else 0.001,
+                    "preprocess.adaptive_mean_u8" if "401" in plan.name else "preprocess.gaussian_u8",
                 )
             )
             second_context_stats = runtime.performance_stats()["persistent_context"]
@@ -471,6 +467,7 @@ def validate_primitives(runtime: GpuRuntime) -> list[dict]:
             metrics.append(compare(
                 f"{morphology_dag.name}_{name}",
                 morphology_actual[name], morphology_expected[name],
+                "preprocess.morphology_u8" if name == "morph" else "preprocess.gray_u8",
             ))
         dag_plan = PreprocessDagPlan(
             name="native_900_shared_gray",
@@ -486,7 +483,10 @@ def validate_primitives(runtime: GpuRuntime) -> list[dict]:
         actual_outputs = runtime.execute_dag_plan(bgr, dag_plan)
         after_first = runtime.performance_stats()
         for name in dag_plan.outputs:
-            metrics.append(compare(f"{dag_plan.name}_{name}", actual_outputs[name], expected_outputs[name]))
+            metrics.append(compare(
+                f"{dag_plan.name}_{name}", actual_outputs[name], expected_outputs[name],
+                "preprocess.adaptive_mean_u8" if name == "inner_mask" else "preprocess.threshold_u8",
+            ))
         if after_first["call_count"] != before_calls + 1:
             raise AssertionError("native 900 DAG did not execute as one CUDA call")
         first_context_stats = after_first["persistent_context"]
@@ -509,7 +509,7 @@ def validate_primitives(runtime: GpuRuntime) -> list[dict]:
         before = runtime.performance_stats()
         actual_roi = runtime.execute_plan(host_roi, roi_plan, device_roi=device_roi)
         after = runtime.performance_stats()
-        metrics.append(compare("resident_roi_plan", actual_roi, expected_roi, max_diff=1))
+        metrics.append(compare("resident_roi_plan", actual_roi, expected_roi, "preprocess.gray_u8"))
         if after["host_to_device_bytes"] != before["host_to_device_bytes"]:
             raise AssertionError("resident linear ROI unexpectedly uploaded detector input")
 
@@ -527,7 +527,10 @@ def validate_primitives(runtime: GpuRuntime) -> list[dict]:
         actual_dag = runtime.execute_dag_plan(host_roi, roi_dag, device_roi=device_roi)
         after = runtime.performance_stats()
         for name in roi_dag.outputs:
-            metrics.append(compare(f"resident_roi_dag_{name}", actual_dag[name], expected_dag[name], max_diff=1))
+            metrics.append(compare(
+                f"resident_roi_dag_{name}", actual_dag[name], expected_dag[name],
+                "preprocess.gray_u8",
+            ))
         if after["host_to_device_bytes"] != before["host_to_device_bytes"]:
             raise AssertionError("resident DAG ROI unexpectedly uploaded detector input")
         print(f"PASS resident image/ROI routing: generation={resident.generation}")
@@ -544,12 +547,14 @@ def validate_primitives(runtime: GpuRuntime) -> list[dict]:
                         f"roi_batch_{batch_size}_first",
                         batch.download(0),
                         bgr[0:16, 0:16],
+                        "transfer.u8",
                     ))
                     last_x, last_y, last_width, last_height = coordinates[batch_size - 1]
                     metrics.append(compare(
                         f"roi_batch_{batch_size}_last",
                         batch.download(batch_size - 1),
                         bgr[last_y:last_y + last_height, last_x:last_x + last_width],
+                        "transfer.u8",
                     ))
             print(
                 f"PASS ROI coordinate batches 8/16/32/64; "

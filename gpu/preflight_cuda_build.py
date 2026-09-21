@@ -108,12 +108,21 @@ def inspect_contract() -> dict:
     source = PROJECT_DIR / "visionflow_cuda.cu"
     smoke = PROJECT_DIR / "test_cuda_api.cu"
     build_script = PROJECT_DIR / "build_cuda_dll.ps1"
+    equivalence_contract_path = PROJECT_DIR / "equivalence_contract.json"
     runtime_paths = (
         REPOSITORY_ROOT / "core" / "gpu_runtime.py",
         REPOSITORY_ROOT / "core" / "gpu_runtime_components.py",
         REPOSITORY_ROOT / "core" / "gpu_plan_descriptors.py",
     )
-    required_files = [header, source, smoke, PROJECT_DIR / "cuda_project.json", build_script, *runtime_paths]
+    required_files = [
+        header,
+        source,
+        smoke,
+        PROJECT_DIR / "cuda_project.json",
+        build_script,
+        equivalence_contract_path,
+        *runtime_paths,
+    ]
     missing = [str(path) for path in required_files if not path.is_file()]
     if missing:
         raise AssertionError(f"Missing action build contract files: {missing}")
@@ -160,6 +169,7 @@ def inspect_contract() -> dict:
 
     header_exports = set(re.findall(r"VF_CUDA_API\s+int\s+(vf_[A-Za-z0-9_]+)\s*\(", header_text))
     source_exports = set(re.findall(r"VF_CUDA_API\s+int\s+(vf_[A-Za-z0-9_]+)\s*\(", source_text))
+    equivalence_contract = json.loads(equivalence_contract_path.read_text(encoding="utf-8"))
     errors: list[str] = []
     if header_exports != source_exports:
         errors.append(
@@ -202,6 +212,19 @@ def inspect_contract() -> dict:
         errors.append(f"validator/runtime coverage is incomplete: {sorted(missing_validator)}")
     if "dll_sources" not in build_text or "test_targets" not in build_text:
         errors.append("project Action builder does not read the explicit source manifest")
+    classified_exports = list(equivalence_contract.get("infrastructure_exports", []))
+    for entry in equivalence_contract.get("operators", {}).values():
+        classified_exports.extend(entry.get("exports", []))
+    if equivalence_contract.get("schema_version") != 1:
+        errors.append("equivalence_contract.json schema_version must be 1")
+    if len(classified_exports) != len(set(classified_exports)):
+        errors.append("equivalence_contract.json classifies at least one export more than once")
+    if set(classified_exports) != header_exports:
+        errors.append(
+            "equivalence contract export coverage differs from the header: "
+            f"unclassified={sorted(header_exports - set(classified_exports))}, "
+            f"unknown={sorted(set(classified_exports) - header_exports)}"
+        )
     if errors:
         raise AssertionError("CUDA Action preflight failed:\n- " + "\n- ".join(errors))
 
@@ -209,7 +232,15 @@ def inspect_contract() -> dict:
     if abi_match is None:
         raise AssertionError("VF_CUDA_ABI_VERSION is missing from the public header")
 
-    tracked = [header, source, smoke, PROJECT_DIR / "cuda_project.json", build_script, *runtime_paths]
+    tracked = [
+        header,
+        source,
+        smoke,
+        PROJECT_DIR / "cuda_project.json",
+        build_script,
+        equivalence_contract_path,
+        *runtime_paths,
+    ]
     return {
         "schema_version": 1,
         "project": manifest.get("output_name", PROJECT_DIR.name),
@@ -219,6 +250,7 @@ def inspect_contract() -> dict:
         "optional_resident_roi_exports": sorted(OPTIONAL_RESIDENT_ROI_EXPORTS & header_exports),
         "optional_roi_batch_exports": sorted(OPTIONAL_ROI_BATCH_EXPORTS & header_exports),
         "optional_timing_exports": sorted(OPTIONAL_TIMING_EXPORTS & header_exports),
+        "equivalence_contract_schema": equivalence_contract["schema_version"],
         "dll_sources": [
             str(path.relative_to(REPOSITORY_ROOT)).replace("\\", "/")
             for path in dll_sources

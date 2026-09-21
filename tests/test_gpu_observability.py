@@ -1353,7 +1353,7 @@ class ComparisonToleranceTests(unittest.TestCase):
         expected = np.zeros((2, 2), dtype=np.uint8)
         actual = np.ones((2, 2), dtype=np.uint8)
 
-        result = compare("within_one", actual, expected, max_diff=1)
+        result = compare("within_one", actual, expected, "preprocess.gray_u8")
 
         self.assertEqual(result["out_of_tolerance_ratio"], 0.0)
 
@@ -1362,15 +1362,16 @@ class ComparisonToleranceTests(unittest.TestCase):
         actual = np.array([[2, 0], [0, 0]], dtype=np.uint8)
 
         with self.assertRaises(AssertionError):
-            compare("one_bad_pixel", actual, expected, max_diff=1, mismatch_ratio=0.0)
+            compare("one_bad_pixel", actual, expected, "preprocess.gray_u8")
 
     def test_small_excessive_pixel_ratio_can_be_explicitly_allowed(self):
-        expected = np.zeros((2, 2), dtype=np.uint8)
-        actual = np.array([[2, 0], [0, 0]], dtype=np.uint8)
+        expected = np.zeros((1000,), dtype=np.uint8)
+        actual = expected.copy()
+        actual[0] = 3
 
-        result = compare("one_allowed_pixel", actual, expected, max_diff=1, mismatch_ratio=0.25)
+        result = compare("one_allowed_pixel", actual, expected, "preprocess.gaussian_u8")
 
-        self.assertEqual(result["out_of_tolerance_ratio"], 0.25)
+        self.assertEqual(result["out_of_tolerance_ratio"], 0.001)
 
 
 class BenchmarkMetadataTests(unittest.TestCase):

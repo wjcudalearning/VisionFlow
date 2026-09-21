@@ -1,0 +1,147 @@
+{
+  "schema_version": 1,
+  "reference_backend": "OpenCV/NumPy CPU unless an entry states otherwise",
+  "levels": {
+    "bit_exact": "Every compared output value and deterministic ordering field must match.",
+    "decision_exact": "PASS/NG, count, coordinates, ordering and other decision fields must match; listed diagnostics may use an explicit tolerance.",
+    "tolerance": "Differences are accepted only by the machine-readable numeric limits in this file."
+  },
+  "infrastructure_exports": [
+    "vf_gpu_abi_version",
+    "vf_gpu_device_count",
+    "vf_gpu_compute_capability",
+    "vf_gpu_device_name",
+    "vf_gpu_error_message",
+    "vf_gpu_memory_info",
+    "vf_context_create",
+    "vf_context_destroy",
+    "vf_context_stats",
+    "vf_context_memory_stats_v1",
+    "vf_context_set_timing_enabled",
+    "vf_context_last_timings",
+    "vf_host_register_u8",
+    "vf_host_unregister_u8",
+    "vf_match_template_debug_key",
+    "vf_match_template_debug_planes",
+    "vf_match_template_debug_roi",
+    "vf_match_template_debug_candidates"
+  ],
+  "operators": {
+    "comparison.bit_exact": {
+      "level": "bit_exact",
+      "exports": [],
+      "comparison": {"kind": "array", "max_abs_diff": 0, "max_out_of_tolerance_ratio": 0},
+      "golden_tests": ["gpu.validate_cuda_dll:default array comparison"]
+    },
+    "transfer.u8": {
+      "level": "bit_exact",
+      "exports": ["vf_context_upload_u8", "vf_context_upload_u8_file_order", "vf_roi_batch_create", "vf_roi_batch_info", "vf_roi_batch_download_u8", "vf_roi_batch_destroy"],
+      "comparison": {"kind": "array", "max_abs_diff": 0, "max_out_of_tolerance_ratio": 0},
+      "golden_tests": ["gpu.validate_cuda_dll:resident image/ROI routing", "gpu.validate_cuda_dll:ROI coordinate batches"]
+    },
+    "preprocess.plan": {
+      "level": "decision_exact",
+      "exports": ["vf_plan_query", "vf_plan_create", "vf_plan_execute", "vf_plan_destroy", "vf_plan_execute_roi", "vf_dag_plan_query", "vf_dag_plan_create", "vf_dag_plan_execute", "vf_dag_plan_destroy", "vf_dag_plan_execute_roi"],
+      "comparison": {"kind": "composite", "rule": "Apply the contract of every operator and require detector decision_exact."},
+      "golden_tests": ["tests.test_gpu_observability.PreprocessPlanTests", "gpu.validate_cuda_dll:generic native plan/DAG"]
+    },
+    "preprocess.gray_u8": {
+      "level": "tolerance",
+      "exports": ["vf_bgr_to_gray_u8"],
+      "comparison": {"kind": "array", "max_abs_diff": 1, "max_out_of_tolerance_ratio": 0},
+      "golden_tests": ["gpu.validate_cuda_dll:bgr_to_gray"]
+    },
+    "preprocess.bgr_to_rgb_u8": {
+      "level": "bit_exact",
+      "exports": ["vf_bgr_to_rgb_u8"],
+      "comparison": {"kind": "array", "max_abs_diff": 0, "max_out_of_tolerance_ratio": 0},
+      "golden_tests": ["gpu.validate_cuda_dll:bgr_to_rgb"]
+    },
+    "preprocess.crop_u8": {
+      "level": "bit_exact",
+      "exports": ["vf_crop_u8"],
+      "comparison": {"kind": "array", "max_abs_diff": 0, "max_out_of_tolerance_ratio": 0},
+      "golden_tests": ["gpu.validate_cuda_dll:crop_bgr"]
+    },
+    "preprocess.resize_area_u8": {
+      "level": "bit_exact",
+      "exports": ["vf_resize_gray_u8"],
+      "comparison": {"kind": "array", "max_abs_diff": 0, "max_out_of_tolerance_ratio": 0},
+      "golden_tests": ["gpu.validate_cuda_dll:resize_area_matrix"]
+    },
+    "preprocess.gaussian_u8": {
+      "level": "tolerance",
+      "exports": ["vf_gaussian_blur_u8"],
+      "comparison": {"kind": "array", "max_abs_diff": 2, "max_out_of_tolerance_ratio": 0.001},
+      "golden_tests": ["gpu.validate_cuda_dll:gaussian structured matrix"]
+    },
+    "preprocess.threshold_u8": {
+      "level": "bit_exact",
+      "exports": ["vf_threshold_u8"],
+      "comparison": {"kind": "array", "max_abs_diff": 0, "max_out_of_tolerance_ratio": 0},
+      "golden_tests": ["gpu.validate_cuda_dll:global_threshold"]
+    },
+    "preprocess.adaptive_mean_u8": {
+      "level": "tolerance",
+      "exports": ["vf_adaptive_mean_u8", "vf_preprocess_401_2_u8"],
+      "comparison": {"kind": "array", "max_abs_diff": 0, "max_out_of_tolerance_ratio": 0.02},
+      "golden_tests": ["gpu.validate_cuda_dll:adaptive structured matrix", "gpu.validate_cuda_dll:fused_401_2"]
+    },
+    "preprocess.morphology_u8": {
+      "level": "bit_exact",
+      "exports": ["vf_morphology_rect_u8"],
+      "comparison": {"kind": "array", "max_abs_diff": 0, "max_out_of_tolerance_ratio": 0},
+      "golden_tests": ["gpu.validate_cuda_dll:morphology matrix"]
+    },
+    "localization.template_anchor": {
+      "level": "decision_exact",
+      "exports": ["vf_match_template_gray_u8"],
+      "comparison": {"kind": "fields", "exact": ["rect", "threshold_decision", "tie_order"], "absolute_tolerance": {"score": 1e-5}},
+      "golden_tests": ["tests.test_tiler_anchor_backend"]
+    },
+    "contours.opencv_simple": {
+      "level": "bit_exact",
+      "exports": ["vf_find_contours_u8", "vf_find_contours_download"],
+      "comparison": {"kind": "fields", "exact": ["contour_count", "order", "point_count", "points"]},
+      "golden_tests": ["tests.test_gpu_contours", "tools.check_contour_equivalence"]
+    },
+    "statistics.median_f32": {
+      "level": "bit_exact",
+      "exports": ["vf_median_f32"],
+      "comparison": {"kind": "scalar", "max_abs_diff": 0, "nan_equal": true},
+      "golden_tests": ["tests.test_gpu_cnr_extensions:median matrix"]
+    },
+    "cnr.gaussian_f32": {
+      "level": "tolerance",
+      "exports": ["vf_gaussian_blur_f32", "vf_gaussian_blur_f32_roi"],
+      "comparison": {"kind": "array", "max_abs_diff": 0.0004, "max_mean_abs_diff": 0.00005, "max_out_of_tolerance_ratio": 0},
+      "golden_tests": ["tools.gaussian_f32_equivalence", "tests.test_gpu_cnr_extensions"]
+    },
+    "cnr.mask": {
+      "level": "decision_exact",
+      "exports": ["vf_cnr_mask_f32", "vf_cnr_mask_u8_roi"],
+      "comparison": {"kind": "fields", "exact": ["mask", "residual_median", "mad", "threshold"]},
+      "golden_tests": ["tools.cnr_mask_u8_roi_equivalence", "tests.test_gpu_cnr_extensions"]
+    },
+    "cnr.candidates": {
+      "level": "decision_exact",
+      "exports": ["vf_cnr_candidates_u8_roi"],
+      "comparison": {"kind": "fields", "exact": ["candidate_count", "bbox", "area", "order", "status"], "absolute_tolerance": {"diagnostic_float": 1e-5}},
+      "golden_tests": ["tools.cnr_candidates_u8_roi_equivalence", "tests.test_gpu_cnr_candidates"]
+    }
+  },
+  "detectors": {
+    "202-CS-SN-1": {"level": "decision_exact", "exact_fields": ["PASS/NG", "defect_count", "bbox", "area", "confidence", "ordering"], "golden_tests": ["tests.test_detector_202_1_cnr_contract", "gpu.validate_cuda_dll:pipeline equivalence"]},
+    "203-AS-SN-1": {"level": "decision_exact", "exact_fields": ["PASS/NG", "defect_count", "bbox", "area", "ordering"], "golden_tests": ["tests.test_detector_203_as_ap_1"]},
+    "401-AS-SN-1": {"level": "decision_exact", "exact_fields": ["PASS/NG", "defect_count", "bbox", "area", "ordering"], "golden_tests": ["tests.test_detector_401", "gpu.validate_cuda_dll:pipeline equivalence"]},
+    "401-CS-AP-1": {"level": "decision_exact", "exact_fields": ["PASS/NG", "defect_count", "bbox", "area", "ordering"], "golden_tests": ["tests.test_detector_401_1", "gpu.validate_cuda_dll:resize area pipeline"]},
+    "401-CS-AP-2": {"level": "decision_exact", "exact_fields": ["PASS/NG", "defect_count", "bbox", "area", "ordering"], "golden_tests": ["tests.test_detector_401_2"]},
+    "401-CS-SN-1": {"level": "decision_exact", "exact_fields": ["PASS/NG", "defect_count", "bbox", "area", "ordering"], "golden_tests": ["tests.test_detector_401_cs_sn_1"]},
+    "503-CS-SN-1": {"level": "decision_exact", "exact_fields": ["PASS/NG", "defect_count", "bbox", "area", "ordering"], "golden_tests": ["tests.test_detector_506_cs_sn_1"]},
+    "505-AS-SN-1": {"level": "decision_exact", "exact_fields": ["PASS/NG", "defect_count", "bbox", "area", "ordering"], "golden_tests": ["tests.test_detector_505_as_sn_1"]},
+    "506-CS-SN-1": {"level": "decision_exact", "exact_fields": ["PASS/NG", "defect_count", "bbox", "area", "ordering"], "golden_tests": ["tests.test_detector_506_cs_sn_1"]},
+    "900-CS-AP-1": {"level": "decision_exact", "exact_fields": ["PASS/NG", "defect_count", "bbox", "area", "ordering"], "golden_tests": ["tests.test_detector_900"]},
+    "999-FLOW-TEST": {"level": "bit_exact", "exact_fields": ["configured_result", "bbox", "ordering"], "golden_tests": ["tests.test_detector_999_flow_test"]},
+    "yolox": {"level": "decision_exact", "exact_fields": ["PASS/NG", "class_id", "count", "ordering"], "tolerance": {"bbox_abs_px": 1, "confidence_abs": 0.0001}, "golden_tests": ["tests.test_yolox_detector.YoloXPreprocessAndPostprocessTests", "gpu.validate_yolox_ort"]}
+  }
+}

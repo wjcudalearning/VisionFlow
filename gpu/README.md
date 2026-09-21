@@ -5,6 +5,15 @@
 `gpu.mode: auto` 可在 CUDA 失敗時整個 detector 回到 CPU，`gpu.mode: cuda` 則禁止
 隱藏 fallback。
 
+## 版本化等價性契約
+
+`equivalence_contract.json` 是 GPU 正確性 gate 的單一機器可讀來源（schema v1）。它把每個
+CUDA 運算與已註冊 Detector 分成 `bit_exact`、`decision_exact` 或 `tolerance`，並保存容差、
+精確判定欄位及對應 golden tests。`validate_cuda_dll.py` 以 contract ID 讀取數值門檻；
+`preflight_cuda_build.py` 會確認 public header 的每個 export 恰好被歸類一次，測試另確認
+Detector registry 沒有漏項。新增 export、Detector、kernel／編譯旗標或資料型別變更時，必須
+先更新此契約與相應 golden test，不能在 benchmark 呼叫點另寫未登錄門檻。
+
 ## 架構
 
 Detector 以 `core/preprocess_plan.py` 的 backend-neutral operators 描述前處理。

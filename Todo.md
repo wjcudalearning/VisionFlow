@@ -66,7 +66,7 @@
 - [ ] 【實物】五個 production recipes 各準備至少一張 PASS 與一張 NG 樣本；`gpu/production_manifest.example.yaml` 已固定所需 10 個 case，影像待提供。
 - [x] 實機注入 kernel error、CUDA 初始化失敗與 OOM，確認 fallback 後無 stale pointer 或錯誤中間結果。（2026-09-14 RTX 3090 以 `gpu/validate_cuda_fault_injection.py` 完成：`CUDA_VISIBLE_DEVICES=-1`、超過 kernel grid 上限的真實 launch error、超過專用＋共用 GPU 記憶體的 ROI batch OOM；Detector／Pipeline 與 CPU 完全一致，同一 runtime／session 下一張圖恢復 CUDA。sticky context error 另列 P2 待辦）
 - [x] `fallback_to_cpu: false` 且 CUDA DLL 不可用時必須明確失敗，不可回報假的 GPU success。
-- [ ] **把 GPU 等價性分級做成版本化契約**：每個 GPU operator/detector 明確標示 `bit_exact`、`decision_exact` 或 `tolerance`；`tolerance` 必須是機器可讀的欄位與 golden test，而非散落在註解或 benchmark 判讀中。任何 kernel、編譯旗標或資料型別變更都須依該等級選擇驗收 gate。
+- [x] **把 GPU 等價性分級做成版本化契約**（2026-09-21 完成，見完成紀錄）：每個 GPU operator/detector 明確標示 `bit_exact`、`decision_exact` 或 `tolerance`；`tolerance` 必須是機器可讀的欄位與 golden test，而非散落在註解或 benchmark 判讀中。任何 kernel、編譯旗標或資料型別變更都須依該等級選擇驗收 gate。
 
 ## P1：共用 Preprocess Plan 架構
 
@@ -1008,6 +1008,8 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 - [ ] 加速不得犧牲 GUI 回應、打包啟動、結果追溯、錯誤訊息或 CPU fallback。
 
 ## 完成紀錄
+
+- [x] 2026-09-21：**GPU operator／Detector 等價性改為版本化、機器可讀契約。** 新增 `gpu/equivalence_contract.json` schema v1，統一定義 `bit_exact`、`decision_exact`、`tolerance`，涵蓋 public header 全部 52 個 C ABI exports（運算或基礎設施唯一分類）與 DetectorManager 全部 12 個 detector；Gray、Gaussian u8、Adaptive Mean、Gaussian f32、YOLOX bbox/confidence 等容差與對應 golden tests 不再只散落於程式註解。新增 `core/gpu_equivalence.py` 統一載入、驗證與 array comparison，`gpu/validate_cuda_dll.py` 改由 contract ID 選擇門檻並在結果輸出 `contract_id`／`equivalence_level`。CUDA preflight 現在會拒絕未分類、重複分類、未知 export 或錯誤 schema；測試會拒絕任何未登錄 detector。RTX 3090／Driver 610.62 以現有 CUDA 13.3 `sm_86` DLL 重跑完整 primitive、`INTER_AREA` 全矩陣、linear/DAG/resident ROI/context reuse validator 與短 benchmark，全數通過；未修改 CUDA source/header/ABI/DLL。
 
 - [x] 2026-09-21：**完成 GPU 觀測機制熱路徑 A/B 並把完整 CUDA events 改為診斷 opt-in。** 新增 additive ABI v1 optional export `vf_context_set_timing_enabled`；所有 persistent-context timing event 經單一 gate，關閉時不記錄 event、也不執行 elapsed-time 聚合。`GpuRuntime` 偵測新 export 後 production 預設關閉，`enable_native_timing(True)` 與既有 `enable_cumulative_profiling(True)` 才開啟；telemetry 新增 `native_timing_mode`／`native_timing_control`，舊 DLL 仍標示 `legacy_always_on` 且不破壞載入。新增 `gpu/benchmark_observability_overhead.py` 做 warm、交錯順序的 event off/on A/B，另分離 snapshot 與 `performance_stats_delta`。RTX 3090／Driver 610.62／CUDA 13.3／sm_86：512×512（warm-up 10、每 mode 200）production 0.69335 ms、diagnostic 0.74020 ms，events 成本 0.04685 ms／6.757%；2000×12000（warm-up 5、每 mode 50）production 26.17055 ms、diagnostic 26.04870 ms，差異 -0.12185 ms／-0.466%，落在量測雜訊；正式 ROI snapshot production/diagnostic median 0.01335/0.02625 ms，Python delta 0.01230 ms，output checksum 相同。DLL 已以 VS 18.8.1／CUDA 13.3 重編，native smoke 與完整 validator 通過。
 
