@@ -123,7 +123,7 @@ def detector_401_cs_sn_1_tool_params() -> dict:
 
 class ContourProcessingEngineTests(unittest.TestCase):
     def test_release_version(self):
-        self.assertEqual(__version__, "1.0.0")
+        self.assertEqual(__version__, "1.1.0")
 
     def test_detector_203_mask_and_raw_contours_are_pixel_equivalent(self):
         image = np.random.default_rng(2030818).integers(

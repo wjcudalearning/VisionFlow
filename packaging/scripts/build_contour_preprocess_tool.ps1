@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "1.0.0",
+    [string]$Version = "1.1.0",
     [string]$OutputDirectory = ""
 )
 
@@ -9,7 +9,7 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $SpecRoot = Join-Path $RepoRoot "packaging\specs"
 
-$expectedVersion = "1.0.0"
+$expectedVersion = "1.1.0"
 if ($Version -ne $expectedVersion) {
     throw "Requested version $Version does not match source version $expectedVersion"
 }

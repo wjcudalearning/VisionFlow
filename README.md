@@ -382,12 +382,12 @@ CUDA DLL 建置與驗證：
 .\env\Scripts\python.exe -m contour_preprocess_tool
 ```
 
-工具在完整解析度像素上執行 Gaussian、Threshold、Morphology、mask 與 contour；視窗縮放只影響顯示。匯出的 `visionflow-traditional-cv-tuning/v1` JSON 可作為新增 Detector 的等價測試基準。
+工具在完整解析度像素上執行 Gaussian、Threshold、Morphology、mask 與 contour；視窗縮放只影響顯示。「匯出偵測器」會產生一支凍結目前參數的 `detector_<id>.py`，以及一份說明如何加入 DetectorManager、繁中標籤與 Recipe 的 `REGISTER_DETECTOR.md`。既有 `visionflow-traditional-cv-tuning/v1` JSON 仍可載入繼續調整。
 
 獨立打包：
 
 ```powershell
-.\packaging\scripts\build_contour_preprocess_tool.ps1 -Version 1.0.0
+.\packaging\scripts\build_contour_preprocess_tool.ps1 -Version 1.1.0
 ```
 
 ### 切圖與後處理工具

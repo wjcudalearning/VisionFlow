@@ -33,6 +33,7 @@ Release notes 位於 [`release-notes/`](release-notes/)，檔名同時標示產�
 - [`visionflow-aoi-v1.2.0.md`](release-notes/visionflow-aoi-v1.2.0.md)
 - [`utility-tools-v1.1.0.md`](release-notes/utility-tools-v1.1.0.md)
 - [`utility-tools-v1.0.0.md`](release-notes/utility-tools-v1.0.0.md)
+- [`traditional-cv-tuning-tool-v1.1.0.md`](release-notes/traditional-cv-tuning-tool-v1.1.0.md)
 - [`traditional-cv-tuning-tool-v1.0.0.md`](release-notes/traditional-cv-tuning-tool-v1.0.0.md)
 
 ## Reports
