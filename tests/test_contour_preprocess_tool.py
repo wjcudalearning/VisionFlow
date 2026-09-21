@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import os
 from pathlib import Path
 import tempfile
@@ -14,6 +15,7 @@ from PySide6.QtWidgets import QApplication
 
 from contour_preprocess_tool import __version__
 from contour_preprocess_tool.app import ContourPreprocessWindow
+from contour_preprocess_tool.detector_export import DetectorBundleExporter
 from contour_preprocess_tool.engine import ContourProcessingEngine
 from contour_preprocess_tool.recipe_io import TuningRecipeDocument, TuningRecipeStore
 from contour_preprocess_tool.viewer import FullResolutionImageViewer
@@ -229,6 +231,12 @@ class FullResolutionPreviewTests(unittest.TestCase):
         self.assertIn("2401x1601", window.preview_resolution_label.text())
         schedule.assert_called_once_with(immediate=True)
 
+    def test_window_offers_detector_export_instead_of_recipe_export(self):
+        window = ContourPreprocessWindow()
+
+        self.assertEqual(window.btn_export_detector.text(), "匯出偵測器")
+        self.assertFalse(hasattr(window, "btn_export_recipe"))
+
     def test_versioned_tuning_recipe_round_trip_restores_gui_params(self):
         params = detector_203_tool_params()
         store = TuningRecipeStore()
@@ -251,6 +259,101 @@ class FullResolutionPreviewTests(unittest.TestCase):
         ]
         self.assertEqual(actual, expected)
         self.assertEqual(loaded.source["detector"], "203-AS-SN-1")
+
+
+class DetectorBundleExporterTests(unittest.TestCase):
+    def test_export_writes_one_detector_and_registration_guide(self):
+        exporter = DetectorBundleExporter()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = exporter.export(
+                temp_dir,
+                detector_id="203-AS-SN-2",
+                display_name="203 自適應輪廓檢測第二版",
+                params=detector_203_tool_params(),
+            )
+
+            self.assertEqual(
+                sorted(path.name for path in result.bundle_dir.iterdir()),
+                ["REGISTER_DETECTOR.md", "detector_203_as_sn_2.py"],
+            )
+            source = result.detector_path.read_text(encoding="utf-8")
+            guide = result.registration_guide_path.read_text(encoding="utf-8")
+            self.assertIn("class Detector203AsSn2(BaseDetector):", source)
+            self.assertIn("detector_id = '203-AS-SN-2'", source)
+            self.assertIn("TUNING_PARAMS =", source)
+            self.assertIn("from detectors.detector_203_as_sn_2 import Detector203AsSn2", guide)
+            self.assertIn('use_gpu: false', guide)
+
+    def test_generated_detector_matches_tuning_engine_contract(self):
+        params = detector_203_tool_params()
+        image = np.random.default_rng(2030921).integers(
+            0, 256, size=(137, 181, 3), dtype=np.uint8
+        )
+        expected = ContourProcessingEngine().process(image, params)
+        exporter = DetectorBundleExporter()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            exported = exporter.export(
+                temp_dir,
+                detector_id="203-AS-SN-2",
+                display_name="203 自適應輪廓檢測第二版",
+                params=params,
+            )
+            spec = importlib.util.spec_from_file_location(
+                "generated_detector_under_test", exported.detector_path
+            )
+            self.assertIsNotNone(spec)
+            self.assertIsNotNone(spec.loader)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            with self.assertRaisesRegex(ValueError, "已在匯出時凍結"):
+                module.Detector203AsSn2(params={"threshold_value": 1})
+            detector = module.Detector203AsSn2()
+            actual = detector.run(image)
+
+        self.assertEqual(
+            expected.stats["detections"],
+            [
+                {
+                    "shape": item["metadata"]["shape"],
+                    "bbox": item["bbox_local"],
+                    "area": item["area"],
+                }
+                for item in actual["defects"]
+            ],
+        )
+        self.assertEqual(actual["pass"], not expected.stats["detections"])
+        self.assertEqual(actual["execution"]["backend"], "cpu")
+
+    def test_export_rejects_invalid_id_and_existing_bundle(self):
+        exporter = DetectorBundleExporter()
+        with self.assertRaisesRegex(ValueError, "Detector ID"):
+            exporter.names_for("不合法 ID")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            exporter.export(
+                temp_dir,
+                detector_id="NEW-1",
+                display_name="新偵測器",
+                params=detector_203_tool_params(),
+            )
+            with self.assertRaises(FileExistsError):
+                exporter.export(
+                    temp_dir,
+                    detector_id="NEW-1",
+                    display_name="新偵測器",
+                    params=detector_203_tool_params(),
+                )
+
+    def test_packaging_excludes_foreign_path_runtimes_that_break_qt(self):
+        spec = Path("packaging/specs/Traditional CV Tuning Tool.spec").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("'icuuc.dll'", spec)
+        self.assertIn("'icudt78.dll'", spec)
+        self.assertIn("'libcrypto-3-x64.dll'", spec)
+        self.assertIn("'libssl-3-x64.dll'", spec)
+        self.assertIn("'api-ms-win-'", spec)
 
 
 if __name__ == "__main__":

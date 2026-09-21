@@ -13,7 +13,7 @@ Threaded Binary Contour Detection GUI
 7. 左側參數改成分頁式，適合 24 吋螢幕，不讓文字全部擠在一起
  8. 即時預覽與儲存都用完整原圖；OpenGL 僅負責顯示縮放
  9. 背景執行緒 + debounce，避免 GUI 卡頓
- 10. 支援版本化調參 Recipe 與中文路徑
+ 10. 支援匯出可註冊 Detector bundle、載入版本化調參 Recipe 與中文路徑
 
 安裝：
     pip install PySide6 opencv-python numpy
@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -53,8 +54,9 @@ from PySide6.QtWidgets import (
 )
 
 from .engine import ContourProcessingEngine
+from .detector_export import DetectorBundleExporter
 from .image_io import UnicodeImageStore
-from .recipe_io import TuningRecipeDocument, TuningRecipeStore
+from .recipe_io import TuningRecipeStore
 from .version import __version__
 from .viewer import FullResolutionImageViewer
 
@@ -174,6 +176,7 @@ class ContourPreprocessWindow(QMainWindow):
         self.engine = ContourProcessingEngine()
         self.image_store = UnicodeImageStore()
         self.recipe_store = TuningRecipeStore()
+        self.detector_exporter = DetectorBundleExporter()
         self.thread_pool = QThreadPool(self)
         self.thread_pool.setMaxThreadCount(2)
         self.preview_job_id = 0
@@ -231,14 +234,14 @@ class ContourPreprocessWindow(QMainWindow):
         self.btn_open = QPushButton("載入圖片")
         self.btn_save_annotated = QPushButton("儲存標記")
         self.btn_save_mask = QPushButton("儲存 Mask")
-        self.btn_export_recipe = QPushButton("匯出調參 Recipe")
+        self.btn_export_detector = QPushButton("匯出偵測器")
         self.btn_import_recipe = QPushButton("載入調參 Recipe")
         self.btn_reset = QPushButton("恢復預設")
         file_layout.addWidget(self.btn_open, 0, 0)
         file_layout.addWidget(self.btn_save_annotated, 0, 1)
         file_layout.addWidget(self.btn_save_mask, 1, 0)
         file_layout.addWidget(self.btn_reset, 1, 1)
-        file_layout.addWidget(self.btn_export_recipe, 2, 0)
+        file_layout.addWidget(self.btn_export_detector, 2, 0)
         file_layout.addWidget(self.btn_import_recipe, 2, 1)
         root.addWidget(file_box)
 
@@ -635,7 +638,7 @@ class ContourPreprocessWindow(QMainWindow):
         self.btn_save_annotated.clicked.connect(self.save_annotated)
         self.btn_save_mask.clicked.connect(self.save_mask)
         self.btn_reset.clicked.connect(self.reset_defaults)
-        self.btn_export_recipe.clicked.connect(self.export_tuning_recipe)
+        self.btn_export_detector.clicked.connect(self.export_detector)
         self.btn_import_recipe.clicked.connect(self.import_tuning_recipe)
         self.check_fit.toggled.connect(self.on_fit_changed)
         self.combo_view_mode.currentIndexChanged.connect(self.show_current_view)
@@ -903,33 +906,51 @@ class ContourPreprocessWindow(QMainWindow):
         self.update_threshold_page_hint()
         self.schedule_preview(immediate=True)
 
-    def export_tuning_recipe(self) -> None:
-        default = (
-            str(Path(self.current_path).with_suffix(".cv-tuning.json"))
-            if self.current_path
-            else str(Path.home() / "traditional-cv-tuning.json")
+    def export_detector(self) -> None:
+        detector_id, accepted = QInputDialog.getText(
+            self,
+            "匯出偵測器",
+            "Detector ID（例如 203-AS-SN-2）：",
         )
-        path, _ = QFileDialog.getSaveFileName(
-            self, "匯出調參 Recipe", default, "JSON (*.json)"
-        )
-        if not path:
+        if not accepted:
             return
-        source: dict[str, Any] = {
-            "image_path": self.current_path,
-            "display_backend": self.viewer.render_backend,
-        }
-        if self.original_full is not None:
-            height, width = self.original_full.shape[:2]
-            source["width"] = int(width)
-            source["height"] = int(height)
+        detector_id = detector_id.strip()
+        display_name, accepted = QInputDialog.getText(
+            self,
+            "匯出偵測器",
+            "繁中顯示名稱：",
+            text=f"{detector_id} 傳統 CV 檢測",
+        )
+        if not accepted:
+            return
+
+        default_parent = (
+            str(Path(self.current_path).resolve().parent)
+            if self.current_path
+            else str(Path.home())
+        )
+        parent_dir = QFileDialog.getExistingDirectory(
+            self,
+            "選擇偵測器 bundle 的匯出位置",
+            default_parent,
+        )
+        if not parent_dir:
+            return
         try:
-            saved = self.recipe_store.save(
-                path, TuningRecipeDocument.create(self.collect_params(), source)
+            result = self.detector_exporter.export(
+                parent_dir,
+                detector_id=detector_id,
+                display_name=display_name,
+                params=self.collect_params(),
             )
-        except (OSError, TypeError, ValueError) as exc:
+        except (FileExistsError, OSError, TypeError, ValueError) as exc:
             QMessageBox.critical(self, "匯出失敗", str(exc))
             return
-        self.status_label.setText(f"已匯出調參 Recipe：{saved}")
+        self.status_label.setText(
+            "已匯出偵測器："
+            f"{result.detector_path.name}、{result.registration_guide_path.name}\n"
+            f"{result.bundle_dir}"
+        )
 
     def import_tuning_recipe(self) -> None:
         path, _ = QFileDialog.getOpenFileName(

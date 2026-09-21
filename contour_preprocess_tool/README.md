@@ -22,12 +22,19 @@ $env:QT_QPA_PLATFORM='offscreen'
 - 取消「符合視窗大小」後是 1:1 像素，可用捲軸與滑鼠滾輪平移／縮放。OpenGL 不可用時回退 Qt raster，處理結果不變。
 - 預覽與儲存共用同一個 `ContourProcessingEngine` 及同一張 `original_full`，不得再出現預覽縮圖與儲存原圖結果不同。
 
-## Detector 移植流程
+## 匯出 Detector
 
 1. 在 GUI 排定 Recipe steps 並調整參數。
 2. 若 Detector 接受所有有效輪廓，選「輪廓」，不要選「全部」；「全部」仍代表圓形、矩形、多邊形三種形狀篩選的聯集。
-3. 使用「匯出調參 Recipe」保存 `visionflow-traditional-cv-tuning/v1` JSON。檔案包含完整參數、步驟順序、原圖尺寸與原圖運算契約。
-4. 建立 Detector 時，將 JSON 作為外部參考契約，新增工具 engine 與 Detector 的 mask 像素級、contour／bbox／area／PASS-NG 等價測試。
+3. 按「匯出偵測器」，輸入唯一的 Detector ID、繁中顯示名稱及匯出位置。
+4. 工具會建立獨立 bundle，且內容固定只有：
+   - `detector_<id>.py`：凍結目前完整參數與步驟順序、可接到 `BaseDetector` 的 OpenCV CPU reference。
+   - `REGISTER_DETECTOR.md`：逐步說明複製檔案、修改 `DetectorManager`、加入繁中標籤與 Recipe 的方式。
+5. 依 bundle 內文件註冊後，新增工具 engine 與 Detector 的 mask 像素級、contour／bbox／area／PASS-NG 等價測試。
+
+「載入調參 Recipe」仍支援既有 `visionflow-traditional-cv-tuning/v1` JSON，方便載回舊參數繼續調整；主畫面的原「匯出調參 Recipe」已由「匯出偵測器」取代。
+
+匯出的 Detector 明確固定走 CPU，不會因 Recipe 誤設 `use_gpu: true` 而把 CPU 運算回報成 CUDA。要加入 GPU 支援時，仍須把有效步驟遷移到共用 immutable `PreprocessPlan`，並完成 CPU/GPU 等價與 fallback 測試。
 
 203-AS-SN-1 已有回歸測試證明 Gray → Gaussian 3 → Adaptive Mean Inv 21/C=1 → 3×3 Open → 四邊屏蔽 → LIST contours 的 mask 逐像素一致，且原始輪廓數一致。
 
@@ -44,6 +51,7 @@ $env:QT_QPA_PLATFORM='offscreen'
 - `engine.py`：無 Qt 相依的處理引擎、不可變 Recipe 快照與結果模型。
 - `image_io.py`：Unicode-safe OpenCV 讀寫。
 - `recipe_io.py`：版本化調參 Recipe JSON。
+- `detector_export.py`：產生 Detector `.py` 與註冊教學 `.md` bundle。
 - `viewer.py`：完整解析度 OpenGL／Qt raster 顯示。
 - `app.py`：Qt composition root、參數控制、背景 preview/save workers。
 

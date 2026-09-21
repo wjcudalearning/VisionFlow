@@ -22,6 +22,23 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+# API-set forwarders and UCRT are operating-system components. The build host
+# can also expose unrelated Poppler ICU/OpenSSL DLLs through PATH; collecting
+# those beside QtCore can make Qt load an incompatible dependency first.
+_excluded_runtime_names = {
+    'icudt78.dll',
+    'icuuc.dll',
+    'libcrypto-3-x64.dll',
+    'libssl-3-x64.dll',
+    'ucrtbase.dll',
+}
+_system_runtime_prefixes = ('api-ms-win-', 'ext-ms-win-')
+a.binaries = [
+    entry
+    for entry in a.binaries
+    if Path(entry[0]).name.lower() not in _excluded_runtime_names
+    and not Path(entry[0]).name.lower().startswith(_system_runtime_prefixes)
+]
 pyz = PYZ(a.pure)
 
 exe = EXE(
