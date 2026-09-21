@@ -155,6 +155,22 @@ class _DetailedMemoryDll(_FusedDll):
         return 0
 
 
+class _TimingControlDll(_FusedDll):
+    def __init__(self):
+        super().__init__()
+        self.timing_states = []
+        self.timing_queries = 0
+        self.vf_context_set_timing_enabled = _Function(self._set_timing)
+
+    def _set_timing(self, _context, enabled):
+        self.timing_states.append(bool(enabled))
+        return 0
+
+    def _timings(self, context, timings):
+        self.timing_queries += 1
+        return super()._timings(context, timings)
+
+
 class _NativePlanDll(_FusedDll):
     def __init__(self):
         super().__init__()
@@ -553,6 +569,31 @@ class GpuRuntimeMetricsTests(unittest.TestCase):
         runtime.close()
         self.assertFalse(runtime.supports_fused_401_2)
         self.assertEqual(dll.destroyed, [1234])
+
+    def test_optional_timing_control_defaults_to_production_off_and_can_enable_diagnostics(self):
+        runtime = GpuRuntime(enabled=False)
+        dll = _TimingControlDll()
+        runtime._dll = dll
+        runtime.device_count = 1
+        runtime._load_optional_context()
+
+        production = runtime.performance_stats()
+        self.assertEqual(dll.timing_states, [False])
+        self.assertEqual(production["native_timing_mode"], "production_disabled")
+        self.assertEqual(production["native_timing_control"], "optional_export")
+        self.assertIsNone(production["native_timings_ms"])
+        self.assertEqual(dll.timing_queries, 0)
+
+        self.assertTrue(runtime.enable_native_timing(True))
+        diagnostic = runtime.performance_stats()
+        self.assertEqual(dll.timing_states, [False, True])
+        self.assertEqual(diagnostic["native_timing_mode"], "diagnostic")
+        self.assertEqual(diagnostic["native_timings_ms"]["kernel_ms"], 2.5)
+        self.assertEqual(dll.timing_queries, 1)
+
+        runtime.enable_cumulative_profiling(False)
+        self.assertEqual(dll.timing_states, [False, True, False])
+        runtime.close()
 
     def test_optional_detailed_context_memory_stats_are_preferred_and_sum_to_total(self):
         runtime = GpuRuntime(enabled=False)

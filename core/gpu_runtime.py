@@ -149,6 +149,8 @@ class GpuRuntime:
         self._performance_recorder = GpuPerformanceRecorder()
         self._performance = self._performance_recorder.values
         self._capture_native_cumulative = False
+        self._native_timing_enabled = True
+        self._native_timing_control = False
         # Set by _load_optional_gaussian_blur_f32(); False means the loaded DLL ignores sigma.
         self._gaussian_f32_sigma_supported = False
         # Strict CUDA mode must never route a CUDA-capable plan to CPU.
@@ -250,6 +252,7 @@ class GpuRuntime:
                 "resident_roi": self.supports_resident_roi,
                 "file_order_upload": self.supports_file_order_upload,
                 "host_register": self.supports_host_register,
+                "timing_control": self._capabilities.timing_control,
                 "roi_batch": self.supports_roi_batch,
                 "fused_401_2": self.supports_fused_401_2,
                 "template_match": self.supports_template_match,
@@ -274,11 +277,19 @@ class GpuRuntime:
         """Return host wrapper metrics and optional native CUDA event timings."""
         with self._lock:
             context_stats = self._context_stats_unlocked()
-            native_timings = self._native_timings_unlocked()
+            native_timings = (
+                self._native_timings_unlocked() if self._native_timing_enabled else None
+            )
             metrics = self._performance_recorder.snapshot()
             return {
                 "measurement_scope": "host_wrapper_and_optional_cuda_events",
                 "note": "Native timings describe the most recent persistent-context operation when the DLL exports them.",
+                "native_timing_mode": (
+                    "diagnostic" if self._native_timing_enabled else "production_disabled"
+                ),
+                "native_timing_control": (
+                    "optional_export" if self._native_timing_control else "legacy_always_on"
+                ),
                 **{key: value for key, value in metrics.items() if key != "functions"},
                 "persistent_context": context_stats,
                 "native_timings_ms": native_timings,
@@ -1499,6 +1510,10 @@ class GpuRuntime:
         if timings is not None:
             timings.argtypes = [ctypes.c_void_p, ctypes.POINTER(_VfCudaTimingsV1)]
             timings.restype = ctypes.c_int
+        timing_control = getattr(self._dll, "vf_context_set_timing_enabled", None)
+        if timing_control is not None and timings is not None:
+            timing_control.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            timing_control.restype = ctypes.c_int
         context = ctypes.c_void_p()
         result = int(create(ctypes.byref(context)))
         if result != 0 or not context.value:
@@ -1511,6 +1526,11 @@ class GpuRuntime:
             self.native_dag_plan_unavailable_reason = reason
             return
         self._context = context
+        if timing_control is not None and timings is not None:
+            result = int(timing_control(self._context, 0))
+            if result == 0:
+                self._native_timing_control = True
+                self._native_timing_enabled = False
         if fused is None:
             self.fused_unavailable_reason = "CUDA DLL has no fused 401-2 export"
         self._load_optional_native_plan()
@@ -1995,6 +2015,25 @@ class GpuRuntime:
         """Opt in to per-plan native event aggregation used by the 401 profiler."""
         with self._lock:
             self._capture_native_cumulative = bool(enabled)
+            if self._native_timing_control:
+                self._set_native_timing_unlocked(bool(enabled))
+
+    def enable_native_timing(self, enabled: bool = True) -> bool:
+        """Toggle detailed CUDA events when the loaded DLL supports the optional control."""
+        with self._lock:
+            if not self._native_timing_control:
+                return False
+            self._set_native_timing_unlocked(bool(enabled))
+            return True
+
+    def _set_native_timing_unlocked(self, enabled: bool) -> None:
+        control = getattr(self._dll, "vf_context_set_timing_enabled", None)
+        if control is None or self._context is None:
+            return
+        result = int(control(self._context, int(bool(enabled))))
+        if result != 0:
+            raise self._native_error("vf_context_set_timing_enabled", result)
+        self._native_timing_enabled = bool(enabled)
 
     @staticmethod
     def _plan_kernel_launch_count(plan, input_channels: int) -> int:

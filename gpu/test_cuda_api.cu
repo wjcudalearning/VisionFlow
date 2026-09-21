@@ -49,6 +49,16 @@ int main() {
         std::cerr << "Persistent context creation failed\n";
         return 6;
     }
+    result = vf_context_set_timing_enabled(context, 0);
+    if (result != VF_CUDA_OK) {
+        std::cerr << "Persistent context timing disable failed\n";
+        return 16;
+    }
+    result = vf_context_set_timing_enabled(context, 1);
+    if (result != VF_CUDA_OK) {
+        std::cerr << "Persistent context timing enable failed\n";
+        return 17;
+    }
     std::vector<uint8_t> fused_binary(width * height, 0);
     result = vf_preprocess_401_2_u8(
         context,

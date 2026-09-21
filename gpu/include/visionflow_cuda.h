@@ -150,6 +150,9 @@ VF_CUDA_API int vf_context_stats(
     void* context, uint64_t* reserved_bytes, uint64_t* allocation_count);
 VF_CUDA_API int vf_context_memory_stats_v1(
     void* context, VfCudaContextMemoryStatsV1* stats);
+/* Optional diagnostics control. Disabled mode skips CUDA event recording on the hot path.
+ * Older DLLs without this export retain their historical always-on timing behavior. */
+VF_CUDA_API int vf_context_set_timing_enabled(void* context, int enabled);
 VF_CUDA_API int vf_context_last_timings(void* context, VfCudaTimingsV1* timings);
 VF_CUDA_API int vf_context_upload_u8(
     void* context,

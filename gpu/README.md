@@ -15,7 +15,7 @@ CUDA backend 支援：
 - Detector-neutral linear `VfPlanDescV1`。
 - Shared-gray/multi-output `VfDagPlanDescV1`。
 - Resident image/ROI 與 coordinate ROI batch。
-- `VfCudaTimingsV1` CUDA event 分項。
+- `VfCudaTimingsV1` CUDA event 分項；新 DLL production 預設關閉，diagnostic/benchmark 明確 opt-in。
 - `VfCudaContextMemoryStatsV1` 完整統計 context-owned device buffers：plan、resident、template
   match、contour、median、float Gaussian、CNR mask 與 CNR candidate，並回報 current/peak。
   這不包含 CUDA driver/JIT/context overhead；Python 對缺少此 optional export 的舊 DLL 仍退回
@@ -386,6 +386,27 @@ v1.6.0 發行檔仍有此問題；判斷 v1.6.0 的 anchor 位置請以 `gpu_met
 累計值。`device_host_split` 的 CNR／候選／統計階段只依本輪 `functions` 差值判定，因此預熱或前一張
 影像曾呼叫 CUDA export，不會讓本輪純 CPU 路徑誤報為 device；本輪零 CUDA 呼叫時也不沿用上一輪的
 `native_timings_ms`。
+
+### 2026-09-21 observability hot-path A/B
+
+`vf_context_set_timing_enabled` 是 additive ABI v1 optional export。新 DLL 載入後，Python runtime 在
+production 預設關閉 persistent-context CUDA events；`enable_native_timing(True)` 或
+`enable_cumulative_profiling(True)` 才開啟完整 event 與分項聚合。舊 DLL 沒有控制 export 時維持歷史的
+always-on events，telemetry 以 `native_timing_control=legacy_always_on` 明確標示。
+
+可重跑的 warm、交錯順序 A/B：
+
+```powershell
+.\env\Scripts\python.exe gpu\benchmark_observability_overhead.py `
+  --width 2000 --height 12000 --warmup 5 --runs 50 `
+  --output outputs_validation\observability_overhead_2000x12000.json
+```
+
+RTX 3090／Driver 610.62／CUDA 13.3 的結果：512×512 小工作負載 events 增加 median
+0.04685 ms（6.757%）；2000×12000 正式 ROI 的 50× A/B 為 26.17055 vs 26.04870 ms，差異
+-0.12185 ms（-0.466%），落在量測雜訊。正式 ROI 的 `performance_stats()` snapshot median 為
+production 0.01335 ms、diagnostic 0.02625 ms，Python `performance_stats_delta()` 為 0.01230 ms；
+兩種 mode 的 output checksum 相同。這支持 production 使用精簡 mode，同時保留 diagnostic 完整資料。
 
 ### 2026-09-21 resident working-set admission
 

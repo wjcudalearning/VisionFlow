@@ -103,6 +103,11 @@ class GpuCapabilities:
         return self.has_exports(("vf_host_register_u8", "vf_host_unregister_u8"))
 
     @property
+    def timing_control(self) -> bool:
+        """Optional hot-path CUDA event switch added without changing ABI v1."""
+        return self.has_exports(("vf_context_set_timing_enabled", "vf_context_last_timings"))
+
+    @property
     def roi_batch(self) -> bool:
         return bool(
             self.resident_roi
