@@ -406,6 +406,7 @@ class AOIPipeline(LogMixin):
             detector_configs,
             total_device_bytes=int(memory.get("total_bytes", 0) or 0),
             context_stats=stats.get("persistent_context"),
+            pattern_template_size=self._pattern_template_size(tile_config),
         )
         known = int(memory.get("total_bytes", 0) or 0) > 0
         low = known and int(memory.get("free_bytes", 0) or 0) < estimate.required_free_bytes
@@ -426,6 +427,20 @@ class AOIPipeline(LogMixin):
             "admitted": not low,
             "admission_decision": decision,
         }
+
+    def _pattern_template_size(self, tile_config: dict) -> tuple[int, int] | None:
+        """Decoded (width, height) of the pattern_match template, or None to keep admission conservative."""
+        if str((tile_config or {}).get("mode", "grid")).lower() != "pattern_match":
+            return None
+        template_path = str(((tile_config or {}).get("pattern_match") or {}).get("template_path", "")).strip()
+        if not template_path:
+            return None
+        try:
+            template = load_image(Path(template_path))
+        except Exception as exc:  # noqa: BLE001 - PatternMatchTiler reports the unreadable template
+            self.logger.warning("Pattern match template size unavailable for VRAM admission: %s", exc)
+            return None
+        return int(template.shape[1]), int(template.shape[0])
 
     def _build_gpu_runtime(self, gpu_config: dict, gpu_requested: bool):
         if self.gpu_session is not None:

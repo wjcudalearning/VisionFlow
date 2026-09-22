@@ -53,8 +53,37 @@ def _positive(value: Any, default: int) -> int:
     return parsed if parsed > 0 else int(default)
 
 
-def _tile_extent(image_shape: tuple[int, ...], tile_config: dict) -> tuple[int, int]:
+def _pattern_template_extent(
+    image_shape: tuple[int, ...], template_size: tuple[int, int] | None
+) -> tuple[int, int] | None:
+    """Return a usable (width, height) template size, or None when admission must stay conservative."""
+    if template_size is None:
+        return None
+    try:
+        width, height = (int(template_size[0]), int(template_size[1]))
+    except (TypeError, ValueError, IndexError):
+        return None
     image_height, image_width = (int(image_shape[0]), int(image_shape[1]))
+    if width <= 0 or height <= 0 or width > image_width or height > image_height:
+        return None
+    return width, height
+
+
+def _tile_extent(
+    image_shape: tuple[int, ...],
+    tile_config: dict,
+    pattern_template: tuple[int, int] | None = None,
+) -> tuple[int, int]:
+    image_height, image_width = (int(image_shape[0]), int(image_shape[1]))
+    if str(tile_config.get("mode", "grid")).lower() == "pattern_match" and pattern_template is not None:
+        # PatternMatchTiler crops each match as template plus crop_padding on every side; the
+        # grid width/height keys do not apply to this mode and usually are absent, which used to
+        # charge Detector scratch for the whole frame.
+        padding = max(0, int((tile_config.get("pattern_match") or {}).get("crop_padding", 0) or 0))
+        return (
+            min(pattern_template[0] + 2 * padding, image_width),
+            min(pattern_template[1] + 2 * padding, image_height),
+        )
     anchored = bool(str(tile_config.get("template_path", "")).strip())
     width_key, height_key = (("roi_w", "roi_h") if anchored else ("width", "height"))
     width = _positive(tile_config.get(width_key, tile_config.get("width")), image_width)
@@ -78,6 +107,7 @@ def estimate_resident_working_set(
     *,
     total_device_bytes: int,
     context_stats: dict | None = None,
+    pattern_template_size: tuple[int, int] | None = None,
 ) -> ResidentWorkingSetEstimate:
     """Conservatively estimate allocations needed before accepting a resident upload.
 
@@ -85,6 +115,10 @@ def estimate_resident_working_set(
     when a throughput session allows several callers to wait at the Python queue. Grow-only native
     buffers are shared across tiles and detectors; capacity is therefore the maximum working set,
     not the sum of every tile in an image.
+
+    ``pattern_template_size`` is the decoded (width, height) of the ``pattern_match`` template.
+    When it is known, tiles and the response/sort planes are sized from it; otherwise the
+    whole-frame bound is kept.
     """
     if len(image_shape) not in {2, 3} or int(image_nbytes) <= 0:
         raise ValueError("Resident image shape and byte size must be positive")
@@ -92,7 +126,8 @@ def estimate_resident_working_set(
     if channels not in {1, 3}:
         raise ValueError("Resident image must have one or three channels")
 
-    tile_width, tile_height = _tile_extent(image_shape, tile_config or {})
+    pattern_template = _pattern_template_extent(image_shape, pattern_template_size)
+    tile_width, tile_height = _tile_extent(image_shape, tile_config or {}, pattern_template)
     tile_pixels = tile_width * tile_height
     tile_input_bytes = tile_pixels * channels
     # Linear native plan worst case: input plus u8 work/morphology planes and one shared uint32
@@ -118,10 +153,25 @@ def estimate_resident_working_set(
         image_height, image_width = int(image_shape[0]), int(image_shape[1])
         pattern = (tile_config or {}).get("pattern_match") or {}
         max_candidates = _positive(pattern.get("max_candidates"), 20000)
-        # Gray frame + response plane + two uint64 radix-sort planes, CUB temporary storage and
-        # bounded selected/output records. This is intentionally conservative because admission
-        # occurs before the template is decoded and its exact response dimensions are known.
-        anchor_scratch_bytes = image_width * image_height * 48 + max_candidates * 32
+        if pattern_template is None:
+            # Template unreadable here: the tiler will report it, so keep the whole-frame bound
+            # (measured 48 B/px on RTX 3090 with the response as large as the frame).
+            anchor_scratch_bytes = image_width * image_height * 48 + max_candidates * 32
+        else:
+            template_width, template_height = pattern_template
+            response_elements = (image_width - template_width + 1) * (image_height - template_height + 1)
+            # vf_pattern_match_gray_u8 over the whole frame: gray ROI (1 B) and two int64 prefix
+            # planes (16 B) per frame pixel, then float scores, packed keys, sorted keys and CUB's
+            # alternate key buffer (28 B) per response element. CUB's onesweep storage adds about
+            # 0.25 B per element on RTX 3090 (16384x13000), so 29 B keeps a measured margin. The
+            # template, histograms and bounded selected/output records are added on top.
+            anchor_scratch_bytes = (
+                image_width * image_height * 17
+                + response_elements * 29
+                + template_width * template_height
+                + 1 * MIB
+                + max_candidates * 32
+            )
     elif str((tile_config or {}).get("template_path", "")).strip():
         image_height, image_width = int(image_shape[0]), int(image_shape[1])
         search_width = min(_positive(tile_config.get("search_w"), image_width), image_width)

@@ -8,7 +8,7 @@ CPU-only 是完整支援的執行模式，也是結果正確性的基準。專�
 
 | 項目 | 現況 |
 |---|---|
-| 最新發行版 | [VisionFlow AOI v1.8.0](https://github.com/wjcudalearning/VisionFlow/releases/tag/v1.8.0)，Windows x64、CUDA `sm_86` |
+| 最新發行版 | [VisionFlow AOI v1.8.1](https://github.com/wjcudalearning/VisionFlow/releases/tag/v1.8.1)，Windows x64、CUDA `sm_86` |
 | 支援環境 | Windows 10／11、Python 3.13 |
 | 檢測方式 | 10 個傳統 CV Detector + 1 個 YOLOX Detector |
 | 操作入口 | CLI、PySide6 GUI、批次資料夾、資料夾監控、相機直連監控 |
