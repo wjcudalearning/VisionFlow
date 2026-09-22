@@ -7,7 +7,7 @@
 
 ## Traditional CV Tuning Tool
 
-這支獨立工具維持在 `contour_preprocess_tool/`，並沿用根目錄 `Todo.md` 作為唯一工作清單；不建立第二份 Todo。依 P0 → P1 → P2 順序執行，每一項完成後都必須保留既有完整解析度 CPU/OpenCV 語意及 Detector 匯出等價測試。
+這支獨立工具維持在 `contour_preprocess_tool/`，並沿用根目錄 `Todo.md` 作為唯一工作清單；不建立第二份 Todo。P0 已完成；後續依 P3 → P1 → P4 → P5 → P2 順序執行（P3 影響匯出 Detector 在產線的正確性與成本，最優先），每一項完成後都必須保留既有完整解析度 CPU/OpenCV 語意及 Detector 匯出等價測試。
 
 ### P0：可靠性
 
@@ -31,6 +31,39 @@
 - [ ] 顯示 preview debounce／處理中／已套用最新參數狀態，並能取消或忽略過期工作。
 - [ ] 記住最近使用的圖片、Recipe 與匯出位置；失效路徑安全忽略。
 - [ ] 匯出前顯示摘要、警告與完成後的下一步註冊入口。
+
+### P3：匯出 Detector 忠實度與產線執行路徑
+
+工具定位是「離線新增 Detector 的調參工具」：調參時看到的結果必須等於匯出 Detector 在 AOI pipeline 內的判定，且產線執行不得背負調參用的繪圖與複製成本。P3 優先於 P1／P2 未完成項目。
+
+- [ ] 在 engine 拆出不繪圖的 analysis 路徑（只產生 mask＋detections＋stats），完整 `process()` 改為 analysis＋繪圖；匯出的 `detect()` 改用 analysis 路徑。以測試證明兩條路徑 mask 逐像素、detections（shape／bbox／area／順序）完全相同。
+- [ ] 釐清並鎖定屏蔽區座標語意：調參時中心／邊緣屏蔽相對整張圖，匯出後在 AOI 是相對每個 tile／ROI（「使用影像中心」變成 tile 中心、邊緣屏蔽作用在每個 tile 邊緣）。需使用者決定：匯出時警告、限制只能用於整圖／單一 ROI，或改成可指定座標基準；決定後加 tile 與整圖判定對照測試。
+- [ ] 評估 tile 切割對結果的影響：跨 tile 邊界的缺陷會被切成多個 contour、面積縮小而漏過面積門檻。匯出 readiness 應比對 Recipe tile 尺寸與面積／邊長上限並提出警告。
+- [ ] 匯出 bundle 附帶 golden 回歸資料：記錄調參影像的檔名、尺寸與 SHA256、工具版本，以及該影像的 detections；產生可放進 `tests/` 的等價測試樣板，證明註冊後的 Detector 對同一張圖得到相同結果。
+- [ ] 驗證匯出 Detector 註冊後的 AOI 打包路徑：`detector_<id>.py` 在 runtime import `contour_preprocess_tool.engine`，需確認 `packaging/specs/VisionFlow AOI.spec` 收錄該套件，並讓 packaged `--smoke-test` 或測試能覆蓋一個產生的 Detector。
+
+### P4：離線調參效能與記憶體（大圖）
+
+- [ ] 分階段快取預覽：前處理 → 二值化 → 形態學 → 屏蔽 → contours → 形狀篩選／繪圖，每段以影響該段的參數子集為 key；只改形狀篩選或顯示參數時不重跑前處理與 `findContours`，並測試快取結果與完整重算逐像素相同、參數改動正確失效。
+- [ ] 移除 engine 多餘的整張圖複製（`original`／`current` 雙份複製、每步 `processed_gray = current.copy()`、灰階輸入仍複製的 `_gray()`、morphology／exclusion 的防禦性複製），以 16384×13000 合成圖記錄改善前後的峰值記憶體與耗時，輸出維持逐像素相同。
+- [ ] 預覽結果不再保留重複的 `original` 複本；限制預覽與儲存同時各持有一份全解析度結果的記憶體峰值（例如儲存時暫停預覽或共用結果）。
+- [ ] 儲存時若參數快照等於最新預覽結果，直接寫出現有 mask／annotated，不再重跑整條 pipeline。
+- [ ] 顯示轉換移出 GUI 執行緒並減少複製：改用 `QImage.Format_BGR888` 省掉 BGR→RGB、在 worker 內建立 QImage、每種檢視模式快取 pixmap，切換檢視不重新轉換。
+- [ ] 形狀篩選迴圈外先解析所有門檻值；自動模式（圓形 → 矩形 → 多邊形）共用同一個 contour 的 area／perimeter，不重複計算；contour 數量很大時量測改善幅度。
+- [ ] stats 記錄各階段耗時並顯示在狀態列，讓調參者知道哪個參數組合昂貴，並可預估匯出後在產線的 CPU 成本。
+- [ ] 局部 ROI 快速預覽：框選原圖區域以原解析度裁切運算（不縮小）加速迭代，再一鍵回到整圖確認；ROI 模式須明確提示中心／邊緣屏蔽的座標基準改變。
+
+### P5：離線調參工作流程與判讀輔助
+
+- [ ] 【缺陷】非「符合視窗」模式下每次預覽更新都會被 `update_view_transform()` 重設為 1:1，放大檢查細節時一改參數就跳回原比例；預覽更新必須保留使用者的縮放與平移。
+- [ ] 【缺陷】標註編號（D1／R1／C1…）依 contour 處理順序產生，但 `stats["detections"]` 事後依面積排序，圖上編號與清單順序不一致；統一編號規則並加測試。
+- [ ] Detection 清單表格：列出 shape、bbox、area、長寬比、填充率、圓度、頂點數；點選列時跳到並高亮對應 bbox。
+- [ ] 顯示被篩掉的 contour 與原因（面積過小／過大、長寬比、填充率、圓度、頂點數、非凸），可切換疊圖，讓調參者知道要放寬哪個門檻。
+- [ ] 游標像素探針：顯示座標，以及原圖 BGR、前處理灰階與 mask 在該點的值。
+- [ ] 前處理灰階直方圖，標出目前門檻值；Otsu 模式把實際計算出的門檻寫入 stats 並顯示。
+- [ ] 量測工具：在影像上拉線或框選取得像素長度、面積與寬高，直接作為面積／邊長／半徑門檻的依據。
+- [ ] 樣本集驗證：載入多張 OK／NG 樣本（資料夾或清單），以相同參數在背景批次處理且可取消，列出每張檢出數、PASS／NG 與預期標籤的比對（漏檢／過殺），並可點開單張檢視。
+- [ ] 單一參數掃描：在樣本集上掃描某參數範圍，顯示檢出數或漏檢／過殺隨參數的變化，協助選出穩定的門檻區間（依樣本集驗證完成後再做）。
 
 ## 開發原則
 
@@ -1037,6 +1070,7 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 
 ## 完成紀錄
 
+- [x] 2026-09-22：以「離線新增 Detector 的調參工具」角度審查 `contour_preprocess_tool/`，於 Traditional CV Tuning Tool 區段新增 P3（匯出 Detector 忠實度與產線執行路徑：不繪圖 analysis 路徑、tile／屏蔽座標語意、跨 tile 缺陷、golden 回歸資料、打包收錄）、P4（大圖效能與記憶體：分階段快取、移除多餘複製、儲存重用預覽、顯示轉換、形狀篩選、階段耗時、局部 ROI 預覽）與 P5（工作流程與判讀：縮放被重設及標註編號不一致兩項缺陷、Detection 表格、被篩除原因、像素探針、直方圖、量測、樣本集驗證、參數掃描），並調整執行順序為 P3 → P1 → P4 → P5 → P2。本次僅更新路線圖，未變更程式碼。
 - [x] 2026-09-22：建立 Traditional CV Tuning Tool 專屬 P0／P1／P2 路線於唯一根目錄 `Todo.md`，並依序完成 P0 全部可靠性工作及 P1 第一項拆分。新增 Qt-independent `TuningSessionState`，以深拷貝基準追蹤載入 Recipe／成功匯出 Detector 後的參數差異，視窗標題顯示修改狀態，關閉時確認捨棄，完整原圖仍在背景儲存時禁止關閉。preview 改以 request revision 與 active job ID 區分最新／過期結果，舊 worker 只負責結束生命週期，不再覆蓋新參數畫面或顯示過期錯誤，並立即收斂到最新快照。新增無 Qt 的 `DetectorExportValidator`，在建立 bundle 前集中檢查 ID、顯示名稱、輸出位置、既有資料夾、Recipe steps 與各組上下限；Recipe GUI 套用則先完整驗證未知欄位、選項、型別與 widget 範圍，全部通過後才修改控制項，避免失敗時留下半套用狀態。另將 preview/save QRunnable 與 signals 從 `app.py` 移至 `workers.py`；23 項調參工具專屬測試、完整 939 tests、compileall、CUDA source／ABI preflight、調參工具／主 GUI offscreen smoke、PyInstaller one-file 重建及 packaged `--version`／`--smoke-test`（exit 0）、`git diff --check` 均通過；未修改 CUDA source／header／ABI／DLL。
 
 - [x] 2026-09-22：**完成 Adaptive Mean 低顯存 CUDA 路徑並取代 padded integral 實作。** 舊路徑需一張 padded u8 與兩張 padded u64 plane；新路徑只用一張 `width×height` uint32 row-prefix plane，row scan 改用 CUB `BlockScan`，垂直視窗由 `32×8` 每像素 threads 以 uint64 累加，保留 `BORDER_REPLICATE`、OpenCV mean rounding、一般／反相 threshold 的 `ceil`／`floor` 語意。Gaussian 與 Adaptive Mean 依 plan 生命週期共用 uint32 scratch，context telemetry、resident working-set admission 與 profiler launch count同步調整；新增可重跑的 `gpu/benchmark_adaptive_mean.py`，以舊／新 DLL 暖機後交錯 A/B 並同時驗證 OpenCV bit-exact、native event 與 plan bytes。RTX 3090／Driver 610.62／CUDA 13.3／`sm_86` 50 次結果：3840×2160 block 35 的 plan 169,375,652→58,060,800 bytes（-65.7%）、native median 0.748→0.734 ms（-1.9%）；12000×2000 為 488,111,652→168,000,000 bytes（-65.6%）、2.119→1.919 ms（-9.4%）。完整 validator 新增 1×1 block 4105（box sum 超過 uint32）、單列、單欄、block 157 border／rounding 案例，全部 max diff 0；native ABI/plan/resident/ROI smoke、54 exports／dependency 檢查、927 tests、compileall、CUDA preflight、CLI 合成 NG smoke 與 `git diff --check` 通過。DLL 只生成於 ignored build／runtime 路徑，未納入 Git。
