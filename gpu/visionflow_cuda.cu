@@ -6,6 +6,7 @@
 // gpu/cuda_project.json declares /Zc:preprocessor for both native targets and
 // gpu/build_cuda_dll.ps1 passes it through -Xcompiler.
 #include <cub/device/device_radix_sort.cuh>
+#include <cub/block/block_scan.cuh>
 // which gpu/cuda_project.json now opts into for the whole project.
 // vf_cnr_candidates_u8_roi compacts foreground pixels and components, groups pixels by component
 // with a stable radix sort, and prefix-sums per-component offsets with the same CUB toolkit copy.
@@ -27,9 +28,7 @@
 namespace {
 constexpr int BLOCK_X = 16;
 constexpr int BLOCK_Y = 16;
-constexpr int SCAN_THREADS = 256;
-constexpr int TRANSPOSE_TILE = 32;
-constexpr int TRANSPOSE_ROWS = 8;
+constexpr int ADAPTIVE_SCAN_THREADS = 256;
 constexpr int MAX_GAUSSIAN_KERNEL = 127;
 constexpr int TIMING_EVENT_COUNT = 12;
 enum TimingEventIndex {
@@ -70,10 +69,10 @@ constexpr int MATCH_PLANE_COUNT = 2;
 struct PersistentContext {
     uint8_t* u8[5]{};
     size_t u8_capacity[5]{};
+    // Shared uint32 plan scratch. Gaussian uses it for its fixed-point horizontal pass; Adaptive
+    // Mean reuses it for exact uint32 row prefixes after Gaussian has finished.
     uint32_t* gaussian_buffer = nullptr;
     size_t gaussian_capacity = 0;
-    unsigned long long* u64[2]{};
-    size_t u64_capacity[2]{};
     std::vector<uint8_t*> dag_u8;
     std::vector<size_t> dag_u8_capacity;
     uint8_t* resident_u8 = nullptr;
@@ -84,7 +83,7 @@ struct PersistentContext {
     uint64_t resident_generation = 0;
     // Template Anchor Grid scratch: three grow-only int64 planes of output_width x output_height,
     // one int64 plane of template column sums, and the candidate/result slots. Kept separate from
-    // u64[] because those are plan scratch and reserve_device only grows.
+    // plan scratch because those allocations are grow-only.
     long long* match_plane[MATCH_PLANE_COUNT]{};
     size_t match_plane_capacity[MATCH_PLANE_COUNT]{};
     long long* match_candidates = nullptr;
@@ -118,7 +117,7 @@ struct PersistentContext {
     bool contour_result_valid = false;
     // Exact-median scratch: the uploaded float values, their monotone-orderable uint32 order keys,
     // the radix-sorted keys, the cub temporary storage and a one-word NaN-presence flag. All
-    // grow-only and deliberately separate from u8[]/u64[], which are plan scratch.
+    // grow-only and deliberately separate from the shared plan scratch.
     float* median_values = nullptr;
     size_t median_value_capacity = 0;
     uint32_t* median_keys = nullptr;
@@ -131,7 +130,7 @@ struct PersistentContext {
     size_t median_nan_flag_capacity = 0;
     // float32 Gaussian scratch for the optional vf_gaussian_blur_f32 export: the uploaded source
     // rectangle, the horizontal intermediate and the packed result that is copied back. Grow-only
-    // and deliberately separate from u8[]/u64[], which are plan scratch that reserve_device only
+    // and deliberately separate from the plan scratch that reserve_device only
     // grows, so sharing them would mix a plan's buffer contents with this operator's input.
     float* gaussian_f32_input = nullptr;
     size_t gaussian_f32_input_capacity = 0;
@@ -262,7 +261,6 @@ struct PersistentContext {
     ~PersistentContext() {
         for (void* pointer : u8) visionflow_cuda::free_device(pointer);
         visionflow_cuda::free_device(gaussian_buffer);
-        for (void* pointer : u64) visionflow_cuda::free_device(pointer);
         for (void* pointer : dag_u8) visionflow_cuda::free_device(pointer);
         for (long long* plane : match_plane) visionflow_cuda::free_device(plane);
         visionflow_cuda::free_device(match_candidates);
@@ -342,9 +340,6 @@ ContextMemoryBreakdown context_memory_breakdown(const PersistentContext* context
     ContextMemoryBreakdown memory{};
     for (size_t capacity : context->u8_capacity) memory.plan_bytes += capacity_bytes(capacity, 1);
     memory.plan_bytes += capacity_bytes(context->gaussian_capacity, sizeof(uint32_t));
-    for (size_t capacity : context->u64_capacity) {
-        memory.plan_bytes += capacity_bytes(capacity, sizeof(unsigned long long));
-    }
     for (size_t capacity : context->dag_u8_capacity) memory.plan_bytes += capacity_bytes(capacity, 1);
     memory.resident_bytes = capacity_bytes(context->resident_capacity, 1);
 
@@ -752,29 +747,20 @@ int adaptive_layout(
     int width,
     int height,
     int block,
-    int* radius_out,
-    int* padded_width_out,
-    int* padded_height_out,
-    size_t* padded_count_out) {
-    if (width <= 0 || height <= 0 || block < 3 || block % 2 == 0 || radius_out == nullptr ||
-        padded_width_out == nullptr || padded_height_out == nullptr || padded_count_out == nullptr) {
+    size_t* scratch_count_out) {
+    if (width <= 0 || height <= 0 || block < 3 || block % 2 == 0 ||
+        scratch_count_out == nullptr) {
         return VF_CUDA_INVALID_ARGUMENT;
     }
-    int radius = block / 2;
-    if (radius > (INT_MAX - width) / 2 || radius > (INT_MAX - height) / 2) {
+    if (static_cast<unsigned long long>(width) > UINT_MAX / 255ULL ||
+        static_cast<unsigned long long>(block) > UINT_MAX / 255ULL ||
+        static_cast<unsigned long long>(block) * block > ULLONG_MAX / 255ULL ||
+        static_cast<size_t>(width) > SIZE_MAX / static_cast<size_t>(height)) {
         return VF_CUDA_INVALID_ARGUMENT;
     }
-    int padded_width = width + radius * 2;
-    int padded_height = height + radius * 2;
-    if (static_cast<size_t>(padded_width) > SIZE_MAX / static_cast<size_t>(padded_height)) {
-        return VF_CUDA_INVALID_ARGUMENT;
-    }
-    size_t padded_count = static_cast<size_t>(padded_width) * static_cast<size_t>(padded_height);
-    if (padded_count > SIZE_MAX / sizeof(unsigned long long)) return VF_CUDA_INVALID_ARGUMENT;
-    *radius_out = radius;
-    *padded_width_out = padded_width;
-    *padded_height_out = padded_height;
-    *padded_count_out = padded_count;
+    size_t scratch_count = static_cast<size_t>(width) * static_cast<size_t>(height);
+    if (scratch_count > SIZE_MAX / sizeof(uint32_t)) return VF_CUDA_INVALID_ARGUMENT;
+    *scratch_count_out = scratch_count;
     return VF_CUDA_OK;
 }
 
@@ -840,13 +826,13 @@ int validate_plan_desc(
                 }
                 break;
             case VF_PLAN_ADAPTIVE_MEAN: {
-                int radius = 0, padded_width = 0, padded_height = 0;
-                size_t padded_count = 0;
+                size_t scratch_count = 0;
                 if (channels != 1 || op.int_params[1] < 0 || op.int_params[1] > 255 ||
                     (op.int_params[2] != 0 && op.int_params[2] != 1) ||
                     !std::isfinite(op.float_params[0]) ||
-                    adaptive_layout(current_width, current_height, op.int_params[0], &radius, &padded_width,
-                                    &padded_height, &padded_count) != VF_CUDA_OK) {
+                    adaptive_layout(
+                        current_width, current_height, op.int_params[0], &scratch_count) !=
+                        VF_CUDA_OK) {
                     write_reason(reason, reason_capacity, "AdaptiveMean shape or parameters are unsupported");
                     return VF_CUDA_UNSUPPORTED;
                 }
@@ -945,13 +931,12 @@ int validate_dag_plan_desc(
                 }
                 break;
             case VF_PLAN_ADAPTIVE_MEAN: {
-                int radius = 0, padded_width = 0, padded_height = 0;
-                size_t padded_count = 0;
+                size_t scratch_count = 0;
                 if (input_channels != 1 || op.int_params[1] < 0 || op.int_params[1] > 255 ||
                     (op.int_params[2] != 0 && op.int_params[2] != 1) ||
                     !std::isfinite(op.float_params[0]) ||
-                    adaptive_layout(width, height, op.int_params[0], &radius, &padded_width,
-                                    &padded_height, &padded_count) != VF_CUDA_OK) {
+                    adaptive_layout(
+                        width, height, op.int_params[0], &scratch_count) != VF_CUDA_OK) {
                     write_reason(reason, reason_capacity, "DAG AdaptiveMean parameters are unsupported");
                     return VF_CUDA_UNSUPPORTED;
                 }
@@ -996,24 +981,26 @@ int reserve_dag_plan_buffers(PersistentContext* context, const NativeDagPlan& pl
         return VF_CUDA_ALLOCATION_FAILED;
     }
     const size_t pixels = static_cast<size_t>(plan.width) * plan.height;
-    bool needs_gaussian = false;
     bool needs_morph_scratch = false;
-    size_t maximum_padded_count = 0;
+    size_t maximum_u32_count = 0;
     for (size_t index = 0; index < plan.operators.size(); ++index) {
         int result = reserve_device(
             &context->dag_u8[index], &context->dag_u8_capacity[index],
             pixels * static_cast<size_t>(plan.node_channels[index]), &context->allocation_count);
         if (result != VF_CUDA_OK) return result;
         const VfPlanOperatorV1& op = plan.operators[index];
-        needs_gaussian = needs_gaussian || op.kind == VF_PLAN_GAUSSIAN;
+        if (op.kind == VF_PLAN_GAUSSIAN) {
+            maximum_u32_count = std::max(
+                maximum_u32_count, pixels * static_cast<size_t>(plan.node_channels[index]));
+        }
+        if (op.kind == VF_PLAN_ADAPTIVE_MEAN) {
+            maximum_u32_count = std::max(maximum_u32_count, pixels);
+        }
         needs_morph_scratch = needs_morph_scratch || op.kind == VF_PLAN_MORPHOLOGY;
         if (op.kind == VF_PLAN_ADAPTIVE_MEAN) {
-            int radius = 0, padded_width = 0, padded_height = 0;
-            size_t padded_count = 0;
-            result = adaptive_layout(plan.width, plan.height, op.int_params[0], &radius,
-                                     &padded_width, &padded_height, &padded_count);
+            size_t scratch_count = 0;
+            result = adaptive_layout(plan.width, plan.height, op.int_params[0], &scratch_count);
             if (result != VF_CUDA_OK) return result;
-            maximum_padded_count = std::max(maximum_padded_count, padded_count);
         }
     }
     int result = reserve_device(&context->u8[0], &context->u8_capacity[0],
@@ -1021,15 +1008,9 @@ int reserve_dag_plan_buffers(PersistentContext* context, const NativeDagPlan& pl
                                 &context->allocation_count);
     if (result == VF_CUDA_OK && needs_morph_scratch) result = reserve_device(
         &context->u8[4], &context->u8_capacity[4], pixels * 3, &context->allocation_count);
-    if (result == VF_CUDA_OK && needs_gaussian) result = reserve_device(
+    if (result == VF_CUDA_OK && maximum_u32_count > 0) result = reserve_device(
         &context->gaussian_buffer, &context->gaussian_capacity,
-        pixels * 3, &context->allocation_count);
-    if (result == VF_CUDA_OK && maximum_padded_count > 0) result = reserve_device(
-        &context->u8[3], &context->u8_capacity[3], maximum_padded_count, &context->allocation_count);
-    if (result == VF_CUDA_OK && maximum_padded_count > 0) result = reserve_device(
-        &context->u64[0], &context->u64_capacity[0], maximum_padded_count, &context->allocation_count);
-    if (result == VF_CUDA_OK && maximum_padded_count > 0) result = reserve_device(
-        &context->u64[1], &context->u64_capacity[1], maximum_padded_count, &context->allocation_count);
+        maximum_u32_count, &context->allocation_count);
     return result;
 }
 
@@ -1038,9 +1019,8 @@ int reserve_plan_buffers(PersistentContext* context, const NativePlan& plan) {
     const size_t input_pixels = static_cast<size_t>(plan.width) * plan.height;
     size_t maximum_pixels = input_pixels;
     int maximum_channels = plan.input_channels;
-    bool needs_gaussian = false;
     bool needs_morph_scratch = false;
-    size_t maximum_padded_count = 0;
+    size_t maximum_u32_count = 0;
     int channels = plan.input_channels;
     int current_width = plan.width;
     int current_height = plan.height;
@@ -1053,15 +1033,19 @@ int reserve_plan_buffers(PersistentContext* context, const NativePlan& plan) {
         const size_t current_pixels = static_cast<size_t>(current_width) * current_height;
         maximum_pixels = std::max(maximum_pixels, current_pixels);
         maximum_channels = std::max(maximum_channels, channels);
-        needs_gaussian = needs_gaussian || op.kind == VF_PLAN_GAUSSIAN;
+        if (op.kind == VF_PLAN_GAUSSIAN) {
+            maximum_u32_count = std::max(
+                maximum_u32_count, current_pixels * static_cast<size_t>(channels));
+        }
+        if (op.kind == VF_PLAN_ADAPTIVE_MEAN) {
+            maximum_u32_count = std::max(maximum_u32_count, current_pixels);
+        }
         needs_morph_scratch = needs_morph_scratch || op.kind == VF_PLAN_MORPHOLOGY;
         if (op.kind == VF_PLAN_ADAPTIVE_MEAN) {
-            int radius = 0, padded_width = 0, padded_height = 0;
-            size_t padded_count = 0;
-            int result = adaptive_layout(current_width, current_height, op.int_params[0], &radius,
-                                         &padded_width, &padded_height, &padded_count);
+            size_t scratch_count = 0;
+            int result = adaptive_layout(
+                current_width, current_height, op.int_params[0], &scratch_count);
             if (result != VF_CUDA_OK) return result;
-            maximum_padded_count = std::max(maximum_padded_count, padded_count);
         }
     }
     const size_t image_bytes = maximum_pixels * static_cast<size_t>(maximum_channels);
@@ -1073,18 +1057,9 @@ int reserve_plan_buffers(PersistentContext* context, const NativePlan& plan) {
         &context->u8[2], &context->u8_capacity[2], image_bytes, &context->allocation_count);
     if (result == VF_CUDA_OK && needs_morph_scratch) result = reserve_device(
         &context->u8[4], &context->u8_capacity[4], image_bytes, &context->allocation_count);
-    if (result == VF_CUDA_OK && needs_gaussian) result = reserve_device(
+    if (result == VF_CUDA_OK && maximum_u32_count > 0) result = reserve_device(
         &context->gaussian_buffer, &context->gaussian_capacity,
-        maximum_pixels * static_cast<size_t>(maximum_channels), &context->allocation_count);
-    if (result == VF_CUDA_OK && maximum_padded_count > 0) result = reserve_device(
-        &context->u8[3], &context->u8_capacity[3], maximum_padded_count,
-        &context->allocation_count);
-    if (result == VF_CUDA_OK && maximum_padded_count > 0) result = reserve_device(
-        &context->u64[0], &context->u64_capacity[0], maximum_padded_count,
-        &context->allocation_count);
-    if (result == VF_CUDA_OK && maximum_padded_count > 0) result = reserve_device(
-        &context->u64[1], &context->u64_capacity[1], maximum_padded_count,
-        &context->allocation_count);
+        maximum_u32_count, &context->allocation_count);
     return result;
 }
 
@@ -1287,126 +1262,72 @@ __global__ void threshold_kernel(const uint8_t* src, uint8_t* dst, int count, in
     dst[i] = static_cast<uint8_t>((invert ? !high : high) ? max_value : 0);
 }
 
-__global__ void replicate_border_kernel(
+// Exact separable box mean with BORDER_REPLICATE. A block scans each source row into a uint32
+// prefix plane; one thread per output pixel accumulates its vertical window from those prefixes.
+// Adjacent threads read adjacent row-prefix values, preserving coalescing without a second plane.
+// The row prefix fits uint32 under adaptive_layout's width limit and the box sum remains uint64 so
+// block*block*255 cannot overflow. This replaces padded pixels plus two padded uint64 integral
+// planes with one width*height uint32 plane while retaining parallel horizontal work.
+__global__ void adaptive_row_prefix_u32_kernel(
     const uint8_t* src,
-    uint8_t* padded,
-    int width,
-    int height,
-    int padded_width,
-    int padded_height,
-    int radius) {
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= padded_width || y >= padded_height) return;
-    int source_x = max(0, min(width - 1, x - radius));
-    int source_y = max(0, min(height - 1, y - radius));
-    padded[y * padded_width + x] = src[source_y * width + source_x];
-}
-
-__global__ void row_prefix_u8_kernel(
-    const uint8_t* src,
-    unsigned long long* prefix,
+    uint32_t* prefix,
     int width,
     int height) {
     int row = blockIdx.x;
     int lane = threadIdx.x;
     if (row >= height) return;
-    __shared__ unsigned long long scan[SCAN_THREADS];
-    __shared__ unsigned long long carry;
-    __shared__ unsigned long long chunk_carry;
+    using BlockScan = cub::BlockScan<uint32_t, ADAPTIVE_SCAN_THREADS>;
+    __shared__ typename BlockScan::TempStorage scan_storage;
+    __shared__ uint32_t carry;
+    __shared__ uint32_t chunk_carry;
     if (lane == 0) carry = 0;
     __syncthreads();
-    for (int base = 0; base < width; base += SCAN_THREADS) {
+    for (int base = 0; base < width; base += ADAPTIVE_SCAN_THREADS) {
         int column = base + lane;
-        scan[lane] = column < width ? static_cast<unsigned long long>(src[row * width + column]) : 0ULL;
-        __syncthreads();
-        for (int offset = 1; offset < SCAN_THREADS; offset <<= 1) {
-            unsigned long long add = lane >= offset ? scan[lane - offset] : 0ULL;
-            __syncthreads();
-            scan[lane] += add;
-            __syncthreads();
-        }
+        uint32_t value = column < width ? src[static_cast<size_t>(row) * width + column] : 0U;
+        uint32_t scanned = 0;
+        uint32_t aggregate = 0;
+        BlockScan(scan_storage).InclusiveSum(value, scanned, aggregate);
         if (lane == 0) chunk_carry = carry;
         __syncthreads();
-        if (column < width) prefix[row * width + column] = scan[lane] + chunk_carry;
+        if (column < width) {
+            prefix[static_cast<size_t>(row) * width + column] = scanned + chunk_carry;
+        }
         __syncthreads();
-        int valid = min(SCAN_THREADS, width - base);
-        if (lane == 0) carry = chunk_carry + scan[valid - 1];
+        if (lane == 0) carry = chunk_carry + aggregate;
         __syncthreads();
     }
 }
 
-__global__ void transpose_u64_kernel(
-    const unsigned long long* src,
-    unsigned long long* dst,
+__device__ __forceinline__ uint32_t adaptive_horizontal_box_sum(
+    const uint8_t* src,
+    const uint32_t* prefix,
     int width,
-    int height) {
-    __shared__ unsigned long long tile[TRANSPOSE_TILE][TRANSPOSE_TILE + 1];
-    int x = blockIdx.x * TRANSPOSE_TILE + threadIdx.x;
-    int y = blockIdx.y * TRANSPOSE_TILE + threadIdx.y;
-    for (int offset = 0; offset < TRANSPOSE_TILE; offset += TRANSPOSE_ROWS) {
-        if (x < width && y + offset < height) {
-            tile[threadIdx.y + offset][threadIdx.x] = src[(y + offset) * width + x];
-        }
-    }
-    __syncthreads();
-    x = blockIdx.y * TRANSPOSE_TILE + threadIdx.x;
-    y = blockIdx.x * TRANSPOSE_TILE + threadIdx.y;
-    for (int offset = 0; offset < TRANSPOSE_TILE; offset += TRANSPOSE_ROWS) {
-        if (x < height && y + offset < width) {
-            dst[(y + offset) * height + x] = tile[threadIdx.x][threadIdx.y + offset];
-        }
-    }
-}
-
-__global__ void row_prefix_u64_inplace_kernel(
-    unsigned long long* values,
-    int width,
-    int height) {
-    int row = blockIdx.x;
-    int lane = threadIdx.x;
-    if (row >= height) return;
-    __shared__ unsigned long long scan[SCAN_THREADS];
-    __shared__ unsigned long long carry;
-    __shared__ unsigned long long chunk_carry;
-    if (lane == 0) carry = 0;
-    __syncthreads();
-    for (int base = 0; base < width; base += SCAN_THREADS) {
-        int column = base + lane;
-        scan[lane] = column < width ? values[row * width + column] : 0ULL;
-        __syncthreads();
-        for (int offset = 1; offset < SCAN_THREADS; offset <<= 1) {
-            unsigned long long add = lane >= offset ? scan[lane - offset] : 0ULL;
-            __syncthreads();
-            scan[lane] += add;
-            __syncthreads();
-        }
-        if (lane == 0) chunk_carry = carry;
-        __syncthreads();
-        if (column < width) values[row * width + column] = scan[lane] + chunk_carry;
-        __syncthreads();
-        int valid = min(SCAN_THREADS, width - base);
-        if (lane == 0) carry = chunk_carry + scan[valid - 1];
-        __syncthreads();
-    }
-}
-
-__device__ unsigned long long integral_value_transposed(
-    const unsigned long long* integral_transposed,
-    int padded_height,
+    int row,
     int x,
-    int y) {
-    if (x < 0 || y < 0) return 0ULL;
-    return integral_transposed[x * padded_height + y];
+    int radius) {
+    int left = x - radius;
+    int right = x + radius;
+    int clamped_left = max(0, left);
+    int clamped_right = min(width - 1, right);
+    size_t row_offset = static_cast<size_t>(row) * width;
+    uint32_t sum = prefix[row_offset + clamped_right];
+    if (clamped_left > 0) sum -= prefix[row_offset + clamped_left - 1];
+    if (left < 0) {
+        sum += static_cast<uint32_t>(-left) * src[row_offset];
+    }
+    if (right >= width) {
+        sum += static_cast<uint32_t>(right - width + 1) * src[row_offset + width - 1];
+    }
+    return sum;
 }
 
-__global__ void adaptive_integral_kernel(
+__global__ void adaptive_vertical_threshold_kernel(
     const uint8_t* src,
-    const unsigned long long* integral_transposed,
+    const uint32_t* prefix,
     uint8_t* dst,
     int width,
     int height,
-    int padded_height,
     int block_size,
     float c,
     int max_value,
@@ -1414,25 +1335,45 @@ __global__ void adaptive_integral_kernel(
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= width || y >= height) return;
-    int x0 = x;
-    int y0 = y;
-    int x1 = x + block_size - 1;
-    int y1 = y + block_size - 1;
-    unsigned long long bottom_right =
-        integral_value_transposed(integral_transposed, padded_height, x1, y1);
-    unsigned long long above =
-        integral_value_transposed(integral_transposed, padded_height, x1, y0 - 1);
-    unsigned long long left =
-        integral_value_transposed(integral_transposed, padded_height, x0 - 1, y1);
-    unsigned long long above_left =
-        integral_value_transposed(integral_transposed, padded_height, x0 - 1, y0 - 1);
-    unsigned long long sum = (bottom_right + above_left) - (above + left);
+    int radius = block_size / 2;
+    unsigned long long sum = 0;
+    for (int offset = -radius; offset <= radius; ++offset) {
+        int row = max(0, min(height - 1, y + offset));
+        sum += adaptive_horizontal_box_sum(src, prefix, width, row, x, radius);
+    }
     unsigned long long area = static_cast<unsigned long long>(block_size) * block_size;
     int mean = static_cast<int>((sum + area / 2ULL) / area);
     bool selected = invert
-        ? static_cast<int>(src[y * width + x]) <= mean - static_cast<int>(floorf(c))
-        : static_cast<int>(src[y * width + x]) > mean - static_cast<int>(ceilf(c));
-    dst[y * width + x] = static_cast<uint8_t>(selected ? max_value : 0);
+        ? static_cast<int>(src[static_cast<size_t>(y) * width + x]) <=
+            mean - static_cast<int>(floorf(c))
+        : static_cast<int>(src[static_cast<size_t>(y) * width + x]) >
+            mean - static_cast<int>(ceilf(c));
+    dst[static_cast<size_t>(y) * width + x] =
+        static_cast<uint8_t>(selected ? max_value : 0);
+}
+
+void launch_adaptive_mean(
+    const uint8_t* src,
+    uint32_t* prefix,
+    uint8_t* dst,
+    int width,
+    int height,
+    int block_size,
+    float c,
+    int max_value,
+    int invert,
+    cudaStream_t stream = nullptr) {
+    constexpr int threads = ADAPTIVE_SCAN_THREADS;
+    adaptive_row_prefix_u32_kernel<<<height, threads, 0, stream>>>(
+        src, prefix, width, height);
+    constexpr int vertical_block_x = 32;
+    constexpr int vertical_block_y = 8;
+    dim3 block(vertical_block_x, vertical_block_y);
+    dim3 grid(
+        (width + vertical_block_x - 1) / vertical_block_x,
+        (height + vertical_block_y - 1) / vertical_block_y);
+    adaptive_vertical_threshold_kernel<<<grid, block, 0, stream>>>(
+        src, prefix, dst, width, height, block_size, c, max_value, invert);
 }
 
 __global__ void morph_kernel(const uint8_t* src, uint8_t* dst, int width, int height, int channels, int radius, int dilate) {
@@ -2659,26 +2600,14 @@ static int execute_linear_plan_device(
             case VF_PLAN_ADAPTIVE_MEAN: {
                 context->timing_has_adaptive = true;
                 record_timing_event(context, TIMING_ADAPTIVE_START);
-                int radius = 0, padded_width = 0, padded_height = 0;
-                size_t padded_count = 0;
-                int result = adaptive_layout(width, height, op.int_params[0], &radius, &padded_width,
-                                             &padded_height, &padded_count);
+                size_t scratch_count = 0;
+                int result = adaptive_layout(
+                    width, height, op.int_params[0], &scratch_count);
                 if (result != VF_CUDA_OK) return result;
-                replicate_border_kernel<<<grid2d(padded_width, padded_height), dim3(BLOCK_X, BLOCK_Y), 0, context->stream>>>(
-                    current, context->u8[3], width, height, padded_width, padded_height, radius);
-                row_prefix_u8_kernel<<<padded_height, SCAN_THREADS, 0, context->stream>>>(
-                    context->u8[3], context->u64[0], padded_width, padded_height);
-                dim3 transpose_block(TRANSPOSE_TILE, TRANSPOSE_ROWS);
-                dim3 transpose_grid(
-                    (padded_width + TRANSPOSE_TILE - 1) / TRANSPOSE_TILE,
-                    (padded_height + TRANSPOSE_TILE - 1) / TRANSPOSE_TILE);
-                transpose_u64_kernel<<<transpose_grid, transpose_block, 0, context->stream>>>(
-                    context->u64[0], context->u64[1], padded_width, padded_height);
-                row_prefix_u64_inplace_kernel<<<padded_width, SCAN_THREADS, 0, context->stream>>>(
-                    context->u64[1], padded_height, padded_width);
-                adaptive_integral_kernel<<<grid2d(width, height), dim3(BLOCK_X, BLOCK_Y), 0, context->stream>>>(
-                    current, context->u64[1], next, width, height, padded_height,
-                    op.int_params[0], op.float_params[0], op.int_params[1], op.int_params[2]);
+                launch_adaptive_mean(
+                    current, context->gaussian_buffer, next, width, height,
+                    op.int_params[0], op.float_params[0], op.int_params[1], op.int_params[2],
+                    context->stream);
                 record_timing_event(context, TIMING_ADAPTIVE_END);
                 current = next;
                 break;
@@ -2780,26 +2709,14 @@ static int execute_dag_plan_device(
             case VF_PLAN_ADAPTIVE_MEAN: {
                 context->timing_has_adaptive = true;
                 record_timing_event(context, TIMING_ADAPTIVE_START);
-                int radius = 0, padded_width = 0, padded_height = 0;
-                size_t padded_count = 0;
-                int result = adaptive_layout(width, height, op.int_params[0], &radius, &padded_width,
-                                             &padded_height, &padded_count);
+                size_t scratch_count = 0;
+                int result = adaptive_layout(
+                    width, height, op.int_params[0], &scratch_count);
                 if (result != VF_CUDA_OK) return result;
-                replicate_border_kernel<<<grid2d(padded_width, padded_height), dim3(BLOCK_X, BLOCK_Y), 0, context->stream>>>(
-                    input, context->u8[3], width, height, padded_width, padded_height, radius);
-                row_prefix_u8_kernel<<<padded_height, SCAN_THREADS, 0, context->stream>>>(
-                    context->u8[3], context->u64[0], padded_width, padded_height);
-                dim3 transpose_block(TRANSPOSE_TILE, TRANSPOSE_ROWS);
-                dim3 transpose_grid(
-                    (padded_width + TRANSPOSE_TILE - 1) / TRANSPOSE_TILE,
-                    (padded_height + TRANSPOSE_TILE - 1) / TRANSPOSE_TILE);
-                transpose_u64_kernel<<<transpose_grid, transpose_block, 0, context->stream>>>(
-                    context->u64[0], context->u64[1], padded_width, padded_height);
-                row_prefix_u64_inplace_kernel<<<padded_width, SCAN_THREADS, 0, context->stream>>>(
-                    context->u64[1], padded_height, padded_width);
-                adaptive_integral_kernel<<<grid2d(width, height), dim3(BLOCK_X, BLOCK_Y), 0, context->stream>>>(
-                    input, context->u64[1], output, width, height, padded_height,
-                    op.int_params[0], op.float_params[0], op.int_params[1], op.int_params[2]);
+                launch_adaptive_mean(
+                    input, context->gaussian_buffer, output, width, height,
+                    op.int_params[0], op.float_params[0], op.int_params[1], op.int_params[2],
+                    context->stream);
                 record_timing_event(context, TIMING_ADAPTIVE_END);
                 values[index] = output;
                 break;
@@ -3721,52 +3638,25 @@ VF_CUDA_API int vf_adaptive_mean_u8(const uint8_t* src,int w,int h,int stride,in
         max_value < 0 || max_value > 255 || !std::isfinite(c)) {
         return VF_CUDA_INVALID_ARGUMENT;
     }
-    int radius = 0, padded_width = 0, padded_height = 0;
-    size_t padded_count = 0;
-    int result = adaptive_layout(
-        w, h, block, &radius, &padded_width, &padded_height, &padded_count);
+    size_t scratch_count = 0;
+    int result = adaptive_layout(w, h, block, &scratch_count);
     if (result != VF_CUDA_OK) return result;
     uint8_t *ds = nullptr, *dd = nullptr;
-    uint8_t* padded = nullptr;
-    unsigned long long* row_prefix = nullptr;
-    unsigned long long* integral_transposed = nullptr;
+    uint32_t* horizontal = nullptr;
     result = alloc_copy(src, w, h, stride, 1, &ds);
     if (result != VF_CUDA_OK) return result;
     result = visionflow_cuda::allocate_bytes(&dd, static_cast<size_t>(w) * h);
     if (result != VF_CUDA_OK) { visionflow_cuda::free_device(ds); return result; }
-    result = visionflow_cuda::allocate_bytes(&padded, padded_count);
-    if (result != VF_CUDA_OK) {
-        visionflow_cuda::free_device(dd);
-        visionflow_cuda::free_device(ds);
-        return result;
-    }
-    cudaError_t error = cudaMalloc(&row_prefix, padded_count * sizeof(unsigned long long));
-    if (error == cudaSuccess) error = cudaMalloc(&integral_transposed, padded_count * sizeof(unsigned long long));
+    cudaError_t error = cudaMalloc(&horizontal, scratch_count * sizeof(uint32_t));
     if (error != cudaSuccess) {
-        visionflow_cuda::free_device(integral_transposed);
-        visionflow_cuda::free_device(row_prefix);
-        visionflow_cuda::free_device(padded);
+        visionflow_cuda::free_device(horizontal);
         visionflow_cuda::free_device(dd);
         visionflow_cuda::free_device(ds);
         return cuda_result(error);
     }
-    replicate_border_kernel<<<grid2d(padded_width, padded_height), dim3(BLOCK_X, BLOCK_Y)>>>(
-        ds, padded, w, h, padded_width, padded_height, radius);
-    row_prefix_u8_kernel<<<padded_height, SCAN_THREADS>>>(padded, row_prefix, padded_width, padded_height);
-    dim3 transpose_block(TRANSPOSE_TILE, TRANSPOSE_ROWS);
-    dim3 transpose_grid(
-        (padded_width + TRANSPOSE_TILE - 1) / TRANSPOSE_TILE,
-        (padded_height + TRANSPOSE_TILE - 1) / TRANSPOSE_TILE);
-    transpose_u64_kernel<<<transpose_grid, transpose_block>>>(
-        row_prefix, integral_transposed, padded_width, padded_height);
-    row_prefix_u64_inplace_kernel<<<padded_width, SCAN_THREADS>>>(
-        integral_transposed, padded_height, padded_width);
-    adaptive_integral_kernel<<<grid2d(w, h), dim3(BLOCK_X, BLOCK_Y)>>>(
-        ds, integral_transposed, dd, w, h, padded_height, block, c, max_value, invert);
+    launch_adaptive_mean(ds, horizontal, dd, w, h, block, c, max_value, invert);
     result = visionflow_cuda::kernel_result();
-    visionflow_cuda::free_device(integral_transposed);
-    visionflow_cuda::free_device(row_prefix);
-    visionflow_cuda::free_device(padded);
+    visionflow_cuda::free_device(horizontal);
     if (result == VF_CUDA_OK) result = copy_back_free(dst, dstride, w, h, 1, dd);
     else visionflow_cuda::free_device(dd);
     visionflow_cuda::free_device(ds);
@@ -3803,16 +3693,12 @@ VF_CUDA_API int vf_preprocess_401_2_u8(
     int result = prepare_gaussian_weights(
         gaussian_kernel, &radius, persistent->stream);
     if (result != VF_CUDA_OK) return result;
-    int adaptive_radius = 0, padded_width = 0, padded_height = 0;
-    size_t padded_count = 0;
+    size_t adaptive_scratch_count = 0;
     result = adaptive_layout(
         w,
         h,
         adaptive_block,
-        &adaptive_radius,
-        &padded_width,
-        &padded_height,
-        &padded_count);
+        &adaptive_scratch_count);
     if (result != VF_CUDA_OK) return result;
 
     result = reserve_device(
@@ -3827,27 +3713,9 @@ VF_CUDA_API int vf_preprocess_401_2_u8(
     }
     if (result == VF_CUDA_OK) {
         result = reserve_device(
-            &persistent->u8[3], &persistent->u8_capacity[3], padded_count, &persistent->allocation_count);
-    }
-    if (result == VF_CUDA_OK) {
-        result = reserve_device(
             &persistent->gaussian_buffer,
             &persistent->gaussian_capacity,
-            pixel_count,
-            &persistent->allocation_count);
-    }
-    if (result == VF_CUDA_OK) {
-        result = reserve_device(
-            &persistent->u64[0],
-            &persistent->u64_capacity[0],
-            padded_count,
-            &persistent->allocation_count);
-    }
-    if (result == VF_CUDA_OK) {
-        result = reserve_device(
-            &persistent->u64[1],
-            &persistent->u64_capacity[1],
-            padded_count,
+            std::max(pixel_count, adaptive_scratch_count),
             &persistent->allocation_count);
     }
     if (result != VF_CUDA_OK) return result;
@@ -3874,35 +3742,17 @@ VF_CUDA_API int vf_preprocess_401_2_u8(
         gray, persistent->gaussian_buffer, w, h, 1, radius);
     gaussian_vertical_kernel<<<grid2d(w, h), dim3(BLOCK_X, BLOCK_Y), 0, persistent->stream>>>(
         persistent->gaussian_buffer, gray, w, h, 1, radius);
-    replicate_border_kernel<<<grid2d(padded_width, padded_height), dim3(BLOCK_X, BLOCK_Y), 0, persistent->stream>>>(
+    launch_adaptive_mean(
         gray,
-        persistent->u8[3],
-        w,
-        h,
-        padded_width,
-        padded_height,
-        adaptive_radius);
-    row_prefix_u8_kernel<<<padded_height, SCAN_THREADS, 0, persistent->stream>>>(
-        persistent->u8[3], persistent->u64[0], padded_width, padded_height);
-    dim3 transpose_block(TRANSPOSE_TILE, TRANSPOSE_ROWS);
-    dim3 transpose_grid(
-        (padded_width + TRANSPOSE_TILE - 1) / TRANSPOSE_TILE,
-        (padded_height + TRANSPOSE_TILE - 1) / TRANSPOSE_TILE);
-    transpose_u64_kernel<<<transpose_grid, transpose_block, 0, persistent->stream>>>(
-        persistent->u64[0], persistent->u64[1], padded_width, padded_height);
-    row_prefix_u64_inplace_kernel<<<padded_width, SCAN_THREADS, 0, persistent->stream>>>(
-        persistent->u64[1], padded_height, padded_width);
-    adaptive_integral_kernel<<<grid2d(w, h), dim3(BLOCK_X, BLOCK_Y), 0, persistent->stream>>>(
-        gray,
-        persistent->u64[1],
+        persistent->gaussian_buffer,
         persistent->u8[2],
         w,
         h,
-        padded_height,
         adaptive_block,
         adaptive_c,
         max_value,
-        invert);
+        invert,
+        persistent->stream);
     result = visionflow_cuda::kernel_launch_result();
     if (result != VF_CUDA_OK) return result;
 

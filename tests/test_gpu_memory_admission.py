@@ -28,6 +28,7 @@ class ResidentWorkingSetAdmissionTests(unittest.TestCase):
 
         self.assertEqual(estimate.resident_frame_bytes, 13000 * 16384 * 3)
         self.assertEqual(estimate.tile_input_bytes, 2000 * 12000 * 3)
+        self.assertEqual(estimate.plan_scratch_bytes, 9 * estimate.tile_input_bytes)
         self.assertGreater(estimate.plan_scratch_bytes, estimate.tile_input_bytes)
         self.assertGreater(estimate.dag_output_bytes, 0)
         self.assertEqual(estimate.detector_scratch_bytes, 64 * 2000 * 12000)

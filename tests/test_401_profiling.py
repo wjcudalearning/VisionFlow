@@ -103,7 +103,7 @@ class Detector401ProfilingTests(unittest.TestCase):
             ),
             name="401_profile_test",
         )
-        self.assertEqual(GpuRuntime._plan_kernel_launch_count(plan, 3), 28)
+        self.assertEqual(GpuRuntime._plan_kernel_launch_count(plan, 3), 25)
 
     def test_anchor_grid_profile_preserves_coordinates(self):
         rng = np.random.default_rng(7)

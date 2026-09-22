@@ -148,7 +148,7 @@ class GpuPlanDescriptorBuilder:
             elif name in {"Threshold", "Resize"}:
                 launches += 1
             elif name == "AdaptiveMean":
-                launches += 5
+                launches += 2
             elif name == "Morphology":
                 iterations = max(0, int(operator.iterations))
                 launches += iterations * (2 if str(operator.operation).lower() in {"open", "close"} else 1)

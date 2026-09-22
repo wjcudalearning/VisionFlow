@@ -2141,7 +2141,7 @@ class GpuRuntime:
             elif name in {"Threshold", "Resize"}:
                 launches += 1
             elif name == "AdaptiveMean":
-                launches += 5
+                launches += 2
             elif name == "Morphology":
                 operation = str(operator.operation).lower()
                 iterations = max(0, int(operator.iterations))

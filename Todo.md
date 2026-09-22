@@ -103,8 +103,8 @@
 
 - [x] Gaussian 使用 horizontal/vertical separable kernels 與 float 中間 buffer。
 - [x] Gaussian weights 使用 constant memory。
-- [x] Adaptive Mean 使用 replicate-border 64-bit integral image，視窗查詢為 O(1)。
-- [x] Integral image 使用 row scan、transpose、第二次 row scan，並檢查 allocation overflow。
+- [x] Adaptive Mean 使用單張 uint32 row-prefix plane；每像素垂直視窗以 uint64 累加，保留 `BORDER_REPLICATE` 與 OpenCV threshold 語意。
+- [x] Row prefix 使用 CUB block scan，並檢查 row prefix、block 面積、配置大小的整數溢位。
 - [x] 驗證工具已加入 Gaussian、Adaptive Mean、401-2 fused 與 4K benchmark 案例。
 - [x] Gaussian 加入 shared-memory tile/halo，實測 kernel 45 收益與限制。（2026-09-14 RTX 3090：block-local tile/halo 融合兩段 pass 輸出完全相同但全面約慢 2 倍，未採用；改採保留 reflect101 邊界的內部像素無分支快速路徑，k45 在 4K／2300×12000 ROI 交錯 A/B 10/10 勝出、kernel 時間降約 40～47%，小 kernel 在雜訊範圍）
 - [ ] 【實物】正式 Recipe 真圖量測 Gaussian 快速路徑對 Detector／端到端的實際占比與收益；512² tile 的 k45 kernel 僅約 0.09→0.08 ms，收益主要在大 ROI。
@@ -114,7 +114,7 @@
 
 - [x] 保留 ABI v1 host-pointer primitives，使用 optional export probe 相容舊 DLL。
 - [x] 新增 `vf_context_create/destroy/stats`。
-- [x] context 擁有 grow-only uint8、float Gaussian 與 64-bit integral buffers。
+- [x] context 擁有 grow-only uint8 與共用 uint32 plan scratch；Gaussian 與 Adaptive Mean 依生命週期重用同一配置。
 - [x] 相同或較小尺寸的 401-2 fused 呼叫不再重複 `cudaMalloc/cudaFree`。
 - [x] `GpuRuntime` 提供 `close()`、context manager、destructor 與 `RLock` 序列化。
 - [x] 將 CUDA stream、morphology ping-pong 與所有 plan scratch 納入同一 context。
@@ -125,7 +125,7 @@
 - [ ] 【實物】以正式真圖與實際並行 GPU 程式（例如其他檢測站或 AI 服務）量測 sysmem 溢出頻率與延遲，確認警告門檻與是否需要監控介面顯示。
 - [x] 評估 `cudaMallocAsync`/memory pool；只有相容且實測有收益時採用。（2026-09-14 評估後不採用：五份正式 Recipe 以 4K 圖在共用 session 連續 12 張，暖機後 context allocation 增量皆為 0；pool 只能加速首張、尺寸成長、plan 建立及 production 未使用的 stateless／ROI batch 路徑，且保留記憶體會壓縮其他程序可用的專用 VRAM）
 - [x] **評估 scratch arena／生命週期別名與主動 trim**（2026-09-21 完成，見完成紀錄）：新增 v2 current/high-water 與生命週期 telemetry，以及只釋放 operation-local analysis scratch 的可控 trim；arena/alias 因正式 CNR candidate 同時使用 Gaussian、median、mask、candidate buffers，且 plan/resident/debug/deferred output 有跨呼叫引用而不採用。RTX 正式大圖後 trim 釋放 1,121,519,341 bytes，保留 resident/plan/anchor 並可由小輸入正確重建。
-- [ ] **Adaptive Mean 低顯存路徑預研**：現行 padded u8 加兩張 u64 integral plane 在正式尺寸會形成數百 MiB scratch。比較 rolling/separable/tiled prefix 等方案；必須鎖定 OpenCV border、整數溢位、除法/四捨五入與 threshold 邊界，只有在等價性與端到端 VRAM/延遲均有實益時才取代現況。
+- [x] **Adaptive Mean 低顯存路徑預研**（2026-09-22 RTX 3090 完成）：採單張 uint32 row-prefix + 每像素 uint64 垂直累加，移除 padded u8 與兩張 u64 integral plane；新增 CUB block scan、1×1／單列／單欄／大 block 邊界與 uint32 overflow 測例，以及可重跑的舊新 DLL 交錯 A/B。50 次量測皆與 OpenCV bit-exact：3840×2160 block 35 的 plan scratch 169,375,652→58,060,800 bytes（-65.7%）、native median 0.748→0.734 ms（-1.9%）；正式代表尺寸 12000×2000 block 35 為 488,111,652→168,000,000 bytes（-65.6%）、2.119→1.919 ms（-9.4%）。
 - [ ] **縮小全域 `--fmad=false` 的作用範圍**：將需要精確 INTER_AREA 行為的 translation unit/kernel 與其他算子分開 A/B，評估只對必要單元關閉 FMA；須跑完整 ABI、CPU/GPU equivalence 與正式尺寸 benchmark，沒有量測改善則維持全域設定。
 - [ ] **以 profiler 驅動 launch geometry 調校**：盤點固定 `16x16` block 的主要 kernel，依 kernel/shape 做少量候選或離線選型並記錄 occupancy、memory throughput、register pressure；只保留跨正式尺寸穩定且不破壞等價性的設定，避免把 autotune 放進每張影像熱路徑。
 
@@ -1009,6 +1009,8 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 - [ ] 加速不得犧牲 GUI 回應、打包啟動、結果追溯、錯誤訊息或 CPU fallback。
 
 ## 完成紀錄
+
+- [x] 2026-09-22：**完成 Adaptive Mean 低顯存 CUDA 路徑並取代 padded integral 實作。** 舊路徑需一張 padded u8 與兩張 padded u64 plane；新路徑只用一張 `width×height` uint32 row-prefix plane，row scan 改用 CUB `BlockScan`，垂直視窗由 `32×8` 每像素 threads 以 uint64 累加，保留 `BORDER_REPLICATE`、OpenCV mean rounding、一般／反相 threshold 的 `ceil`／`floor` 語意。Gaussian 與 Adaptive Mean 依 plan 生命週期共用 uint32 scratch，context telemetry、resident working-set admission 與 profiler launch count同步調整；新增可重跑的 `gpu/benchmark_adaptive_mean.py`，以舊／新 DLL 暖機後交錯 A/B 並同時驗證 OpenCV bit-exact、native event 與 plan bytes。RTX 3090／Driver 610.62／CUDA 13.3／`sm_86` 50 次結果：3840×2160 block 35 的 plan 169,375,652→58,060,800 bytes（-65.7%）、native median 0.748→0.734 ms（-1.9%）；12000×2000 為 488,111,652→168,000,000 bytes（-65.6%）、2.119→1.919 ms（-9.4%）。完整 validator 新增 1×1 block 4105（box sum 超過 uint32）、單列、單欄、block 157 border／rounding 案例，全部 max diff 0；native ABI/plan/resident/ROI smoke、54 exports／dependency 檢查、927 tests、compileall、CUDA preflight、CLI 合成 NG smoke 與 `git diff --check` 通過。DLL 只生成於 ignored build／runtime 路徑，未納入 Git。
 
 - [x] 2026-09-21：**傳統 CV 獨立調參工具將「匯出調參 Recipe」升級為「匯出偵測器」。** 使用者輸入 Detector ID 與繁中名稱後，工具會建立不覆寫既有目錄的 bundle，內容固定為一支 `detector_<id>.py` 與一份 `REGISTER_DETECTOR.md`；Python 檔以唯讀參數快照凍結目前完整步驟／參數，並用既有 `ContourProcessingEngine` 保持原圖 OpenCV CPU reference 語意，輸出符合 `BaseDetector` 的 PASS／NG、bbox、area、confidence 與 metadata，且 Recipe 誤設 GPU 時仍明確回報 CPU，不會誤標 CUDA。教學涵蓋 DetectorManager、繁中標籤、Recipe 與驗證步驟；既有 `visionflow-traditional-cv-tuning/v1` JSON 仍可載入繼續調整。新增 bundle 結構、ID／覆寫保護、生成 Detector 對調參 engine 判定等價及打包 runtime 隔離測試；完整 926 tests、compileall、CUDA source／ABI preflight、調參工具／主 GUI offscreen smoke、PyInstaller one-file 重建與 packaged `--version`／`--smoke-test`（exit 0）、`git diff --check` 均通過。打包另排除 PATH 洩漏的 Poppler ICU／OpenSSL 與 Windows API-set／UCRT DLL，避免其搶先於 Qt 相依載入；未修改 CUDA source／header／ABI／DLL。
 

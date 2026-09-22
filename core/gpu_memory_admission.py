@@ -70,21 +70,6 @@ def _enabled_gpu_configs(detector_configs: dict) -> list[tuple[str, dict]]:
     ]
 
 
-def _adaptive_radius(detector_configs: dict) -> int:
-    sizes = [3]
-    for _detector_id, config in _enabled_gpu_configs(detector_configs):
-        params = config.get("params", {}) or {}
-        for key in ("adaptive_block_size", "block_size"):
-            value = params.get(key)
-            try:
-                parsed = int(value)
-            except (TypeError, ValueError):
-                continue
-            if parsed >= 3 and parsed % 2 == 1:
-                sizes.append(parsed)
-    return max(sizes) // 2
-
-
 def estimate_resident_working_set(
     image_shape: tuple[int, ...],
     image_nbytes: int,
@@ -110,12 +95,11 @@ def estimate_resident_working_set(
     tile_width, tile_height = _tile_extent(image_shape, tile_config or {})
     tile_pixels = tile_width * tile_height
     tile_input_bytes = tile_pixels * channels
-    radius = _adaptive_radius(detector_configs)
-    padded_pixels = (tile_width + 2 * radius) * (tile_height + 2 * radius)
-
-    # Linear native plan worst case: input plus three u8 work planes, morphology scratch,
-    # uint32 Gaussian intermediate, and padded u8 + two u64 Adaptive Mean planes.
-    plan_scratch_bytes = 8 * tile_input_bytes + 17 * padded_pixels
+    # Linear native plan worst case: input plus u8 work/morphology planes and one shared uint32
+    # plane. Gaussian stores its fixed-point horizontal pass there; Adaptive Mean reuses the same
+    # allocation for exact uint32 row prefixes, so no padded image or uint64 integral planes
+    # are admitted anymore. Nine bytes per input byte is conservative for both 1/3-channel plans.
+    plan_scratch_bytes = 9 * tile_input_bytes
 
     enabled = _enabled_gpu_configs(detector_configs)
     # Native DAG nodes are grow-only u8 planes. Four planes per enabled detector safely covers

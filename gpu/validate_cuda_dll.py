@@ -322,6 +322,22 @@ def validate_primitives(runtime: GpuRuntime) -> list[dict]:
         ("white_inverse_b11", structured_gray["white"], 11, 2.0, True),
         ("checker_binary_b35", structured_gray["checker"], 35, -2.0, False),
         ("non_contiguous_inverse_b11", structured_gray["non_contiguous"], 11, -2.0, True),
+        ("single_pixel_u64_overflow_b4105", np.full((1, 1), 255, dtype=np.uint8), 4105, 0.0, False),
+        (
+            "single_row_replicate_b35",
+            np.arange(17, dtype=np.uint8).reshape(1, 17).copy(),
+            35,
+            -2.4,
+            False,
+        ),
+        ("single_column_replicate_b35", np.arange(19, dtype=np.uint8)[:, None], 35, 2.4, True),
+        (
+            "large_block_border_rounding_b157",
+            np.arange(17 * 19, dtype=np.uint8).reshape(17, 19),
+            157,
+            0.0,
+            False,
+        ),
     )
     for case_name, case, block_size, adaptive_c, invert in adaptive_cases:
         threshold_type = cv2.THRESH_BINARY_INV if invert else cv2.THRESH_BINARY

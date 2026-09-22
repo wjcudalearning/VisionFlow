@@ -247,6 +247,27 @@ class CudaSourceContractTests(unittest.TestCase):
         self.assertLess(reserve.index("cudaMalloc(&replacement"), reserve.index("free_device(*pointer)"))
         self.assertLess(reserve.index("if (error != cudaSuccess) return"), reserve.index("free_device(*pointer)"))
 
+    def test_adaptive_mean_uses_one_exact_row_prefix_plane(self):
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "gpu" / "visionflow_cuda.cu").read_text(encoding="utf-8")
+        adaptive = source.split("__global__ void adaptive_row_prefix_u32_kernel(", 1)[1].split(
+            "__global__ void morph_kernel(", 1
+        )[0]
+
+        self.assertIn("uint32_t* prefix", adaptive)
+        self.assertIn("cub::BlockScan<uint32_t, ADAPTIVE_SCAN_THREADS>", adaptive)
+        self.assertIn("adaptive_horizontal_box_sum", adaptive)
+        self.assertIn("unsigned long long sum", adaptive)
+        self.assertIn("adaptive_vertical_threshold_kernel<<<", adaptive)
+        self.assertIn("mean - static_cast<int>(floorf(c))", adaptive)
+        self.assertIn("mean - static_cast<int>(ceilf(c))", adaptive)
+        self.assertNotIn("replicate_border_kernel", source)
+        self.assertNotIn("adaptive_integral_kernel", source)
+        self.assertNotIn("u64_capacity", source)
+        layout = source.split("int adaptive_layout(", 1)[1].split("void write_reason(", 1)[0]
+        self.assertIn("width) > UINT_MAX / 255ULL", layout)
+        self.assertIn("block) * block > ULLONG_MAX / 255ULL", layout)
+
     def test_reported_runtime_failure_consumes_stale_last_error_and_smoke_covers_oom_recovery(self):
         root = Path(__file__).resolve().parents[1]
         internal = (root / "gpu" / "include" / "visionflow_cuda_internal.cuh").read_text(encoding="utf-8")
