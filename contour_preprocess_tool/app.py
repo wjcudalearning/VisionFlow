@@ -30,6 +30,7 @@ from pathlib import Path
 import sys
 from typing import Any
 
+import cv2
 import numpy as np
 from PySide6.QtCore import QThreadPool, QTimer, Qt
 from PySide6.QtGui import QCloseEvent
@@ -59,6 +60,7 @@ from PySide6.QtWidgets import (
 from .engine import ContourProcessingEngine
 from .detector_export import DetectorBundleExporter
 from .export_validation import DetectorExportValidator
+from .golden import GoldenSample, build_golden_sample
 from .image_io import UnicodeImageStore
 from .recipe_io import TuningRecipeStore
 from .session_state import TuningSessionState
@@ -983,23 +985,46 @@ class ContourPreprocessWindow(QMainWindow):
             if choice != QMessageBox.StandardButton.Yes:
                 return
         try:
+            golden = self.build_export_golden(params)
             result = self.detector_exporter.export(
                 parent_dir,
                 detector_id=detector_id,
                 display_name=display_name,
                 params=params,
                 tuning_image_size=image_size,
+                golden=golden,
             )
-        except (FileExistsError, OSError, TypeError, ValueError) as exc:
+        except (FileExistsError, OSError, TypeError, ValueError, cv2.error) as exc:
             QMessageBox.critical(self, "匯出失敗", str(exc))
             return
         self.session_state.accept(params, f"已匯出 {result.bundle_dir.name}")
         self.refresh_dirty_state()
+        golden_note = (
+            f"、{result.golden_path.name}、{result.golden_test_path.name}"
+            if result.golden_path is not None and result.golden_test_path is not None
+            else "（未載入調參影像，未產生 golden 回歸資料）"
+        )
         self.status_label.setText(
             "已匯出偵測器："
-            f"{result.detector_path.name}、{result.registration_guide_path.name}\n"
+            f"{result.detector_path.name}、{result.registration_guide_path.name}"
+            f"{golden_note}\n"
             f"{result.bundle_dir}"
         )
+
+    def build_export_golden(self, params: dict[str, Any]) -> GoldenSample | None:
+        """Run the detector analysis on the tuning image so the bundle can replay it."""
+        if self.processing_source is None:
+            return None
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            return build_golden_sample(
+                self.processing_source,
+                params,
+                image_path=self.current_path or None,
+                engine=self.engine,
+            )
+        finally:
+            QApplication.restoreOverrideCursor()
 
     def tuning_image_size(self) -> tuple[int, int] | None:
         if self.processing_source is None:

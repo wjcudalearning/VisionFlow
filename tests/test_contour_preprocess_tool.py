@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 from pathlib import Path
+import shutil
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -19,6 +22,14 @@ from contour_preprocess_tool.app import ContourPreprocessWindow
 from contour_preprocess_tool.detector_export import DetectorBundleExporter
 from contour_preprocess_tool.engine import ContourProcessingEngine
 from contour_preprocess_tool.export_validation import DetectorExportValidator
+from contour_preprocess_tool.golden import (
+    GOLDEN_IMAGE_DIR_ENV,
+    build_golden_sample,
+    file_sha256,
+    params_sha256,
+    pixel_sha256,
+)
+from contour_preprocess_tool.image_io import UnicodeImageStore
 from contour_preprocess_tool.recipe_io import TuningRecipeDocument, TuningRecipeStore
 from contour_preprocess_tool.session_state import TuningSessionState
 from contour_preprocess_tool.viewer import FullResolutionImageViewer
@@ -772,10 +783,135 @@ class TileRelativeExportTests(unittest.TestCase):
             self.assertEqual(os.listdir(temp_dir), [])
 
             self._run_gui_export(temp_dir, QMessageBox.StandardButton.Yes)
-            source = (
-                Path(temp_dir) / "detector_gui_1_bundle" / "detector_gui_1.py"
-            ).read_text(encoding="utf-8")
+            bundle = Path(temp_dir) / "detector_gui_1_bundle"
+            source = (bundle / "detector_gui_1.py").read_text(encoding="utf-8")
+            golden = json.loads(
+                (bundle / "golden_detector_gui_1.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue((bundle / "test_detector_gui_1_golden.py").is_file())
         self.assertIn("TUNING_IMAGE_SIZE = (181, 137)", source)
+        self.assertEqual((golden["image"]["width"], golden["image"]["height"]), (181, 137))
+        self.assertIsNone(golden["image"]["file_sha256"])
+
+
+class GoldenExportTests(unittest.TestCase):
+    def _write_tuning_image(self, directory: Path) -> tuple[Path, np.ndarray]:
+        image = np.random.default_rng(2030923).integers(
+            0, 256, size=(137, 181, 3), dtype=np.uint8
+        )
+        path = directory / "調參樣本_tile.png"
+        self.assertTrue(UnicodeImageStore().write(path, image))
+        return path, UnicodeImageStore().read_color(path)
+
+    def _export(self, bundle_parent: Path, image_path: Path, image: np.ndarray):
+        params = detector_203_tool_params()
+        golden = build_golden_sample(image, params, image_path=image_path)
+        return golden, DetectorBundleExporter().export(
+            bundle_parent,
+            detector_id="203-AS-SN-2",
+            display_name="203 自適應輪廓檢測第二版",
+            params=params,
+            tuning_image_size=(181, 137),
+            golden=golden,
+        )
+
+    def test_golden_sample_records_image_identity_and_detections(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path, image = self._write_tuning_image(Path(temp_dir))
+            golden, exported = self._export(Path(temp_dir) / "out", image_path, image)
+            payload = json.loads(exported.golden_path.read_text(encoding="utf-8"))
+            expected_file_hash = file_sha256(image_path)
+
+        analysis = ContourProcessingEngine().analyze(image, detector_203_tool_params())
+        self.assertEqual(payload["schema"], "visionflow-traditional-cv-golden/v1")
+        self.assertEqual(payload["tool_version"], __version__)
+        self.assertEqual(
+            payload["image"],
+            {
+                "name": "調參樣本_tile.png",
+                "width": 181,
+                "height": 137,
+                "file_sha256": expected_file_hash,
+                "pixel_sha256": pixel_sha256(image),
+            },
+        )
+        self.assertEqual(payload["detections"], analysis.stats["detections"])
+        self.assertEqual(payload["pass"], not analysis.stats["detections"])
+        self.assertEqual(payload["params_sha256"], params_sha256(detector_203_tool_params()))
+        self.assertNotEqual(pixel_sha256(image), pixel_sha256(image[:, :-1]))
+
+    def test_generated_golden_test_replays_the_tuning_image(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "images").mkdir()
+            image_path, image = self._write_tuning_image(root / "images")
+            _, exported = self._export(root / "out", image_path, image)
+
+            tests_dir = root / "tests_like"
+            fixture_dir = tests_dir / "fixtures" / "tuning_golden"
+            fixture_dir.mkdir(parents=True)
+            shutil.copy(exported.golden_path, fixture_dir / exported.golden_path.name)
+            test_path = tests_dir / exported.golden_test_path.name
+            shutil.copy(exported.golden_test_path, test_path)
+
+            detector_spec = importlib.util.spec_from_file_location(
+                "detectors.detector_203_as_sn_2", exported.detector_path
+            )
+            detector_module = importlib.util.module_from_spec(detector_spec)
+            detector_spec.loader.exec_module(detector_module)
+            with patch.dict(sys.modules, {"detectors.detector_203_as_sn_2": detector_module}):
+                test_spec = importlib.util.spec_from_file_location(
+                    "generated_golden_test", test_path
+                )
+                test_module = importlib.util.module_from_spec(test_spec)
+                test_spec.loader.exec_module(test_module)
+                suite_class = test_module.Detector203AsSn2GoldenTests
+
+                with patch.dict(os.environ, {GOLDEN_IMAGE_DIR_ENV: str(image_path.parent)}):
+                    replay = unittest.TestResult()
+                    unittest.defaultTestLoader.loadTestsFromTestCase(suite_class).run(replay)
+                with patch.dict(os.environ, {}, clear=False):
+                    os.environ.pop(GOLDEN_IMAGE_DIR_ENV, None)
+                    without_image = unittest.TestResult()
+                    unittest.defaultTestLoader.loadTestsFromTestCase(suite_class).run(
+                        without_image
+                    )
+
+        self.assertEqual((replay.testsRun, replay.failures, replay.errors, replay.skipped), (2, [], [], []))
+        self.assertEqual(without_image.testsRun, 2)
+        self.assertEqual((without_image.failures, without_image.errors), ([], []))
+        self.assertEqual(len(without_image.skipped), 1)
+
+    def test_export_rejects_golden_from_other_params_or_size(self):
+        image = np.zeros((20, 30, 3), dtype=np.uint8)
+        params = detector_203_tool_params()
+        golden = build_golden_sample(image, params)
+        other = dict(params, threshold_value=1)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ValueError, "參數"):
+                DetectorBundleExporter().export(
+                    temp_dir, detector_id="G-1", display_name="G", params=other, golden=golden
+                )
+            with self.assertRaisesRegex(ValueError, "尺寸"):
+                DetectorBundleExporter().export(
+                    temp_dir,
+                    detector_id="G-1",
+                    display_name="G",
+                    params=params,
+                    tuning_image_size=(31, 20),
+                    golden=golden,
+                )
+            self.assertEqual(os.listdir(temp_dir), [])
+
+    def test_guide_explains_missing_golden(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            exported = DetectorBundleExporter().export(
+                temp_dir, detector_id="G-2", display_name="G", params=detector_203_tool_params()
+            )
+            guide = exported.registration_guide_path.read_text(encoding="utf-8")
+
+        self.assertIsNone(exported.golden_path)
+        self.assertIn("未載入調參影像", guide)
 
 
 class TuningSessionStateTests(unittest.TestCase):
