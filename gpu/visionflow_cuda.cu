@@ -89,6 +89,24 @@ struct PersistentContext {
     long long* match_candidates = nullptr;
     size_t match_candidate_capacity = 0;
     int match_candidate_output_width = 0;
+    // Full Pattern Match scratch. Unlike Template Anchor Grid, this path keeps every response on
+    // device, selects local peaks, sorts them, applies NMS and downloads only final descriptors.
+    float* pattern_scores = nullptr;
+    size_t pattern_score_capacity = 0;
+    unsigned long long* pattern_keys = nullptr;
+    size_t pattern_key_capacity = 0;
+    unsigned long long* pattern_sorted_keys = nullptr;
+    size_t pattern_sorted_key_capacity = 0;
+    unsigned long long* pattern_selected_keys = nullptr;
+    size_t pattern_selected_key_capacity = 0;
+    uint8_t* pattern_sort_scratch = nullptr;
+    size_t pattern_sort_scratch_capacity = 0;
+    int32_t* pattern_out_xy = nullptr;
+    size_t pattern_out_xy_capacity = 0;
+    float* pattern_out_scores = nullptr;
+    size_t pattern_out_score_capacity = 0;
+    int* pattern_out_count = nullptr;
+    size_t pattern_out_count_capacity = 0;
     // Contour extension scratch: the padded label image, the discovery-order result, and the
     // OpenCV-order result the download export copies out. All grow-only.
     signed char* contour_label = nullptr;
@@ -281,6 +299,14 @@ struct PersistentContext {
         visionflow_cuda::free_device(gaussian_f32_input);
         visionflow_cuda::free_device(gaussian_f32_intermediate);
         visionflow_cuda::free_device(gaussian_f32_output);
+        visionflow_cuda::free_device(pattern_scores);
+        visionflow_cuda::free_device(pattern_keys);
+        visionflow_cuda::free_device(pattern_sorted_keys);
+        visionflow_cuda::free_device(pattern_selected_keys);
+        visionflow_cuda::free_device(pattern_sort_scratch);
+        visionflow_cuda::free_device(pattern_out_xy);
+        visionflow_cuda::free_device(pattern_out_scores);
+        visionflow_cuda::free_device(pattern_out_count);
         visionflow_cuda::free_device(cnr_mask_image);
         visionflow_cuda::free_device(cnr_mask_background);
         visionflow_cuda::free_device(cnr_mask_residual);
@@ -348,6 +374,15 @@ ContextMemoryBreakdown context_memory_breakdown(const PersistentContext* context
     }
     memory.template_match_bytes +=
         capacity_bytes(context->match_candidate_capacity, sizeof(long long));
+    memory.template_match_bytes +=
+        capacity_bytes(context->pattern_score_capacity, sizeof(float)) +
+        capacity_bytes(context->pattern_key_capacity, sizeof(unsigned long long)) +
+        capacity_bytes(context->pattern_sorted_key_capacity, sizeof(unsigned long long)) +
+        capacity_bytes(context->pattern_selected_key_capacity, sizeof(unsigned long long)) +
+        capacity_bytes(context->pattern_sort_scratch_capacity, 1) +
+        capacity_bytes(context->pattern_out_xy_capacity, sizeof(int32_t)) +
+        capacity_bytes(context->pattern_out_score_capacity, sizeof(float)) +
+        capacity_bytes(context->pattern_out_count_capacity, sizeof(int));
 
     memory.contour_bytes =
         capacity_bytes(context->contour_label_capacity, sizeof(signed char)) +
@@ -1767,6 +1802,184 @@ __global__ void match_score_shared_template_kernel(
     match_offer_candidate(score, column, output_row, best_keys);
 }
 
+// Pattern Match uses the same TM_CCOEFF_NORMED arithmetic as the anchor path, but retains the
+// complete response plane so local-peak selection and NMS can remain on the device.
+__global__ void pattern_score_map_kernel(
+    const uint8_t* roi, int roi_width,
+    int output_width, int output_height,
+    int template_width, int template_height, int template_pixels,
+    double template_mean, double template_variance,
+    const uint8_t* templ, float* scores) {
+    const int column = blockIdx.x * blockDim.x + threadIdx.x;
+    const int row = blockIdx.y * blockDim.y + threadIdx.y;
+    if (column >= output_width || row >= output_height) return;
+    long long window_sum = 0;
+    long long window_square = 0;
+    long long weighted = 0;
+    for (int template_row = 0; template_row < template_height; ++template_row) {
+        const uint8_t* image_line =
+            roi + static_cast<size_t>(row + template_row) * roi_width + column;
+        const uint8_t* template_line = templ + static_cast<size_t>(template_row) * template_width;
+        for (int offset = 0; offset < template_width; ++offset) {
+            const int value = image_line[offset];
+            window_sum += value;
+            window_square += static_cast<long long>(value) * value;
+            weighted += static_cast<long long>(value) * template_line[offset];
+        }
+    }
+    const double mean = static_cast<double>(window_sum) / template_pixels;
+    double window_variance =
+        static_cast<double>(window_square) / template_pixels - mean * mean;
+    if (window_variance < 0.0) window_variance = 0.0;
+    const double denominator =
+        std::sqrt(window_variance * template_variance) * template_pixels;
+    double score = -1.0;
+    if (denominator > 0.0) {
+        score = (static_cast<double>(weighted) - template_mean * window_sum) / denominator;
+    }
+    score = score > 1.0 ? 1.0 : (score < -1.0 ? -1.0 : score);
+    scores[static_cast<size_t>(row) * output_width + column] = static_cast<float>(score);
+}
+
+__device__ __forceinline__ uint32_t pattern_float_order_key(float value) {
+    const uint32_t bits = __float_as_uint(value);
+    return (bits & 0x80000000U) ? ~bits : (bits ^ 0x80000000U);
+}
+
+__device__ __forceinline__ float pattern_float_from_order_key(uint32_t ordered) {
+    const uint32_t bits = (ordered & 0x80000000U) ? (ordered ^ 0x80000000U) : ~ordered;
+    return __uint_as_float(bits);
+}
+
+__device__ __forceinline__ void pattern_unpack_key(
+    unsigned long long key, float* score, int* x, int* y) {
+    *score = pattern_float_from_order_key(static_cast<uint32_t>(key >> 32));
+    *y = 0xffff - static_cast<int>((key >> 16) & 0xffffULL);
+    *x = 0xffff - static_cast<int>(key & 0xffffULL);
+}
+
+__global__ void pattern_local_peak_keys_kernel(
+    const float* scores, int width, int height,
+    int kernel_width, int kernel_height, float threshold,
+    unsigned long long* keys) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height) return;
+    const size_t index = static_cast<size_t>(y) * width + x;
+    const float value = scores[index];
+    if (value < threshold) {
+        keys[index] = 0;
+        return;
+    }
+    const int anchor_x = kernel_width / 2;
+    const int anchor_y = kernel_height / 2;
+    const int first_x = max(0, x - anchor_x);
+    const int last_x = min(width - 1, x + kernel_width - anchor_x - 1);
+    const int first_y = max(0, y - anchor_y);
+    const int last_y = min(height - 1, y + kernel_height - anchor_y - 1);
+    for (int row = first_y; row <= last_y; ++row) {
+        const float* line = scores + static_cast<size_t>(row) * width;
+        for (int column = first_x; column <= last_x; ++column) {
+            if (line[column] > value) {
+                keys[index] = 0;
+                return;
+            }
+        }
+    }
+    keys[index] =
+        (static_cast<unsigned long long>(pattern_float_order_key(value)) << 32) |
+        (static_cast<unsigned long long>(0xffff - y) << 16) |
+        static_cast<unsigned long long>(0xffff - x);
+}
+
+__device__ __forceinline__ bool pattern_iou_passes(
+    int ax, int ay, int bx, int by, int width, int height, float threshold) {
+    const int intersection_width = max(0, min(ax + width, bx + width) - max(ax, bx));
+    const int intersection_height = max(0, min(ay + height, by + height) - max(ay, by));
+    const long long intersection =
+        static_cast<long long>(intersection_width) * intersection_height;
+    const long long area = static_cast<long long>(width) * height;
+    const long long union_area = area * 2 - intersection;
+    const float iou = union_area > 0 ? static_cast<float>(intersection) / union_area : 0.0f;
+    return iou <= threshold;
+}
+
+// Candidate counts are intentionally bounded by the Recipe's max_candidates. A single serialized
+// selector keeps the Python reference's exact score/y/x order and deterministic NMS semantics;
+// the expensive response calculation and local-maximum scan remain fully parallel.
+__global__ void pattern_select_nms_kernel(
+    const unsigned long long* sorted_keys, long long element_count,
+    int template_width, int template_height,
+    int max_candidates, float nms_threshold, int max_count, int row_tolerance,
+    unsigned long long* selected, int output_capacity,
+    int32_t* output_xy, float* output_scores, int* output_count) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    int selected_count = 0;
+    int considered = 0;
+    const int candidate_limit = max_candidates > 0 ? max_candidates : INT_MAX;
+    const int selection_limit = max_count > 0 ? max_count : output_capacity;
+    for (long long index = element_count - 1;
+         index >= 0 && considered < candidate_limit && selected_count < selection_limit;
+         --index) {
+        const unsigned long long key = sorted_keys[index];
+        if (key == 0) break;
+        ++considered;
+        float score = 0.0f;
+        int x = 0;
+        int y = 0;
+        pattern_unpack_key(key, &score, &x, &y);
+        bool keep = true;
+        for (int existing_index = 0; existing_index < selected_count; ++existing_index) {
+            float existing_score = 0.0f;
+            int existing_x = 0;
+            int existing_y = 0;
+            pattern_unpack_key(
+                selected[existing_index], &existing_score, &existing_x, &existing_y);
+            if (!pattern_iou_passes(
+                    x, y, existing_x, existing_y,
+                    template_width, template_height, nms_threshold)) {
+                keep = false;
+                break;
+            }
+        }
+        if (keep && selected_count < output_capacity) selected[selected_count++] = key;
+    }
+    const int tolerance = max(1, row_tolerance);
+    for (int index = 1; index < selected_count; ++index) {
+        const unsigned long long value = selected[index];
+        float value_score = 0.0f;
+        int value_x = 0;
+        int value_y = 0;
+        pattern_unpack_key(value, &value_score, &value_x, &value_y);
+        const int value_bucket = __double2int_rn(static_cast<double>(value_y) / tolerance);
+        int position = index;
+        while (position > 0) {
+            float previous_score = 0.0f;
+            int previous_x = 0;
+            int previous_y = 0;
+            pattern_unpack_key(
+                selected[position - 1], &previous_score, &previous_x, &previous_y);
+            const int previous_bucket =
+                __double2int_rn(static_cast<double>(previous_y) / tolerance);
+            if (previous_bucket < value_bucket ||
+                (previous_bucket == value_bucket && previous_x <= value_x)) break;
+            selected[position] = selected[position - 1];
+            --position;
+        }
+        selected[position] = value;
+    }
+    for (int index = 0; index < selected_count; ++index) {
+        float score = 0.0f;
+        int x = 0;
+        int y = 0;
+        pattern_unpack_key(selected[index], &score, &x, &y);
+        output_xy[index * 2] = x;
+        output_xy[index * 2 + 1] = y;
+        output_scores[index] = score;
+    }
+    *output_count = selected_count;
+}
+
 // Tiled score kernel. Each block stages the ROI patch covering its output tile into shared memory
 // once, so the window sum, its square and the template-weighted sum are all accumulated from
 // shared memory instead of re-reading the ROI for every candidate. The template stays in global
@@ -2545,7 +2758,8 @@ static int execute_linear_plan_device(
     uint8_t* current,
     uint8_t* dst,
     int dst_stride,
-    int dst_channels) {
+    int dst_channels,
+    uint8_t** device_output = nullptr) {
     PersistentContext* context = compiled->context;
     int width = compiled->width;
     int height = compiled->height;
@@ -2644,11 +2858,16 @@ static int execute_linear_plan_device(
     int result = visionflow_cuda::kernel_launch_result();
     if (result != VF_CUDA_OK) return result;
     record_timing_event(context, TIMING_AFTER_KERNEL);
-    const size_t output_row_bytes = static_cast<size_t>(width) * dst_channels;
-    cudaError_t error = cudaMemcpy2DAsync(
-        dst, dst_stride, current, output_row_bytes, output_row_bytes, height,
-        cudaMemcpyDeviceToHost, context->stream);
-    if (error != cudaSuccess) return cuda_result(error);
+    cudaError_t error = cudaSuccess;
+    if (device_output != nullptr) {
+        *device_output = current;
+    } else {
+        const size_t output_row_bytes = static_cast<size_t>(width) * dst_channels;
+        error = cudaMemcpy2DAsync(
+            dst, dst_stride, current, output_row_bytes, output_row_bytes, height,
+            cudaMemcpyDeviceToHost, context->stream);
+        if (error != cudaSuccess) return cuda_result(error);
+    }
     record_timing_event(context, TIMING_AFTER_OUTPUT);
     auto synchronize_started = std::chrono::steady_clock::now();
     result = visionflow_cuda::stream_result(context->stream);
@@ -3380,6 +3599,63 @@ VF_CUDA_API int vf_plan_execute_roi(
         compiled, context->u8[0], dst, dst_stride, dst_channels);
 }
 
+VF_CUDA_API int vf_plan_find_contours_roi(
+    void* plan, uint64_t generation, int x, int y, int mode,
+    int* out_contour_count, int* out_point_count) {
+    NativePlan* compiled = static_cast<NativePlan*>(plan);
+    if (compiled == nullptr || compiled->context == nullptr ||
+        out_contour_count == nullptr || out_point_count == nullptr) {
+        return VF_CUDA_INVALID_ARGUMENT;
+    }
+    PersistentContext* context = compiled->context;
+    if (generation == 0 || generation != context->resident_generation ||
+        context->resident_channels != compiled->input_channels ||
+        compiled->output_channels != 1 ||
+        compiled->output_width != compiled->width ||
+        compiled->output_height != compiled->height ||
+        x < 0 || y < 0 || x + compiled->width > context->resident_width ||
+        y + compiled->height > context->resident_height) {
+        return VF_CUDA_INVALID_ARGUMENT;
+    }
+    reset_timing(context, false);
+    const size_t resident_pitch =
+        static_cast<size_t>(context->resident_width) * context->resident_channels;
+    const size_t roi_row_bytes =
+        static_cast<size_t>(compiled->width) * compiled->input_channels;
+    const uint8_t* source = context->resident_u8 +
+        static_cast<size_t>(y) * resident_pitch + static_cast<size_t>(x) * compiled->input_channels;
+    cudaError_t error = cudaMemcpy2DAsync(
+        context->u8[0], roi_row_bytes, source, resident_pitch,
+        roi_row_bytes, compiled->height, cudaMemcpyDeviceToDevice, context->stream);
+    if (error != cudaSuccess) return cuda_result(error);
+    record_timing_event(context, TIMING_AFTER_INPUT);
+    uint8_t* mask = nullptr;
+    int result = execute_linear_plan_device(
+        compiled, context->u8[0], nullptr, 0, 1, &mask);
+    if (result != VF_CUDA_OK) return result;
+
+    // Reuse the verified OpenCV-equivalent contour tracer without replacing the context-owned
+    // colour resident allocation. The temporary metadata swap is safe because the public runtime
+    // serializes every context call and the trace completes before the original fields return.
+    uint8_t* original_resident = context->resident_u8;
+    const int original_width = context->resident_width;
+    const int original_height = context->resident_height;
+    const int original_channels = context->resident_channels;
+    context->resident_u8 = mask;
+    context->resident_width = compiled->output_width;
+    context->resident_height = compiled->output_height;
+    context->resident_channels = 1;
+    result = vf_find_contours_u8(
+        context, generation, 0, 0,
+        compiled->output_width, compiled->output_height, mode,
+        out_contour_count, out_point_count);
+    context->resident_u8 = original_resident;
+    context->resident_width = original_width;
+    context->resident_height = original_height;
+    context->resident_channels = original_channels;
+    return result;
+}
+
 VF_CUDA_API int vf_dag_plan_query(
     const VfDagPlanDescV1* desc,
     int width,
@@ -4039,6 +4315,157 @@ VF_CUDA_API int vf_match_template_gray_u8(
     out_match[1] = search_y + match_xy[1];
     out_match[2] = template_width;
     out_match[3] = template_height;
+    return VF_CUDA_OK;
+}
+
+VF_CUDA_API int vf_pattern_match_gray_u8(
+    void* context,
+    uint64_t generation,
+    const uint8_t* templ, int template_width, int template_height,
+    float match_threshold, int max_candidates, float nms_threshold,
+    int max_count, int sort_row_tolerance,
+    int32_t* out_xy, float* out_scores, int output_capacity, int* out_count) {
+    PersistentContext* persistent = static_cast<PersistentContext*>(context);
+    if (persistent == nullptr || templ == nullptr || out_xy == nullptr || out_scores == nullptr ||
+        out_count == nullptr || output_capacity <= 0 || !std::isfinite(match_threshold) ||
+        !std::isfinite(nms_threshold) || nms_threshold < 0.0f || nms_threshold > 1.0f ||
+        generation == 0 || generation != persistent->resident_generation ||
+        persistent->resident_u8 == nullptr || template_width <= 0 || template_height <= 0 ||
+        template_width > persistent->resident_width ||
+        template_height > persistent->resident_height) {
+        return VF_CUDA_INVALID_ARGUMENT;
+    }
+    const int output_width = persistent->resident_width - template_width + 1;
+    const int output_height = persistent->resident_height - template_height + 1;
+    if (output_width <= 0 || output_height <= 0 || output_width > 0xffff || output_height > 0xffff) {
+        return VF_CUDA_UNSUPPORTED;
+    }
+    const long long element_count_ll =
+        static_cast<long long>(output_width) * static_cast<long long>(output_height);
+    if (element_count_ll <= 0 || element_count_ll > INT_MAX) return VF_CUDA_UNSUPPORTED;
+    const int element_count = static_cast<int>(element_count_ll);
+
+    // Reuse the verified anchor call to validate the template, upload it, gray the resident image
+    // and establish the same scratch/lifetime rules. Its single-best result is deliberately ignored.
+    int ignored_match[4] = {0, 0, 0, 0};
+    float ignored_score = 0.0f;
+    int result = vf_match_template_gray_u8(
+        context, generation, 0, 0,
+        persistent->resident_width, persistent->resident_height,
+        templ, template_width, template_height, ignored_match, &ignored_score);
+    if (result != VF_CUDA_OK) return result;
+
+    result = reserve_device(
+        &persistent->pattern_scores, &persistent->pattern_score_capacity,
+        static_cast<size_t>(element_count), &persistent->allocation_count);
+    if (result != VF_CUDA_OK) return result;
+    result = reserve_device(
+        &persistent->pattern_keys, &persistent->pattern_key_capacity,
+        static_cast<size_t>(element_count), &persistent->allocation_count);
+    if (result != VF_CUDA_OK) return result;
+    result = reserve_device(
+        &persistent->pattern_sorted_keys, &persistent->pattern_sorted_key_capacity,
+        static_cast<size_t>(element_count), &persistent->allocation_count);
+    if (result != VF_CUDA_OK) return result;
+    result = reserve_device(
+        &persistent->pattern_selected_keys, &persistent->pattern_selected_key_capacity,
+        static_cast<size_t>(output_capacity), &persistent->allocation_count);
+    if (result != VF_CUDA_OK) return result;
+    result = reserve_device(
+        &persistent->pattern_out_xy, &persistent->pattern_out_xy_capacity,
+        static_cast<size_t>(output_capacity) * 2, &persistent->allocation_count);
+    if (result != VF_CUDA_OK) return result;
+    result = reserve_device(
+        &persistent->pattern_out_scores, &persistent->pattern_out_score_capacity,
+        static_cast<size_t>(output_capacity), &persistent->allocation_count);
+    if (result != VF_CUDA_OK) return result;
+    result = reserve_device(
+        &persistent->pattern_out_count, &persistent->pattern_out_count_capacity,
+        static_cast<size_t>(1), &persistent->allocation_count);
+    if (result != VF_CUDA_OK) return result;
+
+    size_t sort_scratch_bytes = 0;
+    cudaError_t error = cub::DeviceRadixSort::SortKeys(
+        nullptr, sort_scratch_bytes,
+        persistent->pattern_keys, persistent->pattern_sorted_keys,
+        element_count, 0, 64, persistent->stream);
+    if (error != cudaSuccess) return cuda_result(error);
+    result = reserve_device(
+        &persistent->pattern_sort_scratch, &persistent->pattern_sort_scratch_capacity,
+        sort_scratch_bytes > 0 ? sort_scratch_bytes : 1, &persistent->allocation_count);
+    if (result != VF_CUDA_OK) return result;
+    update_context_memory_peak(persistent);
+
+    double template_sum = 0.0;
+    double template_square_sum = 0.0;
+    const int template_pixels = template_width * template_height;
+    for (int index = 0; index < template_pixels; ++index) {
+        const int value = templ[index];
+        template_sum += value;
+        template_square_sum += static_cast<double>(value) * value;
+    }
+    const double template_mean = template_sum / template_pixels;
+    const double template_variance =
+        template_square_sum / template_pixels - template_mean * template_mean;
+    if (!(template_variance > 1e-12)) return VF_CUDA_UNSUPPORTED;
+
+    reset_timing(persistent, false);
+    pattern_score_map_kernel<<<
+        grid2d(output_width, output_height), dim3(BLOCK_X, BLOCK_Y), 0, persistent->stream>>>(
+        persistent->u8[MATCH_ROI_BUFFER], persistent->resident_width,
+        output_width, output_height, template_width, template_height, template_pixels,
+        template_mean, template_variance,
+        persistent->u8[MATCH_TEMPLATE_BUFFER], persistent->pattern_scores);
+    result = visionflow_cuda::kernel_launch_result();
+    if (result != VF_CUDA_OK) return result;
+    const int peak_width = min(template_width, output_width);
+    const int peak_height = min(template_height, output_height);
+    pattern_local_peak_keys_kernel<<<
+        grid2d(output_width, output_height), dim3(BLOCK_X, BLOCK_Y), 0, persistent->stream>>>(
+        persistent->pattern_scores, output_width, output_height,
+        peak_width, peak_height, match_threshold, persistent->pattern_keys);
+    result = visionflow_cuda::kernel_launch_result();
+    if (result != VF_CUDA_OK) return result;
+    error = cub::DeviceRadixSort::SortKeys(
+        persistent->pattern_sort_scratch, sort_scratch_bytes,
+        persistent->pattern_keys, persistent->pattern_sorted_keys,
+        element_count, 0, 64, persistent->stream);
+    if (error != cudaSuccess) return cuda_result(error);
+    pattern_select_nms_kernel<<<1, 1, 0, persistent->stream>>>(
+        persistent->pattern_sorted_keys, element_count_ll,
+        template_width, template_height, max_candidates, nms_threshold,
+        max_count, sort_row_tolerance,
+        persistent->pattern_selected_keys, output_capacity,
+        persistent->pattern_out_xy, persistent->pattern_out_scores,
+        persistent->pattern_out_count);
+    result = visionflow_cuda::kernel_launch_result();
+    if (result != VF_CUDA_OK) return result;
+
+    int count = 0;
+    error = cudaMemcpyAsync(
+        &count, persistent->pattern_out_count, sizeof(int),
+        cudaMemcpyDeviceToHost, persistent->stream);
+    if (error != cudaSuccess) return cuda_result(error);
+    result = visionflow_cuda::stream_result(persistent->stream);
+    if (result != VF_CUDA_OK) return result;
+    if (count < 0 || count > output_capacity) return VF_CUDA_INTERNAL_ERROR;
+    if (count > 0) {
+        error = cudaMemcpyAsync(
+            out_xy, persistent->pattern_out_xy,
+            sizeof(int32_t) * static_cast<size_t>(count) * 2,
+            cudaMemcpyDeviceToHost, persistent->stream);
+        if (error == cudaSuccess) {
+            error = cudaMemcpyAsync(
+                out_scores, persistent->pattern_out_scores,
+                sizeof(float) * static_cast<size_t>(count),
+                cudaMemcpyDeviceToHost, persistent->stream);
+        }
+        if (error != cudaSuccess) return cuda_result(error);
+        result = visionflow_cuda::stream_result(persistent->stream);
+        if (result != VF_CUDA_OK) return result;
+    }
+    finalize_timing(persistent);
+    *out_count = count;
     return VF_CUDA_OK;
 }
 

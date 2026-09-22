@@ -13,6 +13,7 @@ import numpy as np
 
 from core.gpu_runtime import GpuRuntimeError
 from core.image_loader import ImageLoader
+from core.preprocess_plan import AdaptiveMean, Gaussian, Gray, Morphology, PreprocessPlan, Threshold
 
 
 def _crop_image(image, x1: int, y1: int, x2: int, y2: int, gpu_runtime=None):
@@ -48,6 +49,11 @@ def _iter_cropped_tiles(
             yield replace(
                 tile,
                 image=image[tile.y:tile.y + tile.height, tile.x:tile.x + tile.width],
+                device_roi=(
+                    tile.device_roi
+                    if tile.device_roi is not None
+                    else resident_image.roi(tile.x, tile.y, tile.width, tile.height)
+                ),
             )
         return
 
@@ -217,6 +223,36 @@ class BinarySegmenter:
         mask = self._morph(mask, cv2.MORPH_CLOSE, self.config.morph_close_kernel, self.config.morph_close_iterations)
         return mask
 
+    def gpu_plan(self) -> PreprocessPlan:
+        operations = [Gray()]
+        if self.config.blur_size > 1:
+            operations.append(Gaussian(self._odd_at_least(self.config.blur_size, 3)))
+        method = self.config.method.lower()
+        if method == "global":
+            operations.append(Threshold(
+                self.config.threshold, self.config.max_value, self.config.invert
+            ))
+        elif method == "adaptive_mean":
+            operations.append(AdaptiveMean(
+                self._odd_at_least(self.config.adaptive_block_size, 3),
+                self.config.adaptive_c, self.config.max_value, self.config.invert,
+            ))
+        else:
+            raise GpuRuntimeError(
+                f"Contour tiling CUDA plan does not support threshold method {self.config.method}"
+            )
+        if self.config.morph_open_kernel > 1 and self.config.morph_open_iterations > 0:
+            operations.append(Morphology(
+                "open", self._odd_at_least(self.config.morph_open_kernel, 3),
+                self.config.morph_open_iterations,
+            ))
+        if self.config.morph_close_kernel > 1 and self.config.morph_close_iterations > 0:
+            operations.append(Morphology(
+                "close", self._odd_at_least(self.config.morph_close_kernel, 3),
+                self.config.morph_close_iterations,
+            ))
+        return PreprocessPlan(tuple(operations), name="contour_tiler")
+
     @staticmethod
     def _odd_at_least(value: int, minimum: int) -> int:
         value = max(int(value), minimum)
@@ -369,19 +405,40 @@ class PatternMatcher:
         self.config = config
         self.image_loader = ImageLoader()
 
-    def find_matches(self, image) -> list[dict]:
+    def find_matches(self, image, gpu_runtime=None, resident_image=None) -> list[dict]:
         template_path = self.config.template_path.strip()
         if not template_path:
             raise ValueError("Pattern match template_path is required.")
 
         template = self.image_loader.load_bgr(template_path)
-        image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image.copy()
         template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY) if template.ndim == 3 else template.copy()
         template_height, template_width = template_gray.shape[:2]
-        image_height, image_width = image_gray.shape[:2]
+        image_height, image_width = image.shape[:2]
         if template_width > image_width or template_height > image_height:
             raise ValueError("Pattern match template is larger than the input image.")
 
+        if (
+            resident_image is not None
+            and gpu_runtime is not None
+            and getattr(gpu_runtime, "supports_pattern_match", False)
+        ):
+            try:
+                matches = gpu_runtime.pattern_match_gray(
+                    resident_image,
+                    template_gray,
+                    match_threshold=self.config.match_threshold,
+                    max_candidates=self.config.max_candidates,
+                    nms_threshold=self.config.nms_threshold,
+                    max_count=self.config.max_count,
+                    sort_row_tolerance=self.config.sort_row_tolerance,
+                )
+                for match in matches:
+                    match["backend"] = "cuda_dll"
+                return matches
+            except Exception as exc:
+                gpu_runtime.fallback_or_raise(exc)
+
+        image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image.copy()
         result = cv2.matchTemplate(image_gray, template_gray, cv2.TM_CCOEFF_NORMED)
         ys, xs = self._local_peak_points(result, template_width, template_height)
         candidates = [
@@ -399,6 +456,8 @@ class PatternMatcher:
             candidates = candidates[: self.config.max_candidates]
         selected = self._nms(candidates)
         selected.sort(key=lambda item: (self._row_bucket(item["y"]), item["x"]))
+        for match in selected:
+            match["backend"] = "cpu"
         return selected
 
     def _local_peak_points(self, result, template_width: int, template_height: int) -> tuple[np.ndarray, np.ndarray]:
@@ -795,26 +854,53 @@ class Tiler:
 
 
 class ContourTiler:
-    def __init__(self, threshold: BinaryThresholdConfig, shapes: ShapeFilterConfig, gpu_runtime=None, crop_workers: int | str = "auto"):
+    def __init__(
+        self, threshold: BinaryThresholdConfig, shapes: ShapeFilterConfig,
+        gpu_runtime=None, resident_image=None, crop_workers: int | str = "auto",
+    ):
         self.segmenter = BinarySegmenter(threshold)
         self.analyzer = ContourShapeAnalyzer(shapes)
         self.shape_config = shapes
         self.gpu_runtime = gpu_runtime
+        self.resident_image = resident_image
         self.crop_workers = crop_workers
 
     @classmethod
-    def from_config(cls, config: dict, gpu_runtime=None, crop_workers=None) -> "ContourTiler":
+    def from_config(
+        cls, config: dict, gpu_runtime=None, resident_image=None, crop_workers=None,
+    ) -> "ContourTiler":
         return cls(
             threshold=BinaryThresholdConfig.from_dict(config.get("threshold")),
             shapes=ShapeFilterConfig.from_dict(config.get("shapes")),
             gpu_runtime=gpu_runtime,
+            resident_image=resident_image,
             crop_workers=_crop_workers(config, crop_workers),
         )
 
     def iter_tiles(self, image) -> Iterator[Tile]:
-        mask = self.segmenter.make_mask(image)
+        runtime = getattr(self.resident_image, "runtime", None) or self.gpu_runtime
+        contour_backend = "cpu"
+        contours = None
+        if (
+            self.resident_image is not None
+            and runtime is not None
+            and getattr(runtime, "supports_plan_find_contours", False)
+            and not bool(getattr(runtime, "fallback_to_cpu", True))
+        ):
+            try:
+                contours = runtime.find_contours_plan(
+                    image,
+                    self.segmenter.gpu_plan(),
+                    self.resident_image.roi(0, 0, image.shape[1], image.shape[0]),
+                    mode="external",
+                )
+                contour_backend = "cuda_dll"
+            except Exception as exc:
+                runtime.fallback_or_raise(exc)
+        if contours is None:
+            mask = self.segmenter.make_mask(image)
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image.copy()
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         image_height, image_width = image.shape[:2]
         accepted_index = 0
 
@@ -847,27 +933,47 @@ class ContourTiler:
                     metadata={
                         "mode": "contour",
                         "contour_index": int(contour_index),
+                        "contour_backend": contour_backend,
                         **metadata,
                     },
                 )
                 accepted_index += 1
-        yield from _iter_cropped_tiles(image, tile_specs(), self.gpu_runtime, self.crop_workers)
+        yield from _iter_cropped_tiles(
+            image, tile_specs(), self.gpu_runtime,
+            1 if self.resident_image is not None else self.crop_workers,
+            self.resident_image,
+        )
 
 
 class PatternMatchTiler:
-    def __init__(self, config: PatternMatchConfig, gpu_runtime=None, crop_workers: int | str = "auto"):
+    def __init__(
+        self, config: PatternMatchConfig, gpu_runtime=None, resident_image=None,
+        crop_workers: int | str = "auto",
+    ):
         self.config = config
         self.matcher = PatternMatcher(config)
         self.gpu_runtime = gpu_runtime
+        self.resident_image = resident_image
         self.crop_workers = crop_workers
 
     @classmethod
-    def from_config(cls, config: dict, gpu_runtime=None, crop_workers=None) -> "PatternMatchTiler":
-        return cls(PatternMatchConfig.from_dict(config.get("pattern_match")), gpu_runtime=gpu_runtime, crop_workers=_crop_workers(config, crop_workers))
+    def from_config(
+        cls, config: dict, gpu_runtime=None, resident_image=None, crop_workers=None,
+    ) -> "PatternMatchTiler":
+        return cls(
+            PatternMatchConfig.from_dict(config.get("pattern_match")),
+            gpu_runtime=gpu_runtime, resident_image=resident_image,
+            crop_workers=_crop_workers(config, crop_workers),
+        )
 
     def iter_tiles(self, image) -> Iterator[Tile]:
         image_height, image_width = image.shape[:2]
-        matches = self.matcher.find_matches(image)
+        resident_runtime = getattr(self.resident_image, "runtime", None)
+        matches = self.matcher.find_matches(
+            image,
+            gpu_runtime=resident_runtime or self.gpu_runtime,
+            resident_image=self.resident_image,
+        )
         padding = self.config.crop_padding
         def tile_specs():
             for index, match in enumerate(matches):
@@ -897,9 +1003,14 @@ class PatternMatchTiler:
                         "score": float(match["score"]),
                         "match_bbox": [x, y, width, height],
                         "template_path": self.config.template_path,
+                        "pattern_match_backend": str(match.get("backend", "cpu")),
                     },
                 )
-        yield from _iter_cropped_tiles(image, tile_specs(), self.gpu_runtime, self.crop_workers)
+        yield from _iter_cropped_tiles(
+            image, tile_specs(), self.gpu_runtime,
+            1 if self.resident_image is not None else self.crop_workers,
+            self.resident_image,
+        )
 
 
 def create_tiler(tile_config: dict, gpu_runtime=None, resident_image=None, crop_workers=None):
@@ -909,7 +1020,13 @@ def create_tiler(tile_config: dict, gpu_runtime=None, resident_image=None, crop_
             tile_config, gpu_runtime=gpu_runtime, resident_image=resident_image, crop_workers=crop_workers
         )
     if mode == "contour":
-        return ContourTiler.from_config(tile_config, gpu_runtime=gpu_runtime, crop_workers=crop_workers)
+        return ContourTiler.from_config(
+            tile_config, gpu_runtime=gpu_runtime, resident_image=resident_image,
+            crop_workers=crop_workers,
+        )
     if mode == "pattern_match":
-        return PatternMatchTiler.from_config(tile_config, gpu_runtime=gpu_runtime, crop_workers=crop_workers)
+        return PatternMatchTiler.from_config(
+            tile_config, gpu_runtime=gpu_runtime, resident_image=resident_image,
+            crop_workers=crop_workers,
+        )
     raise ValueError(f"Unsupported tile mode: {mode}")

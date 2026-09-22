@@ -296,7 +296,7 @@ class InspectionResultAssembler:
         if tiling_cuda_crop_skipped:
             tiling_status["requested"] = True
             tiling_status["reason"] = (
-                "未整圖上傳 GPU（沒有 Detector 使用 CUDA、切圖模式非 grid 或 crossover 略過），"
+                "未整圖上傳 GPU（沒有 GPU 工作、切圖模式尚未支援 resident 或 crossover 略過），"
                 "逐張 CUDA 裁切會每張重傳整張原圖而較慢，已改用 CPU 切小圖"
             )
         return {
@@ -336,9 +336,17 @@ class InspectionResultAssembler:
                         resident_image=resident_image,
                         tiling_gpu_requested=tiling_gpu_requested,
                         anchor_on_device=any(
-                            (tile_result.get("tile", {}).get("metadata") or {}).get(
-                                "grid_anchor_backend"
-                            ) == "cuda_dll"
+                            (
+                                (tile_result.get("tile", {}).get("metadata") or {}).get(
+                                    "grid_anchor_backend"
+                                ) == "cuda_dll"
+                                or (tile_result.get("tile", {}).get("metadata") or {}).get(
+                                    "pattern_match_backend"
+                                ) == "cuda_dll"
+                                or (tile_result.get("tile", {}).get("metadata") or {}).get(
+                                    "contour_backend"
+                                ) == "cuda_dll"
+                            )
                             for tile_result in tile_results
                         ),
                         gpu_metrics_baseline=gpu_metrics_baseline,

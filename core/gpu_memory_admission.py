@@ -113,7 +113,16 @@ def estimate_resident_working_set(
     )
 
     anchor_scratch_bytes = 0
-    if str((tile_config or {}).get("template_path", "")).strip():
+    tile_mode = str((tile_config or {}).get("mode", "grid")).lower()
+    if tile_mode == "pattern_match":
+        image_height, image_width = int(image_shape[0]), int(image_shape[1])
+        pattern = (tile_config or {}).get("pattern_match") or {}
+        max_candidates = _positive(pattern.get("max_candidates"), 20000)
+        # Gray frame + response plane + two uint64 radix-sort planes, CUB temporary storage and
+        # bounded selected/output records. This is intentionally conservative because admission
+        # occurs before the template is decoded and its exact response dimensions are known.
+        anchor_scratch_bytes = image_width * image_height * 48 + max_candidates * 32
+    elif str((tile_config or {}).get("template_path", "")).strip():
         image_height, image_width = int(image_shape[0]), int(image_shape[1])
         search_width = min(_positive(tile_config.get("search_w"), image_width), image_width)
         search_height = min(_positive(tile_config.get("search_h"), image_height), image_height)

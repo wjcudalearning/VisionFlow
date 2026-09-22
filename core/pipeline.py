@@ -128,6 +128,7 @@ class AOIPipeline(LogMixin):
         self.logger.info("Recipe loaded: name=%s version=%s", recipe.get("recipe_name"), recipe.get("version"))
         self._progress(5, "Recipe 已載入")
         tile_config = recipe["tile"]
+        tile_mode = str(tile_config.get("mode", "grid")).lower()
         detector_gpu_requested = detector_gpu_allowed and any(
             bool(config.get("use_gpu", False))
             and self.detector_manager.uses_native_cuda_runtime(detector_id)
@@ -138,7 +139,7 @@ class AOIPipeline(LogMixin):
             and gpu_runtime.available
             and gpu_runtime.supports_resident_roi
             and bool(getattr(gpu_runtime, "supports_file_order_upload", False))
-            and str(tile_config.get("mode", "grid")).lower() == "grid"
+            and tile_mode == "grid"
         )
         with profiler.measure("image_load"):
             if frame is None:
@@ -166,11 +167,29 @@ class AOIPipeline(LogMixin):
             resident_skipped_by_crossover = bool(
                 crossover_policy is not None and crossover_policy.resident_upload_unneeded(resident_skip_key)
             )
+            resident_tiling_supported = (
+                tile_mode == "grid"
+                or (
+                    tile_mode == "pattern_match"
+                    and bool(getattr(gpu_runtime, "supports_pattern_match", False))
+                )
+                or (
+                    tile_mode == "contour"
+                    and bool(getattr(gpu_runtime, "supports_plan_find_contours", False))
+                    and (
+                        not bool(getattr(gpu_runtime, "fallback_to_cpu", True))
+                        or detector_gpu_requested
+                    )
+                )
+            )
+            resident_upload_requested = detector_gpu_requested or (
+                tiling_gpu_requested and tile_mode in {"pattern_match", "contour"}
+            )
             if (
-                detector_gpu_requested
+                resident_upload_requested
                 and gpu_runtime.available
                 and gpu_runtime.supports_resident_roi
-                and str(tile_config.get("mode", "grid")).lower() == "grid"
+                and resident_tiling_supported
                 and not resident_skipped_by_crossover
             ):
                 try:

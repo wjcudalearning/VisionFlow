@@ -205,8 +205,16 @@ class GpuRuntime:
         return self._capabilities.template_match
 
     @property
+    def supports_pattern_match(self) -> bool:
+        return self._capabilities.pattern_match
+
+    @property
     def supports_find_contours(self) -> bool:
         return self._capabilities.find_contours
+
+    @property
+    def supports_plan_find_contours(self) -> bool:
+        return self._capabilities.plan_find_contours
 
     @property
     def supports_exact_median(self) -> bool:
@@ -262,7 +270,9 @@ class GpuRuntime:
                 "roi_batch": self.supports_roi_batch,
                 "fused_401_2": self.supports_fused_401_2,
                 "template_match": self.supports_template_match,
+                "pattern_match": self.supports_pattern_match,
                 "find_contours": self.supports_find_contours,
+                "plan_find_contours": self.supports_plan_find_contours,
                 "exact_median": self.supports_exact_median,
                 "gaussian_blur_f32": self.supports_gaussian_blur_f32,
                 "gaussian_blur_f32_roi": self.supports_gaussian_blur_f32_roi,
@@ -552,6 +562,71 @@ class GpuRuntime:
             "score": float(score.value),
         }
 
+    def pattern_match_gray(
+        self,
+        resident: "GpuResidentImage",
+        template_gray: np.ndarray,
+        *,
+        match_threshold: float,
+        max_candidates: int,
+        nms_threshold: float,
+        max_count: int,
+        sort_row_tolerance: int,
+    ) -> list[dict]:
+        """Run full multi-candidate Pattern Match against a resident image on the device."""
+        if not self.supports_pattern_match:
+            raise GpuRuntimeError("CUDA DLL has no resident Pattern Match export")
+        if resident is None or resident.runtime is not self:
+            raise GpuRuntimeError("Pattern Match requires a resident image owned by this runtime")
+        template = np.ascontiguousarray(template_gray, dtype=np.uint8)
+        if template.ndim != 2:
+            raise GpuRuntimeError("Pattern Match requires a single-channel template")
+        output_width = int(resident.width) - int(template.shape[1]) + 1
+        output_height = int(resident.height) - int(template.shape[0]) + 1
+        if output_width <= 0 or output_height <= 0:
+            raise GpuRuntimeError("Pattern Match template is larger than the resident image")
+        element_count = output_width * output_height
+        candidate_limit = int(max_candidates) if int(max_candidates) > 0 else element_count
+        capacity = min(element_count, candidate_limit)
+        if int(max_count) > 0:
+            capacity = min(capacity, int(max_count))
+        capacity = max(1, capacity)
+        xy = np.empty((capacity, 2), dtype=np.int32)
+        scores = np.empty(capacity, dtype=np.float32)
+        count = ctypes.c_int(0)
+        queued = time.perf_counter()
+        with self._queue_slots, self._lock:
+            lock_acquired = time.perf_counter()
+            result = int(self._dll.vf_pattern_match_gray_u8(
+                self._context,
+                ctypes.c_uint64(resident.generation),
+                template.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+                int(template.shape[1]), int(template.shape[0]),
+                ctypes.c_float(float(match_threshold)), int(max_candidates),
+                ctypes.c_float(float(nms_threshold)), int(max_count), int(sort_row_tolerance),
+                xy.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+                scores.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                capacity, ctypes.byref(count),
+            ))
+            completed = time.perf_counter()
+            returned = max(0, min(int(count.value), capacity))
+            self._record_performance(
+                "vf_pattern_match_gray_u8", int(template.nbytes), returned * 12 + 4,
+                completed - lock_acquired, lock_acquired - queued,
+            )
+        if result != 0:
+            raise self._native_error("vf_pattern_match_gray_u8", result)
+        return [
+            {
+                "x": int(xy[index, 0]),
+                "y": int(xy[index, 1]),
+                "width": int(template.shape[1]),
+                "height": int(template.shape[0]),
+                "score": float(scores[index]),
+            }
+            for index in range(int(count.value))
+        ]
+
     def find_contours_gray(self, mask: np.ndarray, mode, region=None) -> list[np.ndarray]:
         """Reproduce ``cv2.findContours(mask, mode, cv2.CHAIN_APPROX_SIMPLE)`` on the device.
 
@@ -616,6 +691,70 @@ class GpuRuntime:
             )
         if result != 0:
             raise self._native_error("vf_find_contours_u8", result)
+        return [
+            points[int(offsets[index]) * 2 : int(offsets[index + 1]) * 2].reshape(-1, 1, 2).copy()
+            for index in range(int(contour_count.value))
+        ]
+
+    def find_contours_plan(
+        self, image: np.ndarray, plan, device_roi: GpuDeviceRoi, mode="external"
+    ) -> list[np.ndarray]:
+        """Execute a binary plan on a resident ROI and trace its mask without pixel transfers."""
+        if not self.supports_plan_find_contours:
+            raise GpuRuntimeError("CUDA DLL has no resident plan-to-contours export")
+        source = self._u8_image(image, channels=(1, 3), contiguous=False)
+        expected = plan.validate_input(source)
+        if expected.channels != 1 or tuple(expected.shape[:2]) != tuple(source.shape[:2]):
+            raise GpuRuntimeError("Resident contour plan must preserve size and output one channel")
+        self._validate_device_roi(device_roi, source)
+        supported, reason = self.native_plan_capability(plan, source)
+        if not supported:
+            raise GpuRuntimeError(reason)
+        mode_code = self._contour_mode_code(mode)
+        key = (plan.signature, source.shape, source.dtype.str)
+        contour_count = ctypes.c_int(0)
+        point_count = ctypes.c_int(0)
+        offsets = np.empty(0, dtype=np.int32)
+        points = np.empty(0, dtype=np.int32)
+        queued = time.perf_counter()
+        with self._queue_slots, self._lock:
+            lock_acquired = time.perf_counter()
+
+            def create_plan():
+                descriptor, operators = self._plan_descriptors.linear(plan, source)
+                created = ctypes.c_void_p()
+                result = int(self._dll.vf_plan_create(
+                    self._context, ctypes.byref(descriptor),
+                    int(source.shape[1]), int(source.shape[0]), ctypes.byref(created),
+                ))
+                if result != 0 or not created.value:
+                    raise self._native_error("vf_plan_create", result)
+                return created
+
+            handle = NativePlanManager(
+                self._native_plans, self._max_native_plans,
+                self._dll.vf_plan_destroy, self._error_message, GpuRuntimeError,
+            ).get_or_create(key, create_plan)
+            result = int(self._dll.vf_plan_find_contours_roi(
+                handle, ctypes.c_uint64(device_roi.image.generation),
+                int(device_roi.x), int(device_roi.y), mode_code,
+                ctypes.byref(contour_count), ctypes.byref(point_count),
+            ))
+            if result == 0:
+                offsets = np.empty(int(contour_count.value) + 1, dtype=np.int32)
+                points = np.empty(max(int(point_count.value), 1) * 2, dtype=np.int32)
+                result = int(self._dll.vf_find_contours_download(
+                    self._context,
+                    offsets.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)), int(offsets.size),
+                    points.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)), int(point_count.value),
+                ))
+            completed = time.perf_counter()
+            self._record_performance(
+                "vf_plan_find_contours_roi", 0, int(offsets.nbytes + points.nbytes),
+                completed - lock_acquired, lock_acquired - queued,
+            )
+        if result != 0:
+            raise self._native_error("vf_plan_find_contours_roi", result)
         return [
             points[int(offsets[index]) * 2 : int(offsets[index + 1]) * 2].reshape(-1, 1, 2).copy()
             for index in range(int(contour_count.value))
@@ -1648,6 +1787,13 @@ class GpuRuntime:
                 ctypes.POINTER(ctypes.c_uint8), ctypes.c_int, ctypes.c_int,
             ]
             linear.restype = ctypes.c_int
+        plan_contours = getattr(self._dll, "vf_plan_find_contours_roi", None)
+        if plan_contours is not None:
+            plan_contours.argtypes = [
+                ctypes.c_void_p, ctypes.c_uint64, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+            ]
+            plan_contours.restype = ctypes.c_int
         if dag is not None:
             dag.argtypes = [
                 ctypes.c_void_p, ctypes.c_uint64, ctypes.c_int, ctypes.c_int,
@@ -1694,6 +1840,17 @@ class GpuRuntime:
             ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_float),
         ]
         match.restype = ctypes.c_int
+        pattern = getattr(self._dll, "vf_pattern_match_gray_u8", None)
+        if pattern is not None:
+            pattern.argtypes = [
+                ctypes.c_void_p, ctypes.c_uint64,
+                ctypes.POINTER(ctypes.c_uint8), ctypes.c_int, ctypes.c_int,
+                ctypes.c_float, ctypes.c_int, ctypes.c_float,
+                ctypes.c_int, ctypes.c_int,
+                ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_float),
+                ctypes.c_int, ctypes.POINTER(ctypes.c_int),
+            ]
+            pattern.restype = ctypes.c_int
 
     def _load_optional_find_contours(self) -> None:
         trace = getattr(self._dll, "vf_find_contours_u8", None)

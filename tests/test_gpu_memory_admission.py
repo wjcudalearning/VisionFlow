@@ -79,6 +79,20 @@ class ResidentWorkingSetAdmissionTests(unittest.TestCase):
 
         self.assertEqual(estimate.detector_scratch_bytes, 0)
 
+    def test_pattern_match_accounts_for_full_response_and_sort_scratch(self):
+        estimate = estimate_resident_working_set(
+            (800, 1200, 3),
+            800 * 1200 * 3,
+            {
+                "mode": "pattern_match",
+                "pattern_match": {"max_candidates": 1234},
+            },
+            {},
+            total_device_bytes=8 << 30,
+        )
+
+        self.assertEqual(estimate.anchor_scratch_bytes, 800 * 1200 * 48 + 1234 * 32)
+
 
 if __name__ == "__main__":
     unittest.main()

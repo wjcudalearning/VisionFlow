@@ -58,6 +58,18 @@ plan，tile metadata 以 `cpu_crossover` 路線與 `preprocess_routes` 標示。
   Tiler 層級量測：與 `cv2.matchTemplate` 的定位座標在 9 個場景 9/9 相同、分數差 ≤ 4.2e-7、
   逐次執行決定性；形狀界線內（template 每邊 ≤ 128 px 且搜尋面積 ≥ 256×256）比 CPU 快
   1.6～3.9 倍，界線外或失敗時回 CPU 參考；界線見 `core/tiler.py` 的 `gpu_anchor_shapes_supported`。
+- `vf_pattern_match_gray_u8`（Pattern Match 多候選切圖）：**已接入 resident pipeline**。這不是單一最佳
+  anchor export；它在 device 保留完整 `TM_CCOEFF_NORMED` response，完成 threshold、local peak、
+  CUB stable sort、NMS、`max_candidates`／`max_count` 與 row-tolerance 排序，只下載最終座標／分數，
+  後續 Detector 直接取得 device ROI。RTX 3090 合成多候選驗證的 5 個座標／順序與 CPU 相同，最大
+  分數誤差 `6.56e-7`，warm median/P95 約 `0.88/1.34 ms`；舊／缺少 export 的 DLL 在 `auto`
+  完整回 CPU，strict CUDA 明確失敗。
+- `vf_plan_find_contours_roi`（Contour 切圖 resident 原型）：**只供 strict CUDA 實驗，`auto` 不啟用**。
+  它讓 resident ROI 的等尺寸 preprocess plan 直接餵 GPU contour tracer，省去 mask D2H 後再 H2D；
+  shape geometry、rectangle／circle／polygon 分類與 Tile 排序仍在 CPU。622/622 OpenCV contour 案例
+  逐點相同且決定性，切圖 Tile descriptor 等價；但 RTX 3090 切圖 median 為 CPU 4.55 ms、GPU
+  66.64 ms（0.068×），未達效能 gate，因此 runtime metadata 如實回報 CPU／hybrid 路線，不宣稱
+  已完成全 GPU contour tiling。
 - `vf_find_contours_u8` / `vf_find_contours_download`（輪廓抽取）：**正確且已改善，但尚未全面勝過 CPU，
   因此不接入產線**。與 `cv2.findContours(RETR_LIST/RETR_EXTERNAL,
   CHAIN_APPROX_SIMPLE)` 在 `tools/check_contour_equivalence.py` 的 **314 個案例全部逐點

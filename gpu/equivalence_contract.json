@@ -101,9 +101,15 @@
       "comparison": {"kind": "fields", "exact": ["rect", "threshold_decision", "tie_order"], "absolute_tolerance": {"score": 1e-5}},
       "golden_tests": ["tests.test_tiler_anchor_backend"]
     },
+    "localization.pattern_match": {
+      "level": "decision_exact",
+      "exports": ["vf_pattern_match_gray_u8"],
+      "comparison": {"kind": "fields", "exact": ["count", "rect", "nms", "ordering"], "absolute_tolerance": {"score": 1e-5}},
+      "golden_tests": ["tests.test_pattern_match_gpu"]
+    },
     "contours.opencv_simple": {
       "level": "bit_exact",
-      "exports": ["vf_find_contours_u8", "vf_find_contours_download"],
+      "exports": ["vf_find_contours_u8", "vf_find_contours_download", "vf_plan_find_contours_roi"],
       "comparison": {"kind": "fields", "exact": ["contour_count", "order", "point_count", "points"]},
       "golden_tests": ["tests.test_gpu_contours", "tools.check_contour_equivalence"]
     },

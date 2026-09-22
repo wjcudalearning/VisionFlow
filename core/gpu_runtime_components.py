@@ -129,11 +129,24 @@ class GpuCapabilities:
         return bool(self.resident_roi and self.has_exports(("vf_match_template_gray_u8",)))
 
     @property
+    def pattern_match(self) -> bool:
+        """Optional full multi-candidate Pattern Match over the resident image."""
+        return bool(self.resident_roi and self.has_exports(("vf_pattern_match_gray_u8",)))
+
+    @property
     def find_contours(self) -> bool:
         """Optional OpenCV-equivalent contour trace over the resident binary mask."""
         return bool(
             self.resident_roi
             and self.has_exports(("vf_find_contours_u8", "vf_find_contours_download"))
+        )
+
+    @property
+    def plan_find_contours(self) -> bool:
+        """A resident native plan whose binary output feeds contour tracing without a mask copy."""
+        return bool(
+            self.find_contours
+            and self.has_exports(("vf_plan_find_contours_roi",))
         )
 
     @property

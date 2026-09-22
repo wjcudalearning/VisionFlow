@@ -228,6 +228,11 @@ VF_CUDA_API int vf_plan_destroy(void* plan);
 VF_CUDA_API int vf_plan_execute_roi(
     void* plan, uint64_t generation, int x, int y,
     uint8_t* dst, int dst_stride, int dst_channels);
+/* Execute a same-size, single-channel plan over a resident ROI and trace its binary output without
+ * downloading/re-uploading the mask. Results are retrieved with vf_find_contours_download. */
+VF_CUDA_API int vf_plan_find_contours_roi(
+    void* plan, uint64_t generation, int x, int y, int mode,
+    int* out_contour_count, int* out_point_count);
 
 /*
  * Optional detector-neutral DAG extension. Nodes are topologically ordered,
@@ -308,6 +313,20 @@ VF_CUDA_API int vf_match_template_gray_u8(
     int search_x, int search_y, int search_width, int search_height,
     const uint8_t* templ, int template_width, int template_height,
     int* out_match, float* out_score);
+
+/*
+ * Optional full Pattern Match tiling extension. Reads the complete resident image, computes the
+ * TM_CCOEFF_NORMED response plane, local maxima, score/y/x ordering, max_candidates truncation,
+ * IoU NMS, max_count and row-tolerance ordering on the device. Only final (x,y) origins and scores
+ * cross PCIe. out_xy stores two int32 values per match; output_capacity counts matches.
+ */
+VF_CUDA_API int vf_pattern_match_gray_u8(
+    void* context,
+    uint64_t generation,
+    const uint8_t* templ, int template_width, int template_height,
+    float match_threshold, int max_candidates, float nms_threshold,
+    int max_count, int sort_row_tolerance,
+    int32_t* out_xy, float* out_scores, int output_capacity, int* out_count);
 
 /*
  * Debug helper for the localization extension: after vf_match_template_gray_u8 has run, copies

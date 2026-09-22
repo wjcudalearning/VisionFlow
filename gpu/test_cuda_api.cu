@@ -186,6 +186,34 @@ int main() {
         result = vf_plan_execute_roi(
             plan, resident_generation, 0, 0, plan_binary.data(), resized_width, 1);
     }
+    if (result == VF_CUDA_OK) {
+        int contour_count = 0;
+        int point_count = 0;
+        const int contour_result = vf_plan_find_contours_roi(
+            plan, resident_generation, 0, 0, VF_CONTOURS_RETR_EXTERNAL,
+            &contour_count, &point_count);
+        // This smoke plan contains Resize, so the no-coordinate-remapping contour API must reject
+        // it rather than silently returning points in a different coordinate system.
+        if (contour_result != VF_CUDA_INVALID_ARGUMENT) {
+            std::cerr << "Resizing contour plan was not rejected\n";
+            return 19;
+        }
+    }
+    if (result == VF_CUDA_OK) {
+        const uint8_t pattern_template[4] = {0, 64, 128, 255};
+        int32_t pattern_xy[8]{};
+        float pattern_scores[4]{};
+        int pattern_count = 0;
+        result = vf_pattern_match_gray_u8(
+            context, resident_generation,
+            pattern_template, 2, 2,
+            0.8f, 32, 0.3f, 4, 2,
+            pattern_xy, pattern_scores, 4, &pattern_count);
+        if (result == VF_CUDA_OK && (pattern_count < 0 || pattern_count > 4)) {
+            std::cerr << "Pattern Match smoke returned an invalid count\n";
+            return 18;
+        }
+    }
     uint64_t plan_allocation_count = 0;
     if (result == VF_CUDA_OK) {
         result = vf_context_stats(context, &reserved_bytes, &plan_allocation_count);

@@ -66,6 +66,8 @@ OPTIONAL_EXPORT_GROUPS = {
         "vf_roi_batch_destroy",
     },
     "timings": {"vf_context_set_timing_enabled", "vf_context_last_timings"},
+    "pattern_match": {"vf_pattern_match_gray_u8"},
+    "plan_contours": {"vf_plan_find_contours_roi"},
     "context_memory_stats": {"vf_context_memory_stats_v1"},
     "analysis_scratch_trim": {
         "vf_context_memory_stats_v2",
