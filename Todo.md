@@ -5,6 +5,33 @@
 - [x] 2026-09-21：準備 Traditional CV Tuning Tool v1.1.0 獨立發行；將「匯出調參 Recipe」升級為「匯出偵測器」，輸出 `detector_<id>.py` 與 `REGISTER_DETECTOR.md` bundle，沿用獨立 `cv-tuning-tool-vX.Y.Z` Tag 與 `Traditional-CV-Tuning-Tool-vX.Y.Z-windows-x64.zip` 契約，不變更 AOI 主程式或 Utility Tools 版本。
 - [x] 2026-08-18：建立 Traditional CV Tuning Tool v1.0.0 獨立 Windows 發佈契約：加入單一來源版本、PyInstaller-safe launcher、Windows version resource、one-file GUI spec、專用 build script、完整解析度 packaged smoke、README 與 release notes；使用 `cv-tuning-tool-vX.Y.Z` Tag 與 `Traditional-CV-Tuning-Tool-vX.Y.Z-windows-x64.zip`，不混用 AOI 主程式或 Utility Tools 版本；成品為 CPU/OpenCV 處理、Qt OpenGL 顯示／raster fallback，且不含 CUDA DLL。
 
+## Traditional CV Tuning Tool
+
+這支獨立工具維持在 `contour_preprocess_tool/`，並沿用根目錄 `Todo.md` 作為唯一工作清單；不建立第二份 Todo。依 P0 → P1 → P2 順序執行，每一項完成後都必須保留既有完整解析度 CPU/OpenCV 語意及 Detector 匯出等價測試。
+
+### P0：可靠性
+
+- [x] 追蹤未保存參數；標題顯示修改狀態，關閉前確認捨棄，背景儲存中禁止關閉；載入 Recipe 或成功匯出 Detector 後重設乾淨基準。（2026-09-22 完成，見完成紀錄）
+- [x] 保證舊 preview 結果不會覆蓋更新參數後的新結果，並允許待處理工作收斂到最新快照。（2026-09-22 完成，見完成紀錄）
+- [x] 匯出 Detector 前執行參數、步驟、Detector ID、顯示名稱與輸出位置的完整 readiness validation，錯誤集中呈現。（2026-09-22 完成，見完成紀錄）
+- [x] 強化 Recipe 載入的相容性與失敗復原；驗證完成前不得部分套用 GUI，錯誤後維持原參數。（2026-09-22 完成，見完成紀錄）
+
+### P1：OOP 重構
+
+- [x] 將 `app.py` 的 preview/save QRunnable 實作與 signal carriers 抽離到 `workers.py`，維持既有 thread-pool 行為。（2026-09-22 完成，見完成紀錄）
+- [ ] 抽出 Qt-independent tuning session／參數 snapshot、preview 與 export application services，MainWindow 只負責組合與 UI 事件。
+- [ ] 將 Recipe 流程、前處理、二值化、輪廓／屏蔽及形狀參數拆成可獨立測試的 panels。
+- [ ] 將 Detector 匯出對話流程抽成獨立 dialog/controller，維持 exporter 無 Qt 相依。
+
+### P2：UI/UX
+
+- [ ] 加入 Undo／Redo，且 programmatic Recipe 載入不污染歷史。
+- [ ] 加入參數搜尋、功能分組、單區與全域恢復預設。
+- [ ] 加入 Before／After 或分割比較模式，保持兩側縮放與平移同步。
+- [ ] 顯示 preview debounce／處理中／已套用最新參數狀態，並能取消或忽略過期工作。
+- [ ] 記住最近使用的圖片、Recipe 與匯出位置；失效路徑安全忽略。
+- [ ] 匯出前顯示摘要、警告與完成後的下一步註冊入口。
+
 ## 開發原則
 
 - CPU 路徑是正確性基準，也是無 NVIDIA GPU、DLL 載入失敗、CUDA error 或顯存不足時的 fallback。
@@ -1009,6 +1036,8 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 - [ ] 加速不得犧牲 GUI 回應、打包啟動、結果追溯、錯誤訊息或 CPU fallback。
 
 ## 完成紀錄
+
+- [x] 2026-09-22：建立 Traditional CV Tuning Tool 專屬 P0／P1／P2 路線於唯一根目錄 `Todo.md`，並依序完成 P0 全部可靠性工作及 P1 第一項拆分。新增 Qt-independent `TuningSessionState`，以深拷貝基準追蹤載入 Recipe／成功匯出 Detector 後的參數差異，視窗標題顯示修改狀態，關閉時確認捨棄，完整原圖仍在背景儲存時禁止關閉。preview 改以 request revision 與 active job ID 區分最新／過期結果，舊 worker 只負責結束生命週期，不再覆蓋新參數畫面或顯示過期錯誤，並立即收斂到最新快照。新增無 Qt 的 `DetectorExportValidator`，在建立 bundle 前集中檢查 ID、顯示名稱、輸出位置、既有資料夾、Recipe steps 與各組上下限；Recipe GUI 套用則先完整驗證未知欄位、選項、型別與 widget 範圍，全部通過後才修改控制項，避免失敗時留下半套用狀態。另將 preview/save QRunnable 與 signals 從 `app.py` 移至 `workers.py`；23 項調參工具專屬測試、完整 939 tests、compileall、CUDA source／ABI preflight、調參工具／主 GUI offscreen smoke、PyInstaller one-file 重建及 packaged `--version`／`--smoke-test`（exit 0）、`git diff --check` 均通過；未修改 CUDA source／header／ABI／DLL。
 
 - [x] 2026-09-22：**完成 Adaptive Mean 低顯存 CUDA 路徑並取代 padded integral 實作。** 舊路徑需一張 padded u8 與兩張 padded u64 plane；新路徑只用一張 `width×height` uint32 row-prefix plane，row scan 改用 CUB `BlockScan`，垂直視窗由 `32×8` 每像素 threads 以 uint64 累加，保留 `BORDER_REPLICATE`、OpenCV mean rounding、一般／反相 threshold 的 `ceil`／`floor` 語意。Gaussian 與 Adaptive Mean 依 plan 生命週期共用 uint32 scratch，context telemetry、resident working-set admission 與 profiler launch count同步調整；新增可重跑的 `gpu/benchmark_adaptive_mean.py`，以舊／新 DLL 暖機後交錯 A/B 並同時驗證 OpenCV bit-exact、native event 與 plan bytes。RTX 3090／Driver 610.62／CUDA 13.3／`sm_86` 50 次結果：3840×2160 block 35 的 plan 169,375,652→58,060,800 bytes（-65.7%）、native median 0.748→0.734 ms（-1.9%）；12000×2000 為 488,111,652→168,000,000 bytes（-65.6%）、2.119→1.919 ms（-9.4%）。完整 validator 新增 1×1 block 4105（box sum 超過 uint32）、單列、單欄、block 157 border／rounding 案例，全部 max diff 0；native ABI/plan/resident/ROI smoke、54 exports／dependency 檢查、927 tests、compileall、CUDA preflight、CLI 合成 NG smoke 與 `git diff --check` 通過。DLL 只生成於 ignored build／runtime 路徑，未納入 Git。
 

@@ -11,14 +11,18 @@ import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QCloseEvent
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from contour_preprocess_tool import __version__
 from contour_preprocess_tool.app import ContourPreprocessWindow
 from contour_preprocess_tool.detector_export import DetectorBundleExporter
 from contour_preprocess_tool.engine import ContourProcessingEngine
+from contour_preprocess_tool.export_validation import DetectorExportValidator
 from contour_preprocess_tool.recipe_io import TuningRecipeDocument, TuningRecipeStore
+from contour_preprocess_tool.session_state import TuningSessionState
 from contour_preprocess_tool.viewer import FullResolutionImageViewer
+from contour_preprocess_tool.workers import PreviewWorker, SaveWorker
 from detectors.detector_203_as_ap_1 import Detector203AsAp1
 from detectors.detector_401_cs_sn_1 import Detector401CsSn1
 
@@ -237,6 +241,124 @@ class FullResolutionPreviewTests(unittest.TestCase):
         self.assertEqual(window.btn_export_detector.text(), "匯出偵測器")
         self.assertFalse(hasattr(window, "btn_export_recipe"))
 
+    def test_parameter_changes_update_dirty_state_and_can_return_to_baseline(self):
+        window = ContourPreprocessWindow()
+        original = window.spin_thresh.value()
+
+        self.assertFalse(window.isWindowModified())
+        window.spin_thresh.setValue(original + 1)
+        self.assertTrue(window.isWindowModified())
+
+        window.spin_thresh.setValue(original)
+        self.assertFalse(window.isWindowModified())
+
+    def test_loaded_recipe_becomes_clean_baseline(self):
+        window = ContourPreprocessWindow()
+        params = window.collect_params()
+        params["threshold_value"] = params["threshold_value"] + 1
+
+        window.apply_params(params, mark_clean=True, source_label="測試 Recipe")
+
+        self.assertFalse(window.isWindowModified())
+        self.assertEqual(window.session_state.baseline_label, "測試 Recipe")
+        window.spin_thresh.setValue(window.spin_thresh.value() + 1)
+        self.assertTrue(window.isWindowModified())
+
+    def test_invalid_recipe_is_rejected_before_any_gui_value_changes(self):
+        window = ContourPreprocessWindow()
+        original = window.collect_params()
+        invalid = dict(original)
+        invalid["alpha"] = 1.5
+        invalid["threshold_method"] = "不存在的二值化方法"
+
+        with self.assertRaisesRegex(ValueError, "threshold_method"):
+            window.apply_params(invalid)
+
+        self.assertEqual(window.collect_params(), original)
+        self.assertFalse(window.isWindowModified())
+
+    def test_out_of_range_recipe_value_is_rejected_instead_of_clamped(self):
+        window = ContourPreprocessWindow()
+        original = window.collect_params()
+        invalid = dict(original)
+        invalid["threshold_value"] = 999
+
+        with self.assertRaisesRegex(ValueError, "threshold_value"):
+            window.apply_params(invalid)
+
+        self.assertEqual(window.collect_params(), original)
+
+    def test_close_requires_discard_confirmation_for_dirty_params(self):
+        window = ContourPreprocessWindow()
+        window.spin_thresh.setValue(window.spin_thresh.value() + 1)
+        event = QCloseEvent()
+
+        with patch.object(
+            QMessageBox,
+            "question",
+            return_value=QMessageBox.StandardButton.Cancel,
+        ):
+            window.closeEvent(event)
+        self.assertFalse(event.isAccepted())
+
+        event = QCloseEvent()
+        with patch.object(
+            QMessageBox,
+            "question",
+            return_value=QMessageBox.StandardButton.Discard,
+        ):
+            window.closeEvent(event)
+        self.assertTrue(event.isAccepted())
+
+    def test_close_is_blocked_while_full_resolution_save_is_running(self):
+        window = ContourPreprocessWindow()
+        window.save_running = True
+        event = QCloseEvent()
+
+        with patch.object(QMessageBox, "information") as information:
+            window.closeEvent(event)
+
+        self.assertFalse(event.isAccepted())
+        information.assert_called_once()
+
+    def test_stale_preview_result_is_ignored_and_latest_work_is_started(self):
+        window = ContourPreprocessWindow()
+        window.processing_source = np.zeros((8, 9, 3), dtype=np.uint8)
+        sentinel = {"annotated": "current"}
+        window.current_preview_outputs = sentinel
+        window.preview_revision = 4
+        window.preview_active_job_id = 4
+        window.preview_running = True
+
+        window.schedule_preview(immediate=True)
+        self.assertEqual(window.preview_revision, 5)
+        self.assertTrue(window.preview_pending)
+
+        with patch.object(window, "start_preview_worker") as start_latest:
+            window.on_preview_result(4, {"annotated": "stale", "stats": {}})
+
+        self.assertIs(window.current_preview_outputs, sentinel)
+        self.assertFalse(window.preview_running)
+        start_latest.assert_called_once_with()
+
+    def test_latest_preview_result_is_displayed(self):
+        window = ContourPreprocessWindow()
+        window.preview_revision = 7
+        window.preview_active_job_id = 7
+        window.preview_running = True
+        outputs = {"annotated": np.zeros((2, 3, 3), dtype=np.uint8), "stats": {}}
+
+        with (
+            patch.object(window, "show_current_view") as show,
+            patch.object(window, "update_status") as update_status,
+        ):
+            window.on_preview_result(7, outputs)
+
+        self.assertIs(window.current_preview_outputs, outputs)
+        self.assertFalse(window.preview_running)
+        show.assert_called_once_with()
+        update_status.assert_called_once_with({})
+
     def test_versioned_tuning_recipe_round_trip_restores_gui_params(self):
         params = detector_203_tool_params()
         store = TuningRecipeStore()
@@ -354,6 +476,63 @@ class DetectorBundleExporterTests(unittest.TestCase):
         self.assertIn("'libcrypto-3-x64.dll'", spec)
         self.assertIn("'libssl-3-x64.dll'", spec)
         self.assertIn("'api-ms-win-'", spec)
+
+
+class DetectorExportValidatorTests(unittest.TestCase):
+    def test_valid_request_is_ready(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report = DetectorExportValidator().validate(
+                temp_dir,
+                detector_id="203-AS-SN-2",
+                display_name="新偵測器",
+                params=detector_203_tool_params(),
+            )
+
+        self.assertTrue(report.ready)
+        self.assertEqual(report.errors, ())
+
+    def test_invalid_request_collects_all_readiness_errors(self):
+        params = detector_203_tool_params()
+        params["recipe_steps"] = ["None"] * 10
+        params["negative_clip_low"] = 200
+        params["negative_clip_high"] = 100
+        params["poly_min_vertices"] = 20
+        params["poly_max_vertices"] = 10
+        with tempfile.TemporaryDirectory() as temp_dir:
+            existing = Path(temp_dir) / "detector_new_1_bundle"
+            existing.mkdir()
+            report = DetectorExportValidator().validate(
+                temp_dir,
+                detector_id="NEW-1",
+                display_name=" ",
+                params=params,
+            )
+
+        self.assertFalse(report.ready)
+        message = report.message()
+        self.assertIn("顯示名稱", message)
+        self.assertIn("已存在", message)
+        self.assertIn("至少需要一個", message)
+        self.assertIn("clip 下限", message)
+        self.assertIn("頂點數下限", message)
+
+
+class TuningSessionStateTests(unittest.TestCase):
+    def test_accept_uses_an_independent_snapshot(self):
+        params = {"steps": ["Grayscale"], "threshold": 127}
+        state = TuningSessionState()
+        state.accept(params, "初始")
+
+        params["steps"].append("Threshold")
+
+        self.assertTrue(state.is_dirty(params))
+        self.assertEqual(state.baseline_label, "初始")
+
+
+class TuningWorkerTests(unittest.TestCase):
+    def test_workers_live_outside_the_main_window_module(self):
+        self.assertEqual(PreviewWorker.__module__, "contour_preprocess_tool.workers")
+        self.assertEqual(SaveWorker.__module__, "contour_preprocess_tool.workers")
 
 
 if __name__ == "__main__":

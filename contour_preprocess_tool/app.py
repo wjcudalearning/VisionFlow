@@ -24,12 +24,15 @@ Threaded Binary Contour Detection GUI
 
 from __future__ import annotations
 
-import sys
+import math
+from numbers import Integral, Real
 from pathlib import Path
+import sys
 from typing import Any
 
 import numpy as np
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, Signal, Slot
+from PySide6.QtCore import QThreadPool, QTimer, Qt
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -55,10 +58,13 @@ from PySide6.QtWidgets import (
 
 from .engine import ContourProcessingEngine
 from .detector_export import DetectorBundleExporter
+from .export_validation import DetectorExportValidator
 from .image_io import UnicodeImageStore
 from .recipe_io import TuningRecipeStore
+from .session_state import TuningSessionState
 from .version import __version__
 from .viewer import FullResolutionImageViewer
+from .workers import PreviewWorker, SaveWorker
 
 
 # -----------------------------
@@ -92,79 +98,12 @@ def set_dspin(
     return spin
 
 
-class PreviewSignals(QObject):
-    result = Signal(int, dict)
-    error = Signal(int, str)
-
-
-class PreviewWorker(QRunnable):
-    def __init__(
-        self,
-        job_id: int,
-        image: np.ndarray,
-        params: dict[str, Any],
-        engine: ContourProcessingEngine,
-    ) -> None:
-        super().__init__()
-        self.job_id = job_id
-        self.image = image
-        self.params = params
-        self.engine = engine
-        self.signals = PreviewSignals()
-
-    @Slot()
-    def run(self) -> None:
-        try:
-            outputs = self.engine.process(self.image, self.params).as_dict()
-            self.signals.result.emit(self.job_id, outputs)
-        except Exception as exc:
-            self.signals.error.emit(self.job_id, str(exc))
-
-
-class SaveSignals(QObject):
-    finished = Signal(bool, str)
-
-
-class SaveWorker(QRunnable):
-    def __init__(
-        self,
-        image: np.ndarray,
-        params: dict[str, Any],
-        save_path: str,
-        save_kind: str,
-        engine: ContourProcessingEngine,
-        image_store: UnicodeImageStore,
-    ) -> None:
-        super().__init__()
-        self.image = image
-        self.params = params
-        self.save_path = save_path
-        self.save_kind = save_kind
-        self.engine = engine
-        self.image_store = image_store
-        self.signals = SaveSignals()
-
-    @Slot()
-    def run(self) -> None:
-        try:
-            outputs = self.engine.process(self.image, self.params).as_dict()
-            if self.save_kind == "mask":
-                img = outputs["mask"]
-            else:
-                img = outputs["annotated"]
-            ok = self.image_store.write(self.save_path, img)
-            if ok:
-                self.signals.finished.emit(True, f"已儲存：\n{self.save_path}")
-            else:
-                self.signals.finished.emit(False, f"儲存失敗：\n{self.save_path}")
-        except Exception as exc:
-            self.signals.finished.emit(False, f"處理或儲存失敗：{exc}")
-
-
 class ContourPreprocessWindow(QMainWindow):
+    WINDOW_TITLE = "二值化 Contour 即時檢測 GUI - Recipe Editor + Gaussian Blur + 多線程"
+
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("二值化 Contour 即時檢測 GUI - Recipe Editor + Gaussian Blur + 多線程")
+        self.setWindowTitle(f"{self.WINDOW_TITLE}[*]")
         self.resize(1360, 820)
 
         self.original_full: np.ndarray | None = None
@@ -177,9 +116,13 @@ class ContourPreprocessWindow(QMainWindow):
         self.image_store = UnicodeImageStore()
         self.recipe_store = TuningRecipeStore()
         self.detector_exporter = DetectorBundleExporter()
+        self.export_validator = DetectorExportValidator(self.detector_exporter)
+        self.session_state = TuningSessionState()
+        self._applying_params = False
         self.thread_pool = QThreadPool(self)
         self.thread_pool.setMaxThreadCount(2)
-        self.preview_job_id = 0
+        self.preview_revision = 0
+        self.preview_active_job_id: int | None = None
         self.preview_running = False
         self.preview_pending = False
         self.save_running = False
@@ -217,6 +160,8 @@ class ContourPreprocessWindow(QMainWindow):
         self.update_threshold_page_hint()
         self.update_recipe_page_hint()
         self.on_shape_changed()
+        self.session_state.accept(self.collect_params(), "程式預設值")
+        self.refresh_dirty_state()
 
     # -----------------------------
     # UI 建立
@@ -725,11 +670,26 @@ class ContourPreprocessWindow(QMainWindow):
         ]
         for widget in controls:
             if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
-                widget.valueChanged.connect(self.schedule_preview)
+                widget.valueChanged.connect(self.on_tuning_parameter_changed)
             elif isinstance(widget, QComboBox):
-                widget.currentIndexChanged.connect(self.schedule_preview)
+                widget.currentIndexChanged.connect(self.on_tuning_parameter_changed)
             elif isinstance(widget, QCheckBox):
-                widget.toggled.connect(self.schedule_preview)
+                widget.toggled.connect(self.on_tuning_parameter_changed)
+
+    def on_tuning_parameter_changed(self, *_args: object) -> None:
+        if self._applying_params:
+            return
+        self.refresh_dirty_state()
+        self.schedule_preview()
+
+    def refresh_dirty_state(self) -> bool:
+        dirty = self.session_state.is_dirty(self.collect_params())
+        self.setWindowModified(dirty)
+        return dirty
+
+    def accept_current_params(self, label: str) -> None:
+        self.session_state.accept(self.collect_params(), label)
+        self.refresh_dirty_state()
 
     # -----------------------------
     # 參數快照
@@ -807,7 +767,13 @@ class ContourPreprocessWindow(QMainWindow):
             "poly_convex_only": self.check_poly_convex.isChecked(),
         }
 
-    def apply_params(self, params: dict[str, Any]) -> None:
+    def apply_params(
+        self,
+        params: dict[str, Any],
+        *,
+        mark_clean: bool = False,
+        source_label: str = "載入的調參 Recipe",
+    ) -> None:
         widgets = {
             "alpha": self.dspin_alpha,
             "beta": self.spin_beta,
@@ -881,30 +847,82 @@ class ContourPreprocessWindow(QMainWindow):
         unknown = sorted(set(params) - set(widgets) - {"recipe_steps"})
         if unknown:
             raise ValueError(f"調參 Recipe 含未知參數：{', '.join(unknown)}")
+        self._validate_params_before_apply(params, widgets)
+        self._applying_params = True
+        try:
+            steps = params.get("recipe_steps")
+            if steps is not None:
+                if not isinstance(steps, list) or len(steps) > len(self.combo_recipe_steps):
+                    raise ValueError("recipe_steps 必須是最多 10 項的陣列")
+                padded_steps = [
+                    *steps,
+                    *(["None"] * (len(self.combo_recipe_steps) - len(steps))),
+                ]
+                for combo, step in zip(self.combo_recipe_steps, padded_steps):
+                    if combo.findText(str(step)) < 0:
+                        raise ValueError(f"不支援的 Recipe step：{step}")
+                    combo.setCurrentText(str(step))
+            for key, value in params.items():
+                if key == "recipe_steps":
+                    continue
+                widget = widgets[key]
+                if isinstance(widget, QCheckBox):
+                    widget.setChecked(bool(value))
+                elif isinstance(widget, QComboBox):
+                    if widget.findText(str(value)) < 0:
+                        raise ValueError(f"參數 {key} 的選項不支援：{value}")
+                    widget.setCurrentText(str(value))
+                else:
+                    widget.setValue(value)
+        finally:
+            self._applying_params = False
+        self.update_recipe_page_hint()
+        self.update_threshold_page_hint()
+        if mark_clean:
+            self.session_state.accept(self.collect_params(), source_label)
+        self.refresh_dirty_state()
+        self.schedule_preview(immediate=True)
+
+    def _validate_params_before_apply(
+        self,
+        params: dict[str, Any],
+        widgets: dict[str, QWidget],
+    ) -> None:
         steps = params.get("recipe_steps")
         if steps is not None:
             if not isinstance(steps, list) or len(steps) > len(self.combo_recipe_steps):
                 raise ValueError("recipe_steps 必須是最多 10 項的陣列")
-            padded_steps = [*steps, *(["None"] * (len(self.combo_recipe_steps) - len(steps)))]
-            for combo, step in zip(self.combo_recipe_steps, padded_steps):
-                if combo.findText(str(step)) < 0:
+            for step in steps:
+                if self.combo_recipe_steps[0].findText(str(step)) < 0:
                     raise ValueError(f"不支援的 Recipe step：{step}")
-                combo.setCurrentText(str(step))
         for key, value in params.items():
             if key == "recipe_steps":
                 continue
             widget = widgets[key]
             if isinstance(widget, QCheckBox):
-                widget.setChecked(bool(value))
+                if not isinstance(value, bool):
+                    raise ValueError(f"參數 {key} 必須是 true 或 false")
             elif isinstance(widget, QComboBox):
                 if widget.findText(str(value)) < 0:
                     raise ValueError(f"參數 {key} 的選項不支援：{value}")
-                widget.setCurrentText(str(value))
-            else:
-                widget.setValue(value)
-        self.update_recipe_page_hint()
-        self.update_threshold_page_hint()
-        self.schedule_preview(immediate=True)
+            elif isinstance(widget, QDoubleSpinBox):
+                if isinstance(value, bool) or not isinstance(value, Real):
+                    raise ValueError(f"參數 {key} 必須是數值")
+                numeric = float(value)
+                if not math.isfinite(numeric) or not (
+                    widget.minimum() <= numeric <= widget.maximum()
+                ):
+                    raise ValueError(
+                        f"參數 {key} 必須介於 {widget.minimum()} 與 {widget.maximum()}"
+                    )
+            elif isinstance(widget, QSpinBox):
+                if isinstance(value, bool) or not isinstance(value, Integral):
+                    raise ValueError(f"參數 {key} 必須是整數")
+                numeric = int(value)
+                if not widget.minimum() <= numeric <= widget.maximum():
+                    raise ValueError(
+                        f"參數 {key} 必須介於 {widget.minimum()} 與 {widget.maximum()}"
+                    )
 
     def export_detector(self) -> None:
         detector_id, accepted = QInputDialog.getText(
@@ -936,16 +954,32 @@ class ContourPreprocessWindow(QMainWindow):
         )
         if not parent_dir:
             return
+        params = self.collect_params()
+        readiness = self.export_validator.validate(
+            parent_dir,
+            detector_id=detector_id,
+            display_name=display_name,
+            params=params,
+        )
+        if not readiness.ready:
+            QMessageBox.critical(
+                self,
+                "匯出前檢查未通過",
+                readiness.message(),
+            )
+            return
         try:
             result = self.detector_exporter.export(
                 parent_dir,
                 detector_id=detector_id,
                 display_name=display_name,
-                params=self.collect_params(),
+                params=params,
             )
         except (FileExistsError, OSError, TypeError, ValueError) as exc:
             QMessageBox.critical(self, "匯出失敗", str(exc))
             return
+        self.session_state.accept(params, f"已匯出 {result.bundle_dir.name}")
+        self.refresh_dirty_state()
         self.status_label.setText(
             "已匯出偵測器："
             f"{result.detector_path.name}、{result.registration_guide_path.name}\n"
@@ -960,7 +994,11 @@ class ContourPreprocessWindow(QMainWindow):
             return
         try:
             document = self.recipe_store.load(path)
-            self.apply_params(document.params)
+            self.apply_params(
+                document.params,
+                mark_clean=True,
+                source_label=f"Recipe：{path}",
+            )
         except (OSError, TypeError, ValueError) as exc:
             QMessageBox.critical(self, "載入失敗", str(exc))
             return
@@ -1049,6 +1087,31 @@ class ContourPreprocessWindow(QMainWindow):
         self.btn_save_annotated.setEnabled(enabled)
         self.btn_save_mask.setEnabled(enabled)
         self.btn_open.setEnabled(enabled)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self.save_running:
+            QMessageBox.information(
+                self,
+                "正在儲存",
+                "完整原圖仍在處理或寫入，完成前不能關閉程式。",
+            )
+            event.ignore()
+            return
+        if not self.refresh_dirty_state():
+            event.accept()
+            return
+        choice = QMessageBox.question(
+            self,
+            "尚未保存調參變更",
+            "目前參數自上次載入 Recipe 或匯出偵測器後已變更。\n"
+            "直接關閉會遺失這些調整，確定要捨棄變更嗎？",
+            QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if choice == QMessageBox.StandardButton.Discard:
+            event.accept()
+        else:
+            event.ignore()
 
     def default_save_name(self, suffix: str) -> str:
         if not self.current_path:
@@ -1141,6 +1204,7 @@ class ContourPreprocessWindow(QMainWindow):
     def schedule_preview(self, immediate: bool = False) -> None:
         if self.processing_source is None:
             return
+        self.preview_revision += 1
         if immediate:
             self.preview_timer.stop()
             self.start_preview_worker()
@@ -1155,8 +1219,8 @@ class ContourPreprocessWindow(QMainWindow):
             self.preview_pending = True
             return
 
-        self.preview_job_id += 1
-        job_id = self.preview_job_id
+        job_id = self.preview_revision
+        self.preview_active_job_id = job_id
         self.preview_running = True
         self.preview_pending = False
 
@@ -1168,24 +1232,32 @@ class ContourPreprocessWindow(QMainWindow):
         self.thread_pool.start(worker)
 
     def on_preview_result(self, job_id: int, outputs: dict[str, Any]) -> None:
-        if job_id != self.preview_job_id:
+        if job_id != self.preview_active_job_id:
             return
         self.preview_running = False
-        self.current_preview_outputs = outputs
-        self.show_current_view()
-        self.update_status(outputs["stats"])
-        if self.preview_pending:
+        self.preview_active_job_id = None
+        is_latest = job_id == self.preview_revision
+        if is_latest:
+            self.current_preview_outputs = outputs
+            self.show_current_view()
+            self.update_status(outputs["stats"])
+        if self.preview_pending or not is_latest:
             self.preview_pending = False
-            self.schedule_preview(immediate=True)
+            self.preview_timer.stop()
+            self.start_preview_worker()
 
     def on_preview_error(self, job_id: int, message: str) -> None:
-        if job_id != self.preview_job_id:
+        if job_id != self.preview_active_job_id:
             return
         self.preview_running = False
-        self.status_label.setText(f"處理失敗：{message}")
-        if self.preview_pending:
+        self.preview_active_job_id = None
+        is_latest = job_id == self.preview_revision
+        if is_latest:
+            self.status_label.setText(f"處理失敗：{message}")
+        if self.preview_pending or not is_latest:
             self.preview_pending = False
-            self.schedule_preview(immediate=True)
+            self.preview_timer.stop()
+            self.start_preview_worker()
 
     def show_current_view(self) -> None:
         if not self.current_preview_outputs:

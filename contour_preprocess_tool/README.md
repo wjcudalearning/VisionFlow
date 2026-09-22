@@ -34,6 +34,8 @@ $env:QT_QPA_PLATFORM='offscreen'
 
 「載入調參 Recipe」仍支援既有 `visionflow-traditional-cv-tuning/v1` JSON，方便載回舊參數繼續調整；主畫面的原「匯出調參 Recipe」已由「匯出偵測器」取代。
 
+參數自上次載入 Recipe 或成功匯出 Detector 後有異動時，視窗標題會顯示修改標記；關閉前會要求確認是否捨棄。完整原圖仍在背景儲存時，程式會阻止關閉以避免留下不完整檔案。
+
 匯出的 Detector 明確固定走 CPU，不會因 Recipe 誤設 `use_gpu: true` 而把 CPU 運算回報成 CUDA。要加入 GPU 支援時，仍須把有效步驟遷移到共用 immutable `PreprocessPlan`，並完成 CPU/GPU 等價與 fallback 測試。
 
 203-AS-SN-1 已有回歸測試證明 Gray → Gaussian 3 → Adaptive Mean Inv 21/C=1 → 3×3 Open → 四邊屏蔽 → LIST contours 的 mask 逐像素一致，且原始輪廓數一致。
@@ -52,8 +54,11 @@ $env:QT_QPA_PLATFORM='offscreen'
 - `image_io.py`：Unicode-safe OpenCV 讀寫。
 - `recipe_io.py`：版本化調參 Recipe JSON。
 - `detector_export.py`：產生 Detector `.py` 與註冊教學 `.md` bundle。
+- `export_validation.py`：匯出前 readiness validation，不建立或修改檔案。
+- `session_state.py`：無 Qt 的參數基準與 dirty tracking。
+- `workers.py`：preview／save 背景 QRunnable 與 signals。
 - `viewer.py`：完整解析度 OpenGL／Qt raster 顯示。
-- `app.py`：Qt composition root、參數控制、背景 preview/save workers。
+- `app.py`：Qt composition root、參數控制與背景工作生命週期。
 
 ## Windows 獨立版
 
