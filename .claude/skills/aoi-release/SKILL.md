@@ -53,7 +53,7 @@ Use the bundled script from the repository root:
 ```powershell
 $publishScript = '.\.claude\skills\aoi-release\scripts\publish_github_release.ps1'
 & $publishScript `
-  -Repository 'Wwjyun/AOI_CVBased' `
+  -Repository 'wjcudalearning/VisionFlow' `
   -Tag 'vX.Y.Z' `
   -AssetPath '.\release_artifacts\VisionFlow-AOI-vX.Y.Z-windows-x64.zip' `
   -ReleaseName 'VisionFlow AOI vX.Y.Z' `

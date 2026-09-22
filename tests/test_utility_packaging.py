@@ -73,7 +73,7 @@ class UtilityPackagingContractTests(unittest.TestCase):
                 )
 
     def test_build_scripts_locate_the_repository_root_from_their_own_location(self):
-        for path in sorted(BUILD_DIR.glob("*.ps1")):
+        for path in sorted(BUILD_DIR.glob("build_*.ps1")):
             with self.subTest(script=path.name):
                 source = path.read_text(encoding="utf-8")
                 self.assertIn(

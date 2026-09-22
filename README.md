@@ -430,6 +430,8 @@ CUDA DLL 建置與驗證：
 dist\VisionFlow AOI\VisionFlow AOI.exe
 ```
 
+所有 `packaging\scripts\build_*.ps1` 會在 PyInstaller 執行期間暫時排除 `%USERPROFILE%\.cache\codex-runtimes` 等 agent runtime 的 PATH 項目，避免外部 `ucrtbase.dll`、ICU 或 OpenSSL 被打包而導致 QtCore 載入失敗；建置結束後 PATH 會還原。
+
 發行時必須保留整個 `dist\VisionFlow AOI` 目錄，不能只複製 `.exe`，因為程式需要相鄰的 `_internal` runtime。
 
 打包 smoke：

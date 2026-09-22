@@ -8,6 +8,7 @@ $ErrorActionPreference = "Stop"
 # Build scripts live in packaging\scripts; the repository root is two levels up.
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $SpecRoot = Join-Path $RepoRoot "packaging\specs"
+. (Join-Path $PSScriptRoot "pyinstaller_path_guard.ps1")
 
 $expectedVersion = "1.1.0"
 if ($Version -ne $expectedVersion) {
@@ -36,14 +37,16 @@ if (Test-Path -LiteralPath $exePath) {
 
 Push-Location $RepoRoot
 try {
-    & $python -m PyInstaller `
-        --noconfirm `
-        --clean `
-        --distpath $distRoot `
-        --workpath $workRoot `
-        $spec
-    if ($LASTEXITCODE -ne 0) {
-        throw "PyInstaller failed with exit code $LASTEXITCODE"
+    Invoke-WithCleanBuildPath {
+        & $python -m PyInstaller `
+            --noconfirm `
+            --clean `
+            --distpath $distRoot `
+            --workpath $workRoot `
+            $spec
+        if ($LASTEXITCODE -ne 0) {
+            throw "PyInstaller failed with exit code $LASTEXITCODE"
+        }
     }
 
     Copy-Item -LiteralPath $readme -Destination (Join-Path $distRoot "README.md") -Force

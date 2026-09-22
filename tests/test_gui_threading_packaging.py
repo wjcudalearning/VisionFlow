@@ -121,6 +121,44 @@ class GuiThreadingPackagingContractTests(unittest.TestCase):
         self.assertNotIn('"--add-binary"', build)
         self.assertIn("CPU-compatible package", build)
 
+    def test_every_pyinstaller_build_runs_behind_the_path_guard(self):
+        guard = BUILD_DIR / "pyinstaller_path_guard.ps1"
+        self.assertTrue(guard.read_bytes().isascii())
+        builders = [path for path in BUILD_DIR.glob("*.ps1") if "-m PyInstaller" in path.read_text(encoding="utf-8")]
+        self.assertGreaterEqual(len(builders), 7)
+        for path in builders:
+            source = path.read_text(encoding="utf-8")
+            with self.subTest(script=path.name):
+                self.assertIn('. (Join-Path $PSScriptRoot "pyinstaller_path_guard.ps1")', source)
+                self.assertEqual(source.count("-m PyInstaller"), 1)
+                self.assertLess(source.index("Invoke-WithCleanBuildPath {"), source.index("-m PyInstaller"))
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows PowerShell build scripts")
+    def test_path_guard_hides_agent_runtime_dlls_only_while_pyinstaller_runs(self):
+        import subprocess
+
+        guard = BUILD_DIR / "pyinstaller_path_guard.ps1"
+        script = (
+            f". '{guard}'\n"
+            "$env:PATH = 'C:\\keep1;C:\\Users\\u\\.cache\\codex-runtimes\\rt\\poppler\\Library\\bin;C:\\keep2'\n"
+            "Invoke-WithCleanBuildPath { Write-Output \"IN=$env:PATH\" }\n"
+            "try { Invoke-WithCleanBuildPath { throw 'boom' } } catch { Write-Output \"CAUGHT=$($_.Exception.Message)\" }\n"
+            "Write-Output \"OUT=$env:PATH\"\n"
+        )
+        completed = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "-"],
+            input=script,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        lines = [line for line in completed.stdout.splitlines() if "=" in line]
+        self.assertIn("IN=C:\\keep1;C:\\keep2", lines, completed.stdout + completed.stderr)
+        self.assertIn("CAUGHT=boom", lines)
+        self.assertIn(
+            "OUT=C:\\keep1;C:\\Users\\u\\.cache\\codex-runtimes\\rt\\poppler\\Library\\bin;C:\\keep2", lines
+        )
+
     def test_pyinstaller_bundles_pythonnet_but_never_the_vendor_camera_dll(self):
         spec = (SPEC_DIR / "VisionFlow AOI.spec").read_text(encoding="utf-8")
         code = "\n".join(line for line in spec.splitlines() if not line.strip().startswith("#"))

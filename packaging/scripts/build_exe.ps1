@@ -3,6 +3,7 @@ $ErrorActionPreference = "Stop"
 # Build scripts live in packaging\scripts; the repository root is two levels up.
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $SpecRoot = Join-Path $RepoRoot "packaging\specs"
+. (Join-Path $PSScriptRoot "pyinstaller_path_guard.ps1")
 
 $python = Join-Path $RepoRoot "env\Scripts\python.exe"
 if (-not (Test-Path $python)) {
@@ -29,9 +30,11 @@ try {
     @{ commit = $commit; dirty = $dirty } |
         ConvertTo-Json |
         Set-Content -Encoding utf8 (Join-Path $RepoRoot "build_provenance.json")
-    & $python -m PyInstaller --noconfirm --clean $spec
-    if ($LASTEXITCODE -ne 0) {
-        throw "PyInstaller failed with exit code $LASTEXITCODE"
+    Invoke-WithCleanBuildPath {
+        & $python -m PyInstaller --noconfirm --clean $spec
+        if ($LASTEXITCODE -ne 0) {
+            throw "PyInstaller failed with exit code $LASTEXITCODE"
+        }
     }
 } finally {
     Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $RepoRoot "build_provenance.json")
