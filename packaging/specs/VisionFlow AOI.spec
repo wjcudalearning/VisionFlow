@@ -25,7 +25,16 @@ a = Analysis(
     # `devices.ccd_settings_import` has no caller yet (its GUI action is a pending Todo item), so
     # PyInstaller would drop it; bundling it keeps the packaged app matching the documented CCD
     # capability set, so wiring that action later cannot fail on the offline camera machine.
-    hiddenimports=['pythonnet', 'clr_loader', 'devices.ccd_settings_import'],
+    # Detectors exported by the traditional-CV tuning tool import contour_preprocess_tool.engine at
+    # runtime; keep the engine and exporter bundled so a newly registered detector and the packaged
+    # tuned-detector smoke both work.
+    hiddenimports=[
+        'pythonnet',
+        'clr_loader',
+        'devices.ccd_settings_import',
+        'contour_preprocess_tool.engine',
+        'contour_preprocess_tool.detector_export',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

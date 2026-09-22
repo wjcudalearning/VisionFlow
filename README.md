@@ -444,7 +444,7 @@ $process = Start-Process `
 $process.ExitCode
 ```
 
-exit code `0` 代表 bundled Recipe、Qt 視窗、CPU Pipeline、缺 DLL fallback、strict CUDA 失敗與 bundled YOLOX fixture smoke 均符合預期。
+exit code `0` 代表 bundled Recipe、Qt 視窗、CPU Pipeline、缺 DLL fallback、strict CUDA 失敗、Traditional CV Tuning Tool 匯出 Detector 的載入與 CPU 結果（exit code `23` 代表未收錄調參 engine、`24` 代表結果與 engine 不一致）與 bundled YOLOX fixture smoke 均符合預期。
 
 ### 開發驗證
 

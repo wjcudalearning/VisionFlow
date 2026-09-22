@@ -27,6 +27,9 @@ SELF_CHECK_MODULES = (
     "pythonnet",
     "clr",
     "clr_loader",
+    # Detectors exported by the traditional-CV tuning tool import this engine at runtime.
+    "contour_preprocess_tool.engine",
+    "contour_preprocess_tool.detector_export",
     "core.pipeline",
     "core.gpu_runtime",
     "core.recipe_manager",
@@ -95,7 +98,76 @@ def run_packaged_smoke_test() -> int:
     fallback_status = run_packaged_gpu_fallback_smoke_test()
     if fallback_status:
         return fallback_status
+    tuned_status = run_packaged_tuned_detector_smoke_test()
+    if tuned_status:
+        return tuned_status
     return run_packaged_yolox_smoke_test()
+
+
+def run_packaged_tuned_detector_smoke_test() -> int:
+    """A detector exported by the tuning tool must load and run inside the packaged app.
+
+    Returns 23 when the generated source cannot be imported (the tuning engine is not bundled) and 24
+    when its CPU result differs from the tuning engine's analysis of the same image.
+    """
+    import importlib.util
+
+    import cv2
+    import numpy as np
+
+    try:
+        from contour_preprocess_tool.detector_export import DetectorBundleExporter
+        from contour_preprocess_tool.engine import ContourProcessingEngine
+    except ImportError:
+        return 23
+    params = {
+        "recipe_steps": ["Grayscale", "Threshold"],
+        "threshold_method": "Binary",
+        "threshold_value": 127,
+        "threshold_max": 255,
+        "adaptive_block": 31,
+        "adaptive_c": 0.0,
+        "morph_enabled": False,
+        "retrieval_mode": "External",
+        "contour_min_area": 0,
+        "contour_max_area": 0,
+        "shape_mode": "輪廓",
+        "draw_thickness": 1,
+        "show_label": False,
+        "edge_mask_enabled": False,
+        "center_mask_enabled": False,
+    }
+    image = np.zeros((64, 96, 3), dtype=np.uint8)
+    cv2.rectangle(image, (10, 12), (40, 30), (255, 255, 255), -1)
+    cv2.circle(image, (70, 40), 9, (255, 255, 255), -1)
+    exporter = DetectorBundleExporter()
+    names = exporter.names_for("SMOKE-TUNED-1")
+    with tempfile.TemporaryDirectory(prefix="visionflow_packaged_tuned_") as temporary:
+        source_path = Path(temporary) / f"{names.module_name}.py"
+        source_path.write_text(
+            exporter.render_detector(names, "封裝煙霧測試", params, (96, 64)),
+            encoding="utf-8",
+        )
+        try:
+            spec = importlib.util.spec_from_file_location(names.module_name, source_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            result = getattr(module, names.class_name)().run(image)
+        except ImportError:
+            return 23
+    expected = ContourProcessingEngine().analyze(image, params).stats["detections"]
+    actual = [
+        {"shape": defect["metadata"]["shape"], "bbox": defect["bbox_local"], "area": defect["area"]}
+        for defect in result["defects"]
+    ]
+    if (
+        len(expected) != 2
+        or actual != expected
+        or result["execution"]["backend"] != "cpu"
+        or result["execution"]["tuning_warnings"] != []
+    ):
+        return 24
+    return 0
 
 
 def run_packaged_pythonnet_smoke_test() -> int:

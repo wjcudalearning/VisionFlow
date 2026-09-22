@@ -69,6 +69,26 @@ class GuiThreadingPackagingContractTests(unittest.TestCase):
     def test_packaged_smoke_exercises_missing_dll_fallback_policy(self):
         self.assertEqual(run_packaged_gpu_fallback_smoke_test(), 0)
 
+    def test_packaged_smoke_runs_a_detector_exported_by_the_tuning_tool(self):
+        import gui_launcher
+
+        self.assertEqual(gui_launcher.run_packaged_tuned_detector_smoke_test(), 0)
+        self.assertIn("contour_preprocess_tool.engine", gui_launcher.SELF_CHECK_MODULES)
+        spec = (SPEC_DIR / "VisionFlow AOI.spec").read_text(encoding="utf-8")
+        self.assertIn("'contour_preprocess_tool.engine'", spec)
+        self.assertIn("'contour_preprocess_tool.detector_export'", spec)
+
+    def test_tuned_detector_smoke_reports_a_missing_engine_or_wrong_result(self):
+        import gui_launcher
+
+        with patch.dict(sys.modules, {"contour_preprocess_tool.detector_export": None}):
+            self.assertEqual(gui_launcher.run_packaged_tuned_detector_smoke_test(), 23)
+        with patch(
+            "contour_preprocess_tool.engine.ContourProcessingEngine.find_contours",
+            return_value=[],
+        ):
+            self.assertEqual(gui_launcher.run_packaged_tuned_detector_smoke_test(), 24)
+
     def test_cuda_pipeline_workers_are_moved_to_qthreads_before_start(self):
         window_source = (ROOT / "gui" / "main_window.py").read_text(encoding="utf-8")
         controller_source = (ROOT / "gui" / "workflow_controllers.py").read_text(encoding="utf-8")
