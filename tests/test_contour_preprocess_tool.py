@@ -210,6 +210,125 @@ class ContourProcessingEngineTests(unittest.TestCase):
         )
 
 
+def shape_samples_image() -> np.ndarray:
+    import cv2
+
+    image = np.random.default_rng(20260922).integers(
+        0, 40, size=(260, 340, 3), dtype=np.uint8
+    )
+    cv2.rectangle(image, (20, 20), (110, 70), (220, 220, 220), -1)
+    cv2.circle(image, (200, 80), 40, (240, 240, 240), -1)
+    cv2.fillPoly(
+        image,
+        [np.array([[240, 150], [320, 170], [290, 240], [230, 225]])],
+        (200, 200, 200),
+    )
+    cv2.ellipse(image, (90, 190), (60, 22), 25, 0, 360, (230, 230, 230), -1)
+    return image
+
+
+def shape_filter_params(shape_mode: str) -> dict:
+    params = detector_203_tool_params()
+    params.update(
+        {
+            "recipe_steps": ["Grayscale", "Threshold"],
+            "threshold_method": "Binary",
+            "threshold_value": 120,
+            "edge_mask_enabled": False,
+            "retrieval_mode": "External",
+            "shape_mode": shape_mode,
+            "show_label": True,
+            "rect_min_area": 100,
+            "rect_min_fill": 0.7,
+            "circle_min_area": 100,
+            "circle_min_circularity": 0.7,
+            "circle_min_fill": 0.55,
+            "poly_min_area": 100,
+            "poly_max_vertices": 12,
+        }
+    )
+    return params
+
+
+class EngineAnalysisPathTests(unittest.TestCase):
+    SHAPE_MODES = ("輪廓", "矩形", "圓形", "多邊形", "全部")
+
+    def test_analysis_matches_process_for_every_shape_mode(self):
+        image = shape_samples_image()
+        engine = ContourProcessingEngine()
+        for shape_mode in self.SHAPE_MODES:
+            with self.subTest(shape_mode=shape_mode):
+                params = shape_filter_params(shape_mode)
+                analysis = engine.analyze(image, params)
+                processed = engine.process(image, params)
+
+                np.testing.assert_array_equal(analysis.mask, processed.mask)
+                np.testing.assert_array_equal(
+                    analysis.processed_gray, processed.processed_gray
+                )
+                self.assertEqual(analysis.stats, processed.stats)
+                self.assertGreater(analysis.stats["accepted_total"], 0)
+                self.assertEqual(
+                    len(analysis.matches), analysis.stats["accepted_total"]
+                )
+
+    def test_all_mode_keeps_circle_then_rectangle_then_polygon_priority(self):
+        engine = ContourProcessingEngine()
+        image = shape_samples_image()
+        rectangles = engine.analyze(image, shape_filter_params("矩形"))
+        combined = engine.analyze(image, shape_filter_params("全部"))
+
+        circle_boxes = [
+            item["bbox"]
+            for item in combined.stats["detections"]
+            if item["shape"] == "circle"
+        ]
+        self.assertTrue(circle_boxes)
+        # The disc also passes the rectangle filter; "全部" must still call it a circle.
+        rectangle_boxes = [item["bbox"] for item in rectangles.stats["detections"]]
+        for bbox in circle_boxes:
+            self.assertIn(bbox, rectangle_boxes)
+        self.assertEqual(
+            combined.stats["accepted_total"],
+            sum(combined.stats[key] for key in ("contour", "rect", "circle", "poly")),
+        )
+        self.assertEqual(
+            [match.index for match in combined.matches if match.shape == "circle"],
+            list(range(1, combined.stats["circle"] + 1)),
+        )
+
+    def test_analysis_never_draws_or_copies_the_source_image(self):
+        image = shape_samples_image()
+        params = shape_filter_params("全部")
+        forbidden = AssertionError("analysis path must not draw overlays")
+        with patch("contour_preprocess_tool.engine.cv2.putText", side_effect=forbidden), patch(
+            "contour_preprocess_tool.engine.cv2.drawContours", side_effect=forbidden
+        ), patch(
+            "contour_preprocess_tool.engine.cv2.polylines", side_effect=forbidden
+        ), patch(
+            "contour_preprocess_tool.engine.cv2.circle", side_effect=forbidden
+        ), patch(
+            "contour_preprocess_tool.engine.cv2.rectangle", side_effect=forbidden
+        ):
+            analysis = ContourProcessingEngine().analyze(image, params)
+
+        self.assertGreater(analysis.stats["accepted_total"], 0)
+        self.assertFalse(hasattr(analysis, "annotated"))
+        self.assertFalse(hasattr(analysis, "original"))
+
+    def test_process_overlays_differ_from_source_only_where_matches_are_drawn(self):
+        image = shape_samples_image()
+        params = shape_filter_params("全部")
+        result = ContourProcessingEngine().process(image, params)
+
+        np.testing.assert_array_equal(result.original, image)
+        self.assertFalse(np.array_equal(result.annotated, image))
+        params["shape_mode"] = "輪廓"
+        params["contour_min_area"] = 10**9
+        untouched = ContourProcessingEngine().process(image, params)
+        np.testing.assert_array_equal(untouched.annotated, image)
+
+
 class FullResolutionPreviewTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -430,7 +549,12 @@ class DetectorBundleExporterTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "已在匯出時凍結"):
                 module.Detector203AsSn2(params={"threshold_value": 1})
             detector = module.Detector203AsSn2()
-            actual = detector.run(image)
+            with patch.object(
+                ContourProcessingEngine,
+                "process",
+                side_effect=AssertionError("exported detector must use analyze()"),
+            ):
+                actual = detector.run(image)
 
         self.assertEqual(
             expected.stats["detections"],

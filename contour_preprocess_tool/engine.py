@@ -55,6 +55,27 @@ class ProcessingRecipe:
         }
 
 
+@dataclass(frozen=True)
+class ShapeMatch:
+    """One accepted contour, kept in contour discovery order for drawing."""
+
+    shape: str
+    index: int
+    contour: np.ndarray
+    bbox: tuple[int, int, int, int]
+    info: Mapping[str, Any]
+
+
+@dataclass
+class AnalysisResult:
+    """Detection-only output: no overlays and no copy of the source image."""
+
+    processed_gray: np.ndarray
+    mask: np.ndarray
+    matches: tuple[ShapeMatch, ...]
+    stats: dict[str, Any]
+
+
 @dataclass
 class ProcessingResult:
     original: np.ndarray
@@ -76,7 +97,11 @@ class ProcessingResult:
 
 
 class ContourProcessingEngine:
-    """Qt-independent reference engine for traditional-CV detector tuning."""
+    """Qt-independent reference engine for traditional-CV detector tuning.
+
+    ``analyze`` is the detection path used by exported detectors; ``process``
+    adds the tuning overlays on top of the same analysis.
+    """
 
     _RETRIEVAL_MODES = {
         "External": cv2.RETR_EXTERNAL,
@@ -84,12 +109,38 @@ class ContourProcessingEngine:
         "Tree": cv2.RETR_TREE,
     }
 
+    # Stats counter key for each accepted shape family.
+    _SHAPE_COUNTERS = {
+        "contour": "contour",
+        "rectangle": "rect",
+        "circle": "circle",
+        "polygon": "poly",
+    }
+
     def process(
         self, image_bgr: np.ndarray, params: Mapping[str, Any] | ProcessingRecipe
     ) -> ProcessingResult:
-        self._validate_image(image_bgr)
-        recipe = params if isinstance(params, ProcessingRecipe) else ProcessingRecipe.from_mapping(params)
+        recipe = self._recipe(params)
+        analysis = self.analyze(image_bgr, recipe)
         original = image_bgr.copy()
+        annotated = original.copy()
+        mask_annotated = cv2.cvtColor(analysis.mask, cv2.COLOR_GRAY2BGR)
+        for canvas in (annotated, mask_annotated):
+            self.draw_matches(canvas, analysis.matches, recipe)
+        return ProcessingResult(
+            original=original,
+            processed_gray=analysis.processed_gray,
+            mask=analysis.mask,
+            mask_annotated=mask_annotated,
+            annotated=annotated,
+            stats=analysis.stats,
+        )
+
+    def analyze(
+        self, image_bgr: np.ndarray, params: Mapping[str, Any] | ProcessingRecipe
+    ) -> AnalysisResult:
+        self._validate_image(image_bgr)
+        recipe = self._recipe(params)
         current = image_bgr.copy()
         processed_gray: np.ndarray | None = None
         mask: np.ndarray | None = None
@@ -158,8 +209,9 @@ class ContourProcessingEngine:
             threshold_used = True
 
         mask, exclusion_info = self.apply_exclusion_masks(mask, recipe)
-        annotated, mask_annotated, stats = self.detect_and_draw(original, mask, recipe)
-        height, width = original.shape[:2]
+        contours = self.find_contours(mask, recipe)
+        matches, stats = self.match_contours(contours, recipe)
+        height, width = image_bgr.shape[:2]
         stats.update(
             {
                 "exclusion_mask": exclusion_info,
@@ -174,12 +226,10 @@ class ContourProcessingEngine:
                 },
             }
         )
-        return ProcessingResult(
-            original=original,
+        return AnalysisResult(
             processed_gray=processed_gray,
             mask=mask,
-            mask_annotated=mask_annotated,
-            annotated=annotated,
+            matches=matches,
             stats=stats,
         )
 
@@ -297,14 +347,10 @@ class ContourProcessingEngine:
         contours_info = cv2.findContours(mask, retrieval, cv2.CHAIN_APPROX_SIMPLE)
         return list(contours_info[0] if len(contours_info) == 2 else contours_info[1])
 
-    def detect_and_draw(
-        self, image_bgr: np.ndarray, mask: np.ndarray, recipe: ProcessingRecipe
-    ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
-        contours = self.find_contours(mask, recipe)
-        annotated = image_bgr.copy()
-        mask_annotated = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+    def match_contours(
+        self, contours: list[np.ndarray], recipe: ProcessingRecipe
+    ) -> tuple[tuple[ShapeMatch, ...], dict[str, Any]]:
         shape_mode = str(recipe.require("shape_mode"))
-        thickness = int(recipe.require("draw_thickness"))
         stats: dict[str, Any] = {
             "contour_total": len(contours),
             "accepted_total": 0,
@@ -314,33 +360,27 @@ class ContourProcessingEngine:
             "poly": 0,
             "detections": [],
         }
+        matches: list[ShapeMatch] = []
         for contour in contours:
             if contour is None or len(contour) < 3:
                 continue
-            if shape_mode == "輪廓":
-                self._try_draw_contour(
-                    contour, annotated, mask_annotated, stats, thickness, recipe
-                )
-            elif shape_mode == "矩形":
-                self._try_draw_rectangle(
-                    contour, annotated, mask_annotated, stats, thickness, recipe
-                )
-            elif shape_mode == "圓形":
-                self._try_draw_circle(
-                    contour, annotated, mask_annotated, stats, thickness, recipe
-                )
-            elif shape_mode == "多邊形":
-                self._try_draw_polygon(
-                    contour, annotated, mask_annotated, stats, thickness, recipe
-                )
-            elif not self._try_draw_circle(
-                contour, annotated, mask_annotated, stats, thickness, recipe
-            ) and not self._try_draw_rectangle(
-                contour, annotated, mask_annotated, stats, thickness, recipe
-            ):
-                self._try_draw_polygon(
-                    contour, annotated, mask_annotated, stats, thickness, recipe
-                )
+            accepted = self._classify_contour(contour, shape_mode, recipe)
+            if accepted is None:
+                continue
+            shape, info = accepted
+            counter = self._SHAPE_COUNTERS[shape]
+            stats[counter] += 1
+            stats["accepted_total"] += 1
+            x, y, width, height = cv2.boundingRect(contour)
+            bbox = (int(x), int(y), int(width), int(height))
+            matches.append(ShapeMatch(shape, stats[counter], contour, bbox, info))
+            stats["detections"].append(
+                {
+                    "shape": shape,
+                    "bbox": list(bbox),
+                    "area": float(np.round(info["area"], 3)),
+                }
+            )
         stats["detections"].sort(
             key=lambda item: (
                 -float(item["area"]),
@@ -348,123 +388,78 @@ class ContourProcessingEngine:
                 int(item["bbox"][0]),
             )
         )
-        return annotated, mask_annotated, stats
+        return tuple(matches), stats
 
-    def _try_draw_contour(
+    def draw_matches(
         self,
-        contour: np.ndarray,
-        annotated: np.ndarray,
-        mask_annotated: np.ndarray,
-        stats: dict[str, Any],
-        thickness: int,
+        canvas: np.ndarray,
+        matches: tuple[ShapeMatch, ...],
         recipe: ProcessingRecipe,
-    ) -> bool:
+    ) -> None:
+        thickness = int(recipe.require("draw_thickness"))
+        for match in matches:
+            if match.shape == "contour":
+                self._draw_contour(canvas, match, thickness, recipe)
+            elif match.shape == "rectangle":
+                self._draw_rectangle(
+                    canvas, match.contour, match.info, match.index, thickness, recipe
+                )
+            elif match.shape == "circle":
+                self._draw_circle(canvas, match.info, match.index, thickness, recipe)
+            else:
+                self._draw_polygon(canvas, match.info, match.index, thickness, recipe)
+
+    def _classify_contour(
+        self, contour: np.ndarray, shape_mode: str, recipe: ProcessingRecipe
+    ) -> tuple[str, dict[str, Any]] | None:
+        if shape_mode == "輪廓":
+            return self._match_contour(contour, recipe)
+        if shape_mode == "矩形":
+            candidates = (("rectangle", self._match_rectangle),)
+        elif shape_mode == "圓形":
+            candidates = (("circle", self._match_circle),)
+        elif shape_mode == "多邊形":
+            candidates = (("polygon", self._match_polygon),)
+        else:
+            candidates = (
+                ("circle", self._match_circle),
+                ("rectangle", self._match_rectangle),
+                ("polygon", self._match_polygon),
+            )
+        for shape, matcher in candidates:
+            accepted, info = matcher(contour, recipe)
+            if accepted:
+                return shape, info
+        return None
+
+    def _match_contour(
+        self, contour: np.ndarray, recipe: ProcessingRecipe
+    ) -> tuple[str, dict[str, Any]] | None:
         area = float(cv2.contourArea(contour))
         if area <= 0.0 or not self._passes_range(
             area,
             float(recipe.require("contour_min_area")),
             float(recipe.require("contour_max_area")),
         ):
-            return False
-        stats["contour"] += 1
-        stats["accepted_total"] += 1
-        x, y, width, height = cv2.boundingRect(contour)
-        stats["detections"].append(
-            {
-                "shape": "contour",
-                "bbox": [int(x), int(y), int(width), int(height)],
-                "area": float(np.round(area, 3)),
-            }
-        )
+            return None
+        return "contour", {"area": area}
+
+    def _draw_contour(
+        self,
+        canvas: np.ndarray,
+        match: ShapeMatch,
+        thickness: int,
+        recipe: ProcessingRecipe,
+    ) -> None:
         color = (0, 255, 255)
-        for canvas in (annotated, mask_annotated):
-            cv2.drawContours(canvas, [contour], -1, color, thickness)
-            self._draw_label(
-                canvas,
-                (x, y),
-                f"D{stats['contour']} A={area:.0f}",
-                color,
-                recipe,
-            )
-        return True
-
-    def _try_draw_rectangle(
-        self,
-        contour: np.ndarray,
-        annotated: np.ndarray,
-        mask_annotated: np.ndarray,
-        stats: dict[str, Any],
-        thickness: int,
-        recipe: ProcessingRecipe,
-    ) -> bool:
-        accepted, info = self._match_rectangle(contour, recipe)
-        if not accepted:
-            return False
-        stats["rect"] += 1
-        stats["accepted_total"] += 1
-        x, y, width, height = cv2.boundingRect(contour)
-        stats["detections"].append(
-            {
-                "shape": "rectangle",
-                "bbox": [int(x), int(y), int(width), int(height)],
-                "area": float(np.round(info["area"], 3)),
-            }
+        cv2.drawContours(canvas, [match.contour], -1, color, thickness)
+        self._draw_label(
+            canvas,
+            match.bbox[:2],
+            f"D{match.index} A={match.info['area']:.0f}",
+            color,
+            recipe,
         )
-        for canvas in (annotated, mask_annotated):
-            self._draw_rectangle(canvas, contour, info, stats["rect"], thickness, recipe)
-        return True
-
-    def _try_draw_circle(
-        self,
-        contour: np.ndarray,
-        annotated: np.ndarray,
-        mask_annotated: np.ndarray,
-        stats: dict[str, Any],
-        thickness: int,
-        recipe: ProcessingRecipe,
-    ) -> bool:
-        accepted, info = self._match_circle(contour, recipe)
-        if not accepted:
-            return False
-        stats["circle"] += 1
-        stats["accepted_total"] += 1
-        x, y, width, height = cv2.boundingRect(contour)
-        stats["detections"].append(
-            {
-                "shape": "circle",
-                "bbox": [int(x), int(y), int(width), int(height)],
-                "area": float(np.round(info["area"], 3)),
-            }
-        )
-        for canvas in (annotated, mask_annotated):
-            self._draw_circle(canvas, info, stats["circle"], thickness, recipe)
-        return True
-
-    def _try_draw_polygon(
-        self,
-        contour: np.ndarray,
-        annotated: np.ndarray,
-        mask_annotated: np.ndarray,
-        stats: dict[str, Any],
-        thickness: int,
-        recipe: ProcessingRecipe,
-    ) -> bool:
-        accepted, info = self._match_polygon(contour, recipe)
-        if not accepted:
-            return False
-        stats["poly"] += 1
-        stats["accepted_total"] += 1
-        x, y, width, height = cv2.boundingRect(contour)
-        stats["detections"].append(
-            {
-                "shape": "polygon",
-                "bbox": [int(x), int(y), int(width), int(height)],
-                "area": float(np.round(info["area"], 3)),
-            }
-        )
-        for canvas in (annotated, mask_annotated):
-            self._draw_polygon(canvas, info, stats["poly"], thickness, recipe)
-        return True
 
     def _match_rectangle(
         self, contour: np.ndarray, recipe: ProcessingRecipe
@@ -654,6 +649,10 @@ class ContourProcessingEngine:
         cv2.putText(
             canvas, text, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA
         )
+
+    @staticmethod
+    def _recipe(params: Mapping[str, Any] | ProcessingRecipe) -> ProcessingRecipe:
+        return params if isinstance(params, ProcessingRecipe) else ProcessingRecipe.from_mapping(params)
 
     @staticmethod
     def _enhance_contrast(gray: np.ndarray, recipe: ProcessingRecipe) -> np.ndarray:

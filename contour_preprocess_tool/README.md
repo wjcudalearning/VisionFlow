@@ -36,6 +36,8 @@ $env:QT_QPA_PLATFORM='offscreen'
 
 參數自上次載入 Recipe 或成功匯出 Detector 後有異動時，視窗標題會顯示修改標記；關閉前會要求確認是否捨棄。完整原圖仍在背景儲存時，程式會阻止關閉以避免留下不完整檔案。
 
+匯出的 Detector 在產線呼叫 `ContourProcessingEngine.analyze()`：只產生 mask、detections 與 stats，不複製原圖也不繪製標註圖或文字；GUI 預覽與儲存使用的 `process()` 是同一份 analysis 再加上繪圖，因此兩者的 mask 與 detections 保證相同。
+
 匯出的 Detector 明確固定走 CPU，不會因 Recipe 誤設 `use_gpu: true` 而把 CPU 運算回報成 CUDA。要加入 GPU 支援時，仍須把有效步驟遷移到共用 immutable `PreprocessPlan`，並完成 CPU/GPU 等價與 fallback 測試。
 
 203-AS-SN-1 已有回歸測試證明 Gray → Gaussian 3 → Adaptive Mean Inv 21/C=1 → 3×3 Open → 四邊屏蔽 → LIST contours 的 mask 逐像素一致，且原始輪廓數一致。
@@ -50,7 +52,7 @@ $env:QT_QPA_PLATFORM='offscreen'
 
 ## OOP 邊界
 
-- `engine.py`：無 Qt 相依的處理引擎、不可變 Recipe 快照與結果模型。
+- `engine.py`：無 Qt 相依的處理引擎（`analyze()` 偵測路徑、`process()` 偵測＋標註）、不可變 Recipe 快照與結果模型。
 - `image_io.py`：Unicode-safe OpenCV 讀寫。
 - `recipe_io.py`：版本化調參 Recipe JSON。
 - `detector_export.py`：產生 Detector `.py` 與註冊教學 `.md` bundle。

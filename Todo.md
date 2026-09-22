@@ -36,7 +36,7 @@
 
 工具定位是「離線新增 Detector 的調參工具」：調參時看到的結果必須等於匯出 Detector 在 AOI pipeline 內的判定，且產線執行不得背負調參用的繪圖與複製成本。P3 優先於 P1／P2 未完成項目。
 
-- [ ] 在 engine 拆出不繪圖的 analysis 路徑（只產生 mask＋detections＋stats），完整 `process()` 改為 analysis＋繪圖；匯出的 `detect()` 改用 analysis 路徑。以測試證明兩條路徑 mask 逐像素、detections（shape／bbox／area／順序）完全相同。
+- [x] 在 engine 拆出不繪圖的 analysis 路徑（只產生 mask＋detections＋stats），完整 `process()` 改為 analysis＋繪圖；匯出的 `detect()` 改用 analysis 路徑。以測試證明兩條路徑 mask 逐像素、detections（shape／bbox／area／順序）完全相同。（2026-09-22 完成，見完成紀錄）
 - [ ] 釐清並鎖定屏蔽區座標語意：調參時中心／邊緣屏蔽相對整張圖，匯出後在 AOI 是相對每個 tile／ROI（「使用影像中心」變成 tile 中心、邊緣屏蔽作用在每個 tile 邊緣）。需使用者決定：匯出時警告、限制只能用於整圖／單一 ROI，或改成可指定座標基準；決定後加 tile 與整圖判定對照測試。
 - [ ] 評估 tile 切割對結果的影響：跨 tile 邊界的缺陷會被切成多個 contour、面積縮小而漏過面積門檻。匯出 readiness 應比對 Recipe tile 尺寸與面積／邊長上限並提出警告。
 - [ ] 匯出 bundle 附帶 golden 回歸資料：記錄調參影像的檔名、尺寸與 SHA256、工具版本，以及該影像的 detections；產生可放進 `tests/` 的等價測試樣板，證明註冊後的 Detector 對同一張圖得到相同結果。
@@ -1070,6 +1070,7 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 
 ## 完成紀錄
 
+- [x] 2026-09-22：完成 Traditional CV Tuning Tool P3 第一項：`ContourProcessingEngine` 拆出不繪圖的 `analyze()`（回傳 processed_gray、mask、依 contour 順序的 `ShapeMatch` 與 stats，不複製原圖、不產生 annotated／mask_annotated、不呼叫任何繪圖或 `putText`），`process()` 改為同一份 analysis 再以 `draw_matches()` 繪製兩張標註圖；原 `detect_and_draw`／`_try_draw_*` 改為 `match_contours`＋`_classify_contour`（保留「全部」模式 圓形 → 矩形 → 多邊形 優先序）與純繪圖函式。匯出 Detector 範本的 `detect()` 改呼叫 `analyze()`，產線不再每個 tile 繪製標註圖。重構前後以 15 組參數（5 種形狀模式×旋轉矩形開關、Otsu＋Tree＋中心屏蔽、Negative＋CLAHE＋Median＋Morphology、Adaptive Gaussian＋邊緣屏蔽＋面積範圍、203 參數、灰階輸入）比對 `process()` 全部輸出（original、processed_gray、mask、mask_annotated、annotated、stats）逐像素／逐欄位 0 差異。新增 4 項測試：五種形狀模式 analyze 與 process 的 mask／gray／stats 相同、「全部」模式形狀優先序與編號、analysis 路徑在繪圖函式被禁用時仍可執行、未通過篩選時 annotated 等於原圖；匯出 Detector 等價測試改為禁止呼叫 `process()`。已存在的匯出 bundle 需重新匯出才會使用新路徑。
 - [x] 2026-09-22：以「離線新增 Detector 的調參工具」角度審查 `contour_preprocess_tool/`，於 Traditional CV Tuning Tool 區段新增 P3（匯出 Detector 忠實度與產線執行路徑：不繪圖 analysis 路徑、tile／屏蔽座標語意、跨 tile 缺陷、golden 回歸資料、打包收錄）、P4（大圖效能與記憶體：分階段快取、移除多餘複製、儲存重用預覽、顯示轉換、形狀篩選、階段耗時、局部 ROI 預覽）與 P5（工作流程與判讀：縮放被重設及標註編號不一致兩項缺陷、Detection 表格、被篩除原因、像素探針、直方圖、量測、樣本集驗證、參數掃描），並調整執行順序為 P3 → P1 → P4 → P5 → P2。本次僅更新路線圖，未變更程式碼。
 - [x] 2026-09-22：建立 Traditional CV Tuning Tool 專屬 P0／P1／P2 路線於唯一根目錄 `Todo.md`，並依序完成 P0 全部可靠性工作及 P1 第一項拆分。新增 Qt-independent `TuningSessionState`，以深拷貝基準追蹤載入 Recipe／成功匯出 Detector 後的參數差異，視窗標題顯示修改狀態，關閉時確認捨棄，完整原圖仍在背景儲存時禁止關閉。preview 改以 request revision 與 active job ID 區分最新／過期結果，舊 worker 只負責結束生命週期，不再覆蓋新參數畫面或顯示過期錯誤，並立即收斂到最新快照。新增無 Qt 的 `DetectorExportValidator`，在建立 bundle 前集中檢查 ID、顯示名稱、輸出位置、既有資料夾、Recipe steps 與各組上下限；Recipe GUI 套用則先完整驗證未知欄位、選項、型別與 widget 範圍，全部通過後才修改控制項，避免失敗時留下半套用狀態。另將 preview/save QRunnable 與 signals 從 `app.py` 移至 `workers.py`；23 項調參工具專屬測試、完整 939 tests、compileall、CUDA source／ABI preflight、調參工具／主 GUI offscreen smoke、PyInstaller one-file 重建及 packaged `--version`／`--smoke-test`（exit 0）、`git diff --check` 均通過；未修改 CUDA source／header／ABI／DLL。
 

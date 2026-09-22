@@ -159,7 +159,7 @@ class {names.class_name}(BaseDetector):
 
     def detect(self, image) -> list[dict]:
         with self.measure_detection_stage("tuned_cpu_reference"):
-            output = ContourProcessingEngine().process(image, self.TUNING_PARAMS)
+            output = ContourProcessingEngine().analyze(image, self.TUNING_PARAMS)
         self._record_debug_image("generated_tuned_mask", output.mask)
         return [
             {{
