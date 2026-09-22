@@ -60,8 +60,10 @@ class DetectorBundleExporter:
         detector_id: str,
         display_name: str,
         params: Mapping[str, Any],
+        tuning_image_size: tuple[int, int] | None = None,
     ) -> DetectorExportResult:
         names = self.names_for(detector_id)
+        image_size = self._snapshot_image_size(tuning_image_size)
         resolved_display_name = str(display_name).strip()
         if not resolved_display_name:
             raise ValueError("Detector 顯示名稱不可為空白。")
@@ -77,7 +79,7 @@ class DetectorBundleExporter:
         detector_path = bundle_dir / f"{names.module_name}.py"
         guide_path = bundle_dir / self.GUIDE_FILENAME
         detector_path.write_text(
-            self.render_detector(names, resolved_display_name, snapshot),
+            self.render_detector(names, resolved_display_name, snapshot, image_size),
             encoding="utf-8",
         )
         guide_path.write_text(
@@ -101,10 +103,22 @@ class DetectorBundleExporter:
         return snapshot
 
     @staticmethod
+    def _snapshot_image_size(
+        size: tuple[int, int] | None,
+    ) -> tuple[int, int] | None:
+        if size is None:
+            return None
+        width, height = (int(value) for value in size)
+        if width <= 0 or height <= 0:
+            raise ValueError(f"調參影像尺寸必須為正數：{size}")
+        return width, height
+
+    @staticmethod
     def render_detector(
         names: DetectorExportNames,
         display_name: str,
         params: Mapping[str, Any],
+        tuning_image_size: tuple[int, int] | None = None,
     ) -> str:
         params_literal = pformat(dict(params), width=100, sort_dicts=False)
         return f'''from __future__ import annotations
@@ -132,6 +146,10 @@ class {names.class_name}(BaseDetector):
     default_params = {{}}
     PARAM_SPEC = {{}}
     TUNING_PARAMS = MappingProxyType({params_literal})
+    # (width, height) of the tile/ROI image used while tuning; None when unknown.
+    # Center/edge masks are applied relative to each detector input, so production
+    # inputs of another size place the masks differently from the tuned preview.
+    TUNING_IMAGE_SIZE = {tuning_image_size!r}
 
     def __init__(
         self,
@@ -173,6 +191,9 @@ class {names.class_name}(BaseDetector):
                     "recipe_steps": list(output.stats["recipe_steps"]),
                     "threshold_method": self.TUNING_PARAMS["threshold_method"],
                     "retrieval_mode": self.TUNING_PARAMS["retrieval_mode"],
+                    "touches_tile_border": ContourProcessingEngine.touches_inspection_border(
+                        item["bbox"], image.shape, output.stats["exclusion_mask"]
+                    ),
                 }},
             }}
             for item in output.stats["detections"]
@@ -185,12 +206,27 @@ class {names.class_name}(BaseDetector):
             preprocess_cache=preprocess_cache,
         )
         result["execution"]["gpu_requested"] = self._gpu_was_requested
+        result["execution"]["tuning_warnings"] = self.tuning_warnings(image)
         if self._gpu_was_requested:
             result["execution"]["fallback_reason"] = (
                 "調參工具匯出的 Detector 固定使用 OpenCV CPU reference；"
                 "完成共用 PreprocessPlan 與 CPU/GPU 等價驗證前不可啟用 CUDA。"
             )
         return result
+
+    def tuning_warnings(self, image) -> list[str]:
+        if self.TUNING_IMAGE_SIZE is None or not ContourProcessingEngine.exclusion_enabled(
+            self.TUNING_PARAMS
+        ):
+            return []
+        height, width = image.shape[:2]
+        tuned_width, tuned_height = self.TUNING_IMAGE_SIZE
+        if (width, height) == (tuned_width, tuned_height):
+            return []
+        return [
+            f"輸入 {{width}}x{{height}} 與調參影像 {{tuned_width}}x{{tuned_height}} 尺寸不同；"
+            "中心／邊緣屏蔽相對每個 tile／ROI 套用，位置已與調參預覽不同。"
+        ]
 '''
 
     @staticmethod
@@ -244,7 +280,7 @@ detectors:
 
 ## 5. 驗證後再投入使用
 
-1. 以同一張原始 tile/ROI 比較調參工具與新 Detector 的 PASS/NG、defect 數、bbox、area 與順序。
+1. 以同一張原始 tile/ROI 比較調參工具與新 Detector 的 PASS/NG、defect 數、bbox、area 與順序。中心／邊緣屏蔽是相對 Detector 收到的每個 tile／ROI 套用；產線輸入尺寸與調參影像不同時，結果的 `execution.tuning_warnings` 會提出警告。貼到 tile／ROI 邊界（扣除邊緣屏蔽）的缺陷，其 defect metadata 會標記 `touches_tile_border: true`，代表面積可能只是跨 tile 缺陷的一部分。
 2. 新增 DetectorManager 註冊與 Recipe round-trip 測試。
 3. 執行 repository 規定的完整 unit tests、compileall、CUDA preflight、GUI smoke 與 `git diff --check`。
 4. 目前產生的是 OpenCV CPU reference。若要支援 GPU，需另行遷移成共用 immutable `PreprocessPlan`，完成 fallback 與 CPU/GPU 等價測試後才能把 `use_gpu` 改為 `true`。

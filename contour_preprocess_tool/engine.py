@@ -651,6 +651,32 @@ class ContourProcessingEngine:
         )
 
     @staticmethod
+    def exclusion_enabled(params: Mapping[str, Any] | ProcessingRecipe) -> bool:
+        """Whether a center or edge mask is configured; both are relative to the input."""
+        return bool(params.get("center_mask_enabled", False)) or bool(
+            params.get("edge_mask_enabled", False)
+        )
+
+    @staticmethod
+    def touches_inspection_border(
+        bbox: Any, image_shape: tuple[int, ...], exclusion_info: Mapping[str, Any] | None
+    ) -> bool:
+        """True when a bbox reaches the inspected region edge (input edge minus edge mask).
+
+        In the AOI pipeline the input is one tile/ROI, so such a defect may continue
+        into the neighbouring tile and its area here is only a partial measurement.
+        """
+        height, width = image_shape[:2]
+        margins = (exclusion_info or {}).get("edge_margins") or {}
+        x, y, box_width, box_height = (int(value) for value in bbox)
+        return (
+            x <= int(margins.get("left", 0))
+            or y <= int(margins.get("top", 0))
+            or x + box_width >= width - int(margins.get("right", 0))
+            or y + box_height >= height - int(margins.get("bottom", 0))
+        )
+
+    @staticmethod
     def _recipe(params: Mapping[str, Any] | ProcessingRecipe) -> ProcessingRecipe:
         return params if isinstance(params, ProcessingRecipe) else ProcessingRecipe.from_mapping(params)
 

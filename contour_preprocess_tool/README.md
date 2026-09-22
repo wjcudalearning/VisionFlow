@@ -38,6 +38,8 @@ $env:QT_QPA_PLATFORM='offscreen'
 
 匯出的 Detector 在產線呼叫 `ContourProcessingEngine.analyze()`：只產生 mask、detections 與 stats，不複製原圖也不繪製標註圖或文字；GUI 預覽與儲存使用的 `process()` 是同一份 analysis 再加上繪圖，因此兩者的 mask 與 detections 保證相同。
 
+中心／邊緣屏蔽與所有座標都是相對 Detector 收到的輸入（AOI 的每個 tile／ROI），不是整張原圖。匯出時會記錄調參影像尺寸為 `TUNING_IMAGE_SIZE`；啟用屏蔽且產線輸入尺寸不同時，Detector 結果的 `execution.tuning_warnings` 會提出警告。每筆 defect 的 `metadata.touches_tile_border` 標記 bbox 是否貼到輸入邊界（扣除邊緣屏蔽），貼邊代表缺陷可能延伸到相鄰 tile、面積只量到一部分。匯出前檢查若發現啟用屏蔽、未載入影像，或面積／邊長／半徑上限超過調參影像可容納的尺寸，會列出注意事項並要求確認後才匯出。
+
 匯出的 Detector 明確固定走 CPU，不會因 Recipe 誤設 `use_gpu: true` 而把 CPU 運算回報成 CUDA。要加入 GPU 支援時，仍須把有效步驟遷移到共用 immutable `PreprocessPlan`，並完成 CPU/GPU 等價與 fallback 測試。
 
 203-AS-SN-1 已有回歸測試證明 Gray → Gaussian 3 → Adaptive Mean Inv 21/C=1 → 3×3 Open → 四邊屏蔽 → LIST contours 的 mask 逐像素一致，且原始輪廓數一致。

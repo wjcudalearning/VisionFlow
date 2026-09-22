@@ -500,6 +500,8 @@ class ContourPreprocessWindow(QMainWindow):
             "\n中心屏蔽例：影像中心往外擴 X=1000、Y=1000，會清掉中心 2000x2000 的區域。"
             "\n邊緣屏蔽例：四邊共同內縮=200，會把上下左右各 200 px 清成黑色。"
             "\n中心屏蔽與邊緣屏蔽可以同時開。"
+            "\n匯出成 Detector 後，屏蔽是相對 AOI 傳給 Detector 的每個 tile／ROI 套用，"
+            "不是整張原圖；請載入與產線相同尺寸的 tile／ROI 來調參。"
         )
         note.setWordWrap(True)
         note.setStyleSheet("color:#ddd; background:#333; padding:6px;")
@@ -955,11 +957,13 @@ class ContourPreprocessWindow(QMainWindow):
         if not parent_dir:
             return
         params = self.collect_params()
+        image_size = self.tuning_image_size()
         readiness = self.export_validator.validate(
             parent_dir,
             detector_id=detector_id,
             display_name=display_name,
             params=params,
+            image_size=image_size,
         )
         if not readiness.ready:
             QMessageBox.critical(
@@ -968,12 +972,23 @@ class ContourPreprocessWindow(QMainWindow):
                 readiness.message(),
             )
             return
+        if readiness.warnings:
+            choice = QMessageBox.question(
+                self,
+                "匯出前注意事項",
+                readiness.warning_message() + "\n\n確定要繼續匯出嗎？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if choice != QMessageBox.StandardButton.Yes:
+                return
         try:
             result = self.detector_exporter.export(
                 parent_dir,
                 detector_id=detector_id,
                 display_name=display_name,
                 params=params,
+                tuning_image_size=image_size,
             )
         except (FileExistsError, OSError, TypeError, ValueError) as exc:
             QMessageBox.critical(self, "匯出失敗", str(exc))
@@ -985,6 +1000,12 @@ class ContourPreprocessWindow(QMainWindow):
             f"{result.detector_path.name}、{result.registration_guide_path.name}\n"
             f"{result.bundle_dir}"
         )
+
+    def tuning_image_size(self) -> tuple[int, int] | None:
+        if self.processing_source is None:
+            return None
+        height, width = self.processing_source.shape[:2]
+        return int(width), int(height)
 
     def import_tuning_recipe(self) -> None:
         path, _ = QFileDialog.getOpenFileName(

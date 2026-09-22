@@ -13,6 +13,7 @@ from .detector_export import DetectorBundleExporter
 @dataclass(frozen=True)
 class ExportReadinessReport:
     errors: tuple[str, ...]
+    warnings: tuple[str, ...] = ()
 
     @property
     def ready(self) -> bool:
@@ -20,6 +21,9 @@ class ExportReadinessReport:
 
     def message(self) -> str:
         return "\n".join(f"• {error}" for error in self.errors)
+
+    def warning_message(self) -> str:
+        return "\n".join(f"• {warning}" for warning in self.warnings)
 
 
 class DetectorExportValidator:
@@ -47,6 +51,7 @@ class DetectorExportValidator:
         detector_id: str,
         display_name: str,
         params: Mapping[str, Any],
+        image_size: tuple[int, int] | None = None,
     ) -> ExportReadinessReport:
         errors: list[str] = []
         names = None
@@ -79,4 +84,46 @@ class DetectorExportValidator:
             maximum = float(params.get(maximum_key, 0))
             if maximum > 0 and minimum > maximum:
                 errors.append(f"{label}下限不可大於上限。")
-        return ExportReadinessReport(tuple(errors))
+        return ExportReadinessReport(tuple(errors), self._tile_warnings(params, image_size))
+
+    # Upper limits compared with what one tuning-sized input can hold.
+    _AREA_LIMITS = (
+        ("contour_max_area", "Contour 面積"),
+        ("rect_max_area", "矩形面積"),
+        ("circle_max_area", "圓形面積"),
+        ("poly_max_area", "多邊形面積"),
+    )
+
+    def _tile_warnings(
+        self, params: Mapping[str, Any], image_size: tuple[int, int] | None
+    ) -> tuple[str, ...]:
+        if image_size is None:
+            return (
+                "尚未載入調參影像：匯出的 Detector 不會記錄調參尺寸，"
+                "產線無法檢查 tile／ROI 尺寸是否與調參時相同。",
+            )
+        width, height = (int(value) for value in image_size)
+        warnings: list[str] = []
+        if bool(params.get("center_mask_enabled", False)) or bool(
+            params.get("edge_mask_enabled", False)
+        ):
+            warnings.append(
+                "中心／邊緣屏蔽會相對 Detector 收到的每個 tile／ROI 套用，不是整張原圖；"
+                f"請確認產線 tile／ROI 尺寸與調參影像 {width}x{height} 相同。"
+            )
+        oversized: list[str] = []
+        for key, label in self._AREA_LIMITS:
+            limit = float(params.get(key, 0))
+            if limit > width * height:
+                oversized.append(f"{label}上限 {limit:g} px²")
+        if float(params.get("rect_max_side", 0)) > max(width, height):
+            oversized.append(f"矩形邊長上限 {float(params['rect_max_side']):g} px")
+        if 2.0 * float(params.get("circle_max_radius", 0)) > min(width, height):
+            oversized.append(f"圓形半徑上限 {float(params['circle_max_radius']):g} px")
+        if oversized:
+            warnings.append(
+                f"{'、'.join(oversized)} 超過調參影像 {width}x{height} 可容納的尺寸；"
+                "這麼大的缺陷在產線會被 tile 邊界切開、面積變小，上限實際上不會生效。"
+                "匯出的 Detector 會以 touches_tile_border 標記貼邊的缺陷。"
+            )
+        return tuple(warnings)

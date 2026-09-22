@@ -640,6 +640,143 @@ class DetectorExportValidatorTests(unittest.TestCase):
         self.assertIn("clip 下限", message)
         self.assertIn("頂點數下限", message)
 
+    def _validate(self, params: dict, image_size):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            return DetectorExportValidator().validate(
+                temp_dir,
+                detector_id="NEW-1",
+                display_name="新偵測器",
+                params=params,
+                image_size=image_size,
+            )
+
+    def test_tile_relative_warnings_do_not_block_export(self):
+        params = detector_203_tool_params()
+        params["edge_mask_enabled"] = False
+
+        self.assertEqual(self._validate(params, (181, 137)).warnings, ())
+
+        missing_image = self._validate(params, None)
+        self.assertTrue(missing_image.ready)
+        self.assertIn("尚未載入調參影像", missing_image.warning_message())
+
+        params["edge_mask_enabled"] = True
+        masked = self._validate(params, (181, 137))
+        self.assertTrue(masked.ready)
+        self.assertIn("每個 tile／ROI", masked.warning_message())
+        self.assertIn("181x137", masked.warning_message())
+
+    def test_limits_larger_than_the_tuning_image_are_reported(self):
+        params = detector_203_tool_params()
+        params["edge_mask_enabled"] = False
+        params["contour_max_area"] = 100 * 100
+        params["rect_max_side"] = 100
+        params["circle_max_radius"] = 50
+        self.assertEqual(self._validate(params, (100, 100)).warnings, ())
+
+        params["contour_max_area"] = 100 * 100 + 1
+        params["rect_max_side"] = 101
+        params["circle_max_radius"] = 50.5
+        message = self._validate(params, (100, 100)).warning_message()
+        self.assertIn("Contour 面積上限 10001", message)
+        self.assertIn("矩形邊長上限 101", message)
+        self.assertIn("圓形半徑上限 50.5", message)
+        self.assertIn("touches_tile_border", message)
+
+
+class TileRelativeExportTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _load_generated(self, temp_dir: str, image_size):
+        exported = DetectorBundleExporter().export(
+            temp_dir,
+            detector_id="203-AS-SN-2",
+            display_name="203 自適應輪廓檢測第二版",
+            params=detector_203_tool_params(),
+            tuning_image_size=image_size,
+        )
+        spec = importlib.util.spec_from_file_location(
+            f"generated_tile_detector_{len(os.listdir(temp_dir))}", exported.detector_path
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.Detector203AsSn2()
+
+    def test_touches_inspection_border_respects_edge_margins(self):
+        touches = ContourProcessingEngine.touches_inspection_border
+        shape = (100, 200)
+        self.assertTrue(touches([0, 40, 10, 10], shape, None))
+        self.assertTrue(touches([190, 40, 10, 10], shape, {"edge_margins": None}))
+        self.assertFalse(touches([50, 40, 10, 10], shape, None))
+        margins = {"edge_margins": {"left": 15, "right": 26, "top": 50, "bottom": 20}}
+        self.assertTrue(touches([15, 60, 5, 5], shape, margins))
+        self.assertTrue(touches([100, 70, 5, 10], shape, margins))
+        self.assertFalse(touches([16, 51, 5, 5], shape, margins))
+
+    def test_generated_detector_flags_border_defects_and_size_mismatch(self):
+        image = np.random.default_rng(2030922).integers(
+            0, 256, size=(137, 181, 3), dtype=np.uint8
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            detector = self._load_generated(temp_dir, (181, 137))
+            self.assertEqual(detector.TUNING_IMAGE_SIZE, (181, 137))
+            same_size = detector.run(image)
+            other_size = detector.run(image[:, :150])
+
+        self.assertEqual(same_size["execution"]["tuning_warnings"], [])
+        self.assertEqual(len(other_size["execution"]["tuning_warnings"]), 1)
+        self.assertIn("150x137", other_size["execution"]["tuning_warnings"][0])
+        analysis = ContourProcessingEngine().analyze(image, detector_203_tool_params())
+        expected = [
+            ContourProcessingEngine.touches_inspection_border(
+                item["bbox"], image.shape, analysis.stats["exclusion_mask"]
+            )
+            for item in analysis.stats["detections"]
+        ]
+        flags = [d["metadata"]["touches_tile_border"] for d in same_size["defects"]]
+        self.assertEqual(flags, expected)
+        self.assertIn(True, flags)
+        self.assertIn(False, flags)
+
+    def test_unknown_tuning_size_never_warns(self):
+        image = np.zeros((40, 50, 3), dtype=np.uint8)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            detector = self._load_generated(temp_dir, None)
+            result = detector.run(image)
+
+        self.assertIsNone(detector.TUNING_IMAGE_SIZE)
+        self.assertEqual(result["execution"]["tuning_warnings"], [])
+
+    def _run_gui_export(self, temp_dir: str, answer):
+        window = ContourPreprocessWindow()
+        window.processing_source = np.zeros((137, 181, 3), dtype=np.uint8)
+        window.check_edge_mask.setChecked(True)
+        with patch(
+            "contour_preprocess_tool.app.QInputDialog.getText",
+            side_effect=[("GUI-1", True), ("GUI 偵測器", True)],
+        ), patch(
+            "contour_preprocess_tool.app.QFileDialog.getExistingDirectory",
+            return_value=temp_dir,
+        ), patch(
+            "contour_preprocess_tool.app.QMessageBox.question", return_value=answer
+        ) as question:
+            window.export_detector()
+        return question
+
+    def test_gui_export_requires_confirming_tile_warnings(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            question = self._run_gui_export(temp_dir, QMessageBox.StandardButton.Cancel)
+            self.assertIn("每個 tile／ROI", question.call_args.args[2])
+            self.assertEqual(os.listdir(temp_dir), [])
+
+            self._run_gui_export(temp_dir, QMessageBox.StandardButton.Yes)
+            source = (
+                Path(temp_dir) / "detector_gui_1_bundle" / "detector_gui_1.py"
+            ).read_text(encoding="utf-8")
+        self.assertIn("TUNING_IMAGE_SIZE = (181, 137)", source)
+
 
 class TuningSessionStateTests(unittest.TestCase):
     def test_accept_uses_an_independent_snapshot(self):
