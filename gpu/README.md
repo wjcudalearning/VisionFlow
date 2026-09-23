@@ -64,6 +64,17 @@ plan，tile metadata 以 `cpu_crossover` 路線與 `preprocess_routes` 標示。
   後續 Detector 直接取得 device ROI。RTX 3090 合成多候選驗證的 5 個座標／順序與 CPU 相同，最大
   分數誤差 `6.56e-7`，warm median/P95 約 `0.88/1.34 ms`；舊／缺少 export 的 DLL 在 `auto`
   完整回 CPU，strict CUDA 明確失敗。
+  大模板改走 FFT response：逐點暴力 kernel 的成本是 response×template，正式尺寸
+  16384×13000＋2000×12000 為 3.5e14 MAC，無法執行，且 shared-memory halo 會先回
+  `VF_CUDA_UNSUPPORTED`。FFT 路徑以 cuFFT 算互相關分子，視窗統計用 int64 summed-area table
+  保持精確（OpenCV 自己的 CUDA TemplateMatching 在此尺寸以 float32 正規化，與其 CPU 參考最大
+  差 0.9，本路徑約 1e-5）。選路門檻為每 frame pixel 4000 MAC，見
+  `PATTERN_FFT_CROSSOVER_WORK_PER_PIXEL`，Python 端 admission 以相同規則估算工作集。
+  cuFFT 只在執行期以 `LoadLibrary` 載入（先搜尋路徑、再搜尋本 DLL 所在目錄），
+  `vf_pattern_match_fft_available` 回報是否可用；缺少時大模板回 `VF_CUDA_UNSUPPORTED`，
+  `auto` 用 CPU 定位、strict CUDA 明確失敗。RTX 3090 實測見
+  `gpu/validate_pattern_match_fft.py`：正式尺寸 CPU 16.7 s、GPU warm median 190.5 ms（87×），
+  座標與排序相同、分數在 1e-4 內，context 保留 6.77 GiB、cuFFT work area 另約 1.62 GiB。
 - `vf_plan_find_contours_roi`（Contour 切圖 resident 原型）：**只供 strict CUDA 實驗，`auto` 不啟用**。
   它讓 resident ROI 的等尺寸 preprocess plan 直接餵 GPU contour tracer，省去 mask D2H 後再 H2D；
   shape geometry、rectangle／circle／polygon 分類與 Tile 排序仍在 CPU。622/622 OpenCV contour 案例

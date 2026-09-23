@@ -372,6 +372,12 @@ CUDA DLL 建置與驗證：
 
 目前 v1.6.3 在 RTX 3090 的合成正式尺寸案例（16384×13000、6 個 12000×2000 ROI、`202-CS-SN-1`）量得端到端 CPU 5392.9 ms、GPU 271.5 ms，median speedup 19.86×，5/5 輪判定欄位一致。這只代表該版本、硬體、影像幾何與 Detector，不可外推到真實產品。
 
+### 大模板 Pattern Match（選用 cuFFT）
+
+`tile.mode: pattern_match` 的模板若大到逐點比對不敷成本，GPU 會改用 FFT 計算 response：互相關分子由 cuFFT 計算，視窗統計以 int64 summed-area table 保持精確，判定與排序沿用同一條路徑。RTX 3090、16384×13000 影像配 2000×12000 模板實測，定位由 CPU 的 16.7 s 降為 190.5 ms（87×），座標與排序和 `cv2.matchTemplate` 相同、分數差在 1e-4 內。
+
+這條路徑需要 NVIDIA 的 cuFFT runtime（`cufft64_12.dll`，約 244 MB）。把它放到 `gpu\` 目錄即可被打包收錄，也可由機器上已安裝的 CUDA Toolkit 提供；兩者都沒有時，大模板會回報不支援，`auto` 以 CPU 定位、`cuda` 明確失敗，其餘功能不受影響。實際是否可用列在執行結果的 `capabilities.pattern_match_fft`。
+
 完整的 ABI、resident image、傳輸量、CPU/GPU 等價、benchmark 口徑、已撤回方案與 RTX 指令請閱讀 [`gpu/README.md`](gpu/README.md)。
 
 ## 獨立工具

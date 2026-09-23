@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 
 from core.gpu_runtime import GpuResidentImage, GpuRuntimeError
+from core.gpu_runtime_components import GpuCapabilities
 from core.tiler import create_tiler
 
 
@@ -33,6 +34,71 @@ class _PatternRuntime:
     def fallback_or_raise(self, exc):
         if self.strict:
             raise exc
+
+
+class _StubDll:
+    """An old or new DLL: only the exports listed here exist."""
+
+    def __init__(self, exports: dict):
+        self._exports = exports
+
+    def __getattr__(self, name):
+        try:
+            return self._exports[name]
+        except KeyError:
+            raise AttributeError(name) from None
+
+
+class _StubRuntime:
+    def __init__(self, exports: dict):
+        self.available = True
+        self._dll = _StubDll(exports)
+        self._context = object()
+
+
+RESIDENT_EXPORTS = (
+    "vf_plan_query", "vf_plan_create", "vf_plan_execute", "vf_plan_destroy",
+    "vf_dag_plan_query", "vf_dag_plan_create", "vf_dag_plan_execute", "vf_dag_plan_destroy",
+    "vf_context_upload_u8", "vf_plan_execute_roi", "vf_dag_plan_execute_roi",
+    "vf_pattern_match_gray_u8",
+)
+
+
+class PatternMatchFftCapabilityTests(unittest.TestCase):
+    def _capabilities(self, **extra):
+        exports = {name: object() for name in RESIDENT_EXPORTS}
+        exports.update(extra)
+        return GpuCapabilities(_StubRuntime(exports))
+
+    def test_old_dll_without_the_probe_reports_no_fft_path(self):
+        capabilities = self._capabilities()
+
+        self.assertTrue(capabilities.pattern_match)
+        self.assertFalse(capabilities.pattern_match_fft)
+
+    def test_probe_result_decides_whether_cufft_is_installed(self):
+        for available, expected in ((1, True), (0, False)):
+            with self.subTest(available=available):
+                capabilities = self._capabilities(
+                    vf_pattern_match_fft_available=lambda available=available: available
+                )
+                self.assertIs(capabilities.pattern_match_fft, expected)
+
+    def test_a_failing_probe_is_reported_as_unavailable(self):
+        def raising():
+            raise OSError("cuFFT probe failed")
+
+        capabilities = self._capabilities(vf_pattern_match_fft_available=raising)
+
+        self.assertFalse(capabilities.pattern_match_fft)
+
+    def test_a_dll_without_pattern_match_never_reports_the_fft_path(self):
+        exports = {name: object() for name in RESIDENT_EXPORTS if name != "vf_pattern_match_gray_u8"}
+        exports["vf_pattern_match_fft_available"] = lambda: 1
+        capabilities = GpuCapabilities(_StubRuntime(exports))
+
+        self.assertFalse(capabilities.pattern_match)
+        self.assertFalse(capabilities.pattern_match_fft)
 
 
 class PatternMatchGpuRoutingTests(unittest.TestCase):

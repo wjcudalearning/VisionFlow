@@ -103,9 +103,10 @@
     },
     "localization.pattern_match": {
       "level": "decision_exact",
-      "exports": ["vf_pattern_match_gray_u8"],
+      "exports": ["vf_pattern_match_gray_u8", "vf_pattern_match_fft_available"],
       "comparison": {"kind": "fields", "exact": ["count", "rect", "nms", "ordering"], "absolute_tolerance": {"score": 1e-5}},
-      "golden_tests": ["tests.test_pattern_match_gpu"]
+      "golden_tests": ["tests.test_pattern_match_gpu"],
+      "notes": "Templates too large for the shared-memory scoring kernel take an FFT response path; vf_pattern_match_fft_available reports whether the optional cuFFT runtime is installed for it."
     },
     "contours.opencv_simple": {
       "level": "bit_exact",

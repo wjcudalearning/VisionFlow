@@ -9,6 +9,11 @@ ROOT = SPEC_DIR.parent.parent
 
 cuda_dll = ROOT / 'gpu' / 'visionflow_cuda.dll'
 cuda_binaries = [(str(cuda_dll), 'gpu')] if cuda_dll.exists() else []
+# Optional cuFFT runtime for the large-template Pattern Match path. It is a 244 MB NVIDIA
+# redistributable that the DLL loads at run time, so the package works without it: the native
+# library still loads and large templates report UNSUPPORTED, which falls back to the CPU.
+for cufft_dll in sorted((ROOT / 'gpu').glob('cufft64_*.dll')):
+    cuda_binaries.append((str(cufft_dll), 'gpu'))
 
 a = Analysis(
     [str(ROOT / 'gui_launcher.py')],

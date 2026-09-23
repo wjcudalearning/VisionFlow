@@ -6,6 +6,30 @@ from typing import Any
 
 MIB = 1024 * 1024
 
+# Mirrors PATTERN_FFT_CROSSOVER_WORK_PER_PIXEL in gpu/visionflow_cuda.cu. The native Pattern Match
+# picks the FFT response once the brute-force work (response elements x template pixels) exceeds
+# this many multiply-adds per frame pixel, so admission has to reserve the FFT working set for
+# exactly the same templates. Keep both in step.
+PATTERN_FFT_CROSSOVER_WORK_PER_PIXEL = 4000.0
+
+# cuFFT allocates its own work area outside the context, so it never appears in the context memory
+# breakdown. Measured on RTX 3090 for the padded production transform; expressed as a multiple of
+# the padded real plane so it scales with the frame.
+_CUFFT_WORK_AREA_MULTIPLIER = 3.0
+
+
+def pattern_fft_length(value: int) -> int:
+    """Smallest 2/3/5/7-smooth transform length >= value, as the native path pads to."""
+    candidate = max(1, int(value))
+    while True:
+        remaining = candidate
+        for factor in (2, 3, 5, 7):
+            while remaining % factor == 0:
+                remaining //= factor
+        if remaining == 1:
+            return candidate
+        candidate += 1
+
 
 @dataclass(frozen=True, slots=True)
 class ResidentWorkingSetEstimate:
@@ -160,18 +184,39 @@ def estimate_resident_working_set(
         else:
             template_width, template_height = pattern_template
             response_elements = (image_width - template_width + 1) * (image_height - template_height + 1)
-            # vf_pattern_match_gray_u8 over the whole frame: gray ROI (1 B) and two int64 prefix
-            # planes (16 B) per frame pixel, then float scores, packed keys, sorted keys and CUB's
-            # alternate key buffer (28 B) per response element. CUB's onesweep storage adds about
-            # 0.25 B per element on RTX 3090 (16384x13000), so 29 B keeps a measured margin. The
-            # template, histograms and bounded selected/output records are added on top.
-            anchor_scratch_bytes = (
-                image_width * image_height * 17
-                + response_elements * 29
-                + template_width * template_height
-                + 1 * MIB
-                + max_candidates * 32
-            )
+            frame_pixels = image_width * image_height
+            brute_force_work = response_elements * template_width * template_height
+            if brute_force_work > PATTERN_FFT_CROSSOVER_WORK_PER_PIXEL * frame_pixels:
+                # FFT response path: the gray frame, two int64 summed-area tables, the padded real
+                # plane, two R2C spectra, the same response/sort arrays as above, the template and
+                # an allowance for cuFFT's own work area, which it allocates outside the context.
+                pad_width = pattern_fft_length(image_width)
+                pad_height = pattern_fft_length(image_height)
+                spectrum_elements = (pad_width // 2 + 1) * pad_height
+                fft_bytes = 4 * pad_width * pad_height + 16 * spectrum_elements
+                anchor_scratch_bytes = (
+                    frame_pixels
+                    + 16 * frame_pixels
+                    + fft_bytes
+                    + int(_CUFFT_WORK_AREA_MULTIPLIER * 4 * pad_width * pad_height)
+                    + response_elements * 29
+                    + template_width * template_height
+                    + 1 * MIB
+                    + max_candidates * 32
+                )
+            else:
+                # vf_pattern_match_gray_u8 over the whole frame: gray ROI (1 B) and two int64 prefix
+                # planes (16 B) per frame pixel, then float scores, packed keys, sorted keys and
+                # CUB's alternate key buffer (28 B) per response element. CUB's onesweep storage
+                # adds about 0.25 B per element on RTX 3090 (16384x13000), so 29 B keeps a measured
+                # margin. The template, histograms and bounded records are added on top.
+                anchor_scratch_bytes = (
+                    image_width * image_height * 17
+                    + response_elements * 29
+                    + template_width * template_height
+                    + 1 * MIB
+                    + max_candidates * 32
+                )
     elif str((tile_config or {}).get("template_path", "")).strip():
         image_height, image_width = int(image_shape[0]), int(image_shape[1])
         search_width = min(_positive(tile_config.get("search_w"), image_width), image_width)

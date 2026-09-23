@@ -24,6 +24,7 @@ dist/
 *.zip
 /gpu/cuda_build_preflight.json
 /gpu/test_cuda_api.exe
+/gpu/cufft64_*.dll
 /gpu/visionflow_cuda.dll
 /gpu/visionflow_cuda.exp
 /gpu/visionflow_cuda.lib

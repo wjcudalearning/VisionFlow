@@ -134,6 +134,18 @@ class GpuCapabilities:
         return bool(self.resident_roi and self.has_exports(("vf_pattern_match_gray_u8",)))
 
     @property
+    def pattern_match_fft(self) -> bool:
+        """Large-template Pattern Match also needs the optional cuFFT runtime, so ask the DLL."""
+        if not self.pattern_match or not self.has_exports(
+            ("vf_pattern_match_fft_available",), context=False
+        ):
+            return False
+        try:
+            return bool(int(self.runtime._dll.vf_pattern_match_fft_available()))
+        except OSError:
+            return False
+
+    @property
     def find_contours(self) -> bool:
         """Optional OpenCV-equivalent contour trace over the resident binary mask."""
         return bool(

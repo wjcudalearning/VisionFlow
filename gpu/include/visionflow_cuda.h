@@ -329,6 +329,14 @@ VF_CUDA_API int vf_pattern_match_gray_u8(
     int32_t* out_xy, float* out_scores, int output_capacity, int* out_count);
 
 /*
+ * Reports whether the optional FFT response path of vf_pattern_match_gray_u8 can run, which needs
+ * the cuFFT runtime DLL to be installed next to this library or on the search path. Returns 1 when
+ * it is available and 0 otherwise. Without it a template too large for the shared-memory scoring
+ * kernel is reported as VF_CUDA_UNSUPPORTED and the caller keeps its CPU reference.
+ */
+VF_CUDA_API int vf_pattern_match_fft_available(void);
+
+/*
  * Debug helper for the localization extension: after vf_match_template_gray_u8 has run, copies
  * the packed winning key back so a caller can inspect the raw candidate comparison. Not used by
  * production code paths.

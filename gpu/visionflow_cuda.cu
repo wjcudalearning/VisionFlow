@@ -14,6 +14,9 @@
 #include <cub/device/device_scan.cuh>
 #include <cub/device/device_segmented_reduce.cuh>
 #include <cub/device/device_select.cuh>
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 #include <algorithm>
 #include <cfloat>
 #include <climits>
@@ -22,6 +25,7 @@
 #include <cstring>
 #include <memory>
 #include <new>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -66,6 +70,94 @@ constexpr int MATCH_SUM_PREFIX_PLANE = 0;      // int64: vertical prefix of the 
 constexpr int MATCH_SQUARE_PREFIX_PLANE = 1;   // int64: vertical prefix of its sum of squares
 constexpr int MATCH_PLANE_COUNT = 2;
 
+// Optional cuFFT binding for the large-template Pattern Match path. CUDA 13.3 ships cuFFT only as
+// a 244 MB runtime DLL, so it is resolved at run time instead of being linked: when it is missing
+// the FFT path reports VF_CUDA_UNSUPPORTED and the caller keeps its CPU reference, exactly as it
+// does for an old DLL. Only the five entry points below are used, all of them plain C.
+namespace visionflow_cufft {
+
+constexpr int PLAN_R2C = 0x2a;
+constexpr int PLAN_C2R = 0x2c;
+constexpr int RESULT_SUCCESS = 0;
+
+using PlanFn = int (*)(int*, int, int, int);
+using DestroyFn = int (*)(int);
+using SetStreamFn = int (*)(int, cudaStream_t);
+using ExecR2CFn = int (*)(int, float*, float2*);
+using ExecC2RFn = int (*)(int, float2*, float*);
+
+struct Api {
+    PlanFn plan2d = nullptr;
+    DestroyFn destroy = nullptr;
+    SetStreamFn set_stream = nullptr;
+    ExecR2CFn exec_r2c = nullptr;
+    ExecC2RFn exec_c2r = nullptr;
+    bool loaded = false;
+};
+
+#if defined(_WIN32)
+// Directory this library was loaded from. A packaged application keeps cuFFT next to it rather
+// than on the search path, so the bare name alone is not enough to find it.
+inline std::string module_directory() {
+    HMODULE self = nullptr;
+    if (GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCSTR>(&module_directory), &self) == 0 || self == nullptr) {
+        return {};
+    }
+    char path[MAX_PATH] = {};
+    const DWORD length = GetModuleFileNameA(self, path, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) return {};
+    const std::string full(path, length);
+    const size_t separator = full.find_last_of("\\/");
+    return separator == std::string::npos ? std::string{} : full.substr(0, separator + 1);
+}
+#endif
+
+inline Api load_api() {
+    Api found{};
+#if defined(_WIN32)
+    const std::string directory = module_directory();
+    // Newest first: the DLL name carries the cuFFT major version, not the toolkit version.
+    const char* candidates[] = {"cufft64_12.dll", "cufft64_13.dll", "cufft64_11.dll"};
+    for (const char* name : candidates) {
+        // The ordinary search path first (a CUDA Toolkit install), then this library's own folder,
+        // which is where a packaged application ships it.
+        HMODULE module = LoadLibraryA(name);
+        if (module == nullptr && !directory.empty()) {
+            module = LoadLibraryExA(
+                (directory + name).c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+        }
+        if (module == nullptr) continue;
+        found.plan2d = reinterpret_cast<PlanFn>(
+            reinterpret_cast<void*>(GetProcAddress(module, "cufftPlan2d")));
+        found.destroy = reinterpret_cast<DestroyFn>(
+            reinterpret_cast<void*>(GetProcAddress(module, "cufftDestroy")));
+        found.set_stream = reinterpret_cast<SetStreamFn>(
+            reinterpret_cast<void*>(GetProcAddress(module, "cufftSetStream")));
+        found.exec_r2c = reinterpret_cast<ExecR2CFn>(
+            reinterpret_cast<void*>(GetProcAddress(module, "cufftExecR2C")));
+        found.exec_c2r = reinterpret_cast<ExecC2RFn>(
+            reinterpret_cast<void*>(GetProcAddress(module, "cufftExecC2R")));
+        found.loaded = found.plan2d != nullptr && found.destroy != nullptr &&
+                       found.set_stream != nullptr && found.exec_r2c != nullptr &&
+                       found.exec_c2r != nullptr;
+        if (found.loaded) break;
+        found = Api{};
+        FreeLibrary(module);
+    }
+#endif
+    return found;
+}
+
+inline const Api& api() {
+    // The module stays loaded for the process lifetime; plans are owned by the context instead.
+    static const Api resolved = load_api();
+    return resolved;
+}
+
+}  // namespace visionflow_cufft
+
 struct PersistentContext {
     uint8_t* u8[5]{};
     size_t u8_capacity[5]{};
@@ -107,6 +199,25 @@ struct PersistentContext {
     size_t pattern_out_score_capacity = 0;
     int* pattern_out_count = nullptr;
     size_t pattern_out_count_capacity = 0;
+    // Large-template Pattern Match scratch (FFT path). The brute-force response kernel costs
+    // output_elements x template_pixels, which a production 2000x12000 template makes impossible,
+    // so the numerator comes from an FFT cross correlation while the window statistics stay exact
+    // in int64 summed-area tables. All grow-only; the cuFFT plans are cached for one padded size.
+    float* pattern_fft_real = nullptr;            // padded real plane, reused for input and output
+    size_t pattern_fft_real_capacity = 0;
+    float2* pattern_fft_image = nullptr;          // R2C spectrum of the resident gray frame
+    size_t pattern_fft_image_capacity = 0;
+    float2* pattern_fft_template = nullptr;       // R2C spectrum of the zero-padded template
+    size_t pattern_fft_template_capacity = 0;
+    long long* pattern_sat_sum = nullptr;         // summed-area table of the gray frame
+    size_t pattern_sat_sum_capacity = 0;
+    long long* pattern_sat_square = nullptr;      // summed-area table of its squares
+    size_t pattern_sat_square_capacity = 0;
+    int pattern_fft_plan_width = 0;
+    int pattern_fft_plan_height = 0;
+    int pattern_fft_forward_plan = 0;
+    int pattern_fft_inverse_plan = 0;
+    bool pattern_fft_plans_valid = false;
     // Contour extension scratch: the padded label image, the discovery-order result, and the
     // OpenCV-order result the download export copies out. All grow-only.
     signed char* contour_label = nullptr;
@@ -307,6 +418,15 @@ struct PersistentContext {
         visionflow_cuda::free_device(pattern_out_xy);
         visionflow_cuda::free_device(pattern_out_scores);
         visionflow_cuda::free_device(pattern_out_count);
+        visionflow_cuda::free_device(pattern_fft_real);
+        visionflow_cuda::free_device(pattern_fft_image);
+        visionflow_cuda::free_device(pattern_fft_template);
+        visionflow_cuda::free_device(pattern_sat_sum);
+        visionflow_cuda::free_device(pattern_sat_square);
+        if (pattern_fft_plans_valid && visionflow_cufft::api().loaded) {
+            visionflow_cufft::api().destroy(pattern_fft_forward_plan);
+            visionflow_cufft::api().destroy(pattern_fft_inverse_plan);
+        }
         visionflow_cuda::free_device(cnr_mask_image);
         visionflow_cuda::free_device(cnr_mask_background);
         visionflow_cuda::free_device(cnr_mask_residual);
@@ -382,7 +502,12 @@ ContextMemoryBreakdown context_memory_breakdown(const PersistentContext* context
         capacity_bytes(context->pattern_sort_scratch_capacity, 1) +
         capacity_bytes(context->pattern_out_xy_capacity, sizeof(int32_t)) +
         capacity_bytes(context->pattern_out_score_capacity, sizeof(float)) +
-        capacity_bytes(context->pattern_out_count_capacity, sizeof(int));
+        capacity_bytes(context->pattern_out_count_capacity, sizeof(int)) +
+        capacity_bytes(context->pattern_fft_real_capacity, sizeof(float)) +
+        capacity_bytes(context->pattern_fft_image_capacity, sizeof(float2)) +
+        capacity_bytes(context->pattern_fft_template_capacity, sizeof(float2)) +
+        capacity_bytes(context->pattern_sat_sum_capacity, sizeof(long long)) +
+        capacity_bytes(context->pattern_sat_square_capacity, sizeof(long long));
 
     memory.contour_bytes =
         capacity_bytes(context->contour_label_capacity, sizeof(signed char)) +
@@ -1836,6 +1961,156 @@ __global__ void pattern_score_map_kernel(
     double score = -1.0;
     if (denominator > 0.0) {
         score = (static_cast<double>(weighted) - template_mean * window_sum) / denominator;
+    }
+    score = score > 1.0 ? 1.0 : (score < -1.0 ? -1.0 : score);
+    scores[static_cast<size_t>(row) * output_width + column] = static_cast<float>(score);
+}
+
+// ---- Large-template Pattern Match ------------------------------------------------------------
+// pattern_score_map_kernel costs output_elements x template_pixels, which a production
+// 2000x12000 template on a 16384x13000 frame turns into 3.5e14 multiply-adds. The kernels below
+// produce the same TM_CCOEFF_NORMED response from an FFT cross correlation (the numerator) and
+// exact int64 summed-area tables (the window statistics). The tables are what keep this path
+// faithful: OpenCV's own CUDA TemplateMatching normalizes in float32 and, measured at this size,
+// disagrees with its CPU reference by up to 0.9, while this split stays near 1e-5.
+constexpr int PATTERN_SAT_SCAN_THREADS = 256;
+// The FFT response costs what the frame costs, while the brute-force kernel costs what the
+// template costs, so the crossover belongs per frame pixel. RTX 3090 sweep in
+// gpu/validate_pattern_match_fft.py: brute force sustains about 4.3e11 multiply-adds per second
+// and the FFT path costs about 1.5 ns per frame pixel, which breaks even near 650 multiply-adds
+// per frame pixel. Six times that keeps small templates on the brute-force path, which needs no
+// transforms or summed-area tables, until the FFT is clearly the faster route.
+constexpr double PATTERN_FFT_CROSSOVER_WORK_PER_PIXEL = 4000.0;
+
+// One block per frame row: inclusive row prefixes of the pixel values and of their squares.
+__global__ void pattern_sat_rows_kernel(
+    const uint8_t* gray, int width, int height,
+    long long* sum_plane, long long* square_plane) {
+    const int row = blockIdx.x;
+    const int lane = threadIdx.x;
+    if (row >= height) return;
+    using BlockScan = cub::BlockScan<long long, PATTERN_SAT_SCAN_THREADS>;
+    __shared__ typename BlockScan::TempStorage sum_storage;
+    __shared__ typename BlockScan::TempStorage square_storage;
+    __shared__ long long sum_carry;
+    __shared__ long long square_carry;
+    __shared__ long long sum_chunk_carry;
+    __shared__ long long square_chunk_carry;
+    if (lane == 0) {
+        sum_carry = 0;
+        square_carry = 0;
+    }
+    __syncthreads();
+    for (int base = 0; base < width; base += PATTERN_SAT_SCAN_THREADS) {
+        const int column = base + lane;
+        const long long value = column < width
+            ? static_cast<long long>(gray[static_cast<size_t>(row) * width + column])
+            : 0LL;
+        long long sum_scanned = 0;
+        long long sum_aggregate = 0;
+        long long square_scanned = 0;
+        long long square_aggregate = 0;
+        BlockScan(sum_storage).InclusiveSum(value, sum_scanned, sum_aggregate);
+        BlockScan(square_storage).InclusiveSum(value * value, square_scanned, square_aggregate);
+        if (lane == 0) {
+            sum_chunk_carry = sum_carry;
+            square_chunk_carry = square_carry;
+        }
+        __syncthreads();
+        if (column < width) {
+            const size_t index = static_cast<size_t>(row) * width + column;
+            sum_plane[index] = sum_scanned + sum_chunk_carry;
+            square_plane[index] = square_scanned + square_chunk_carry;
+        }
+        __syncthreads();
+        if (lane == 0) {
+            sum_carry = sum_chunk_carry + sum_aggregate;
+            square_carry = square_chunk_carry + square_aggregate;
+        }
+        __syncthreads();
+    }
+}
+
+// One thread per column turns the row prefixes into a full summed-area table in place. Adjacent
+// threads walk adjacent columns, so every row of the sweep is coalesced.
+__global__ void pattern_sat_columns_kernel(
+    long long* sum_plane, long long* square_plane, int width, int height) {
+    const int column = blockIdx.x * blockDim.x + threadIdx.x;
+    if (column >= width) return;
+    long long sum_running = 0;
+    long long square_running = 0;
+    for (int row = 0; row < height; ++row) {
+        const size_t index = static_cast<size_t>(row) * width + column;
+        sum_running += sum_plane[index];
+        square_running += square_plane[index];
+        sum_plane[index] = sum_running;
+        square_plane[index] = square_running;
+    }
+}
+
+// Copies a u8 plane into the zero-padded real buffer the forward transform consumes. The caller
+// zeroes the buffer first, which is what makes the circular correlation linear on the valid region.
+__global__ void pattern_pad_u8_kernel(
+    const uint8_t* src, int src_width, int src_height, int src_pitch,
+    float* dst, int pad_width) {
+    const int column = blockIdx.x * blockDim.x + threadIdx.x;
+    const int row = blockIdx.y * blockDim.y + threadIdx.y;
+    if (column >= src_width || row >= src_height) return;
+    dst[static_cast<size_t>(row) * pad_width + column] =
+        static_cast<float>(src[static_cast<size_t>(row) * src_pitch + column]);
+}
+
+// image = image * conj(template) * scale. The inverse transform turns this into the correlation
+// plane, with the scale folding cuFFT's unnormalized round trip into the same pass.
+__global__ void pattern_spectrum_correlate_kernel(
+    float2* image_spectrum, const float2* template_spectrum, size_t count, float scale) {
+    const size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+    const float2 image = image_spectrum[index];
+    const float2 templ = template_spectrum[index];
+    float2 product;
+    product.x = (image.x * templ.x + image.y * templ.y) * scale;
+    product.y = (image.y * templ.x - image.x * templ.y) * scale;
+    image_spectrum[index] = product;
+}
+
+// The TM_CCOEFF_NORMED definition of pattern_score_map_kernel, with the numerator read from the
+// correlation plane and the window sums taken from the summed-area tables in four lookups.
+__global__ void pattern_fft_score_kernel(
+    const float* correlation, int pad_width,
+    const long long* sat_sum, const long long* sat_square, int frame_width,
+    int output_width, int output_height,
+    int template_width, int template_height, int template_pixels,
+    double template_mean, double template_variance, float* scores) {
+    const int column = blockIdx.x * blockDim.x + threadIdx.x;
+    const int row = blockIdx.y * blockDim.y + threadIdx.y;
+    if (column >= output_width || row >= output_height) return;
+    const size_t bottom_row = static_cast<size_t>(row + template_height - 1) * frame_width;
+    const int right = column + template_width - 1;
+    long long window_sum = sat_sum[bottom_row + right];
+    long long window_square = sat_square[bottom_row + right];
+    if (row > 0) {
+        const size_t top_row = static_cast<size_t>(row - 1) * frame_width;
+        window_sum -= sat_sum[top_row + right];
+        window_square -= sat_square[top_row + right];
+        if (column > 0) {
+            window_sum += sat_sum[top_row + column - 1];
+            window_square += sat_square[top_row + column - 1];
+        }
+    }
+    if (column > 0) {
+        window_sum -= sat_sum[bottom_row + column - 1];
+        window_square -= sat_square[bottom_row + column - 1];
+    }
+    const double mean = static_cast<double>(window_sum) / template_pixels;
+    double window_variance = static_cast<double>(window_square) / template_pixels - mean * mean;
+    if (window_variance < 0.0) window_variance = 0.0;
+    const double denominator = std::sqrt(window_variance * template_variance) * template_pixels;
+    double score = -1.0;
+    if (denominator > 0.0) {
+        const double weighted =
+            static_cast<double>(correlation[static_cast<size_t>(row) * pad_width + column]);
+        score = (weighted - template_mean * static_cast<double>(window_sum)) / denominator;
     }
     score = score > 1.0 ? 1.0 : (score < -1.0 ? -1.0 : score);
     scores[static_cast<size_t>(row) * output_width + column] = static_cast<float>(score);
@@ -4318,6 +4593,202 @@ VF_CUDA_API int vf_match_template_gray_u8(
     return VF_CUDA_OK;
 }
 
+// Smallest transform length >= value built only from 2/3/5/7 factors. A 13000-row frame contains
+// the factor 13, which would send cuFFT down its Bluestein path, so the frame is padded instead.
+static int pattern_fft_length(int value) {
+    for (int candidate = value;; ++candidate) {
+        int remaining = candidate;
+        for (int factor : {2, 3, 5, 7}) {
+            while (remaining % factor == 0) remaining /= factor;
+        }
+        if (remaining == 1) return candidate;
+    }
+}
+
+// Uploads the template and grays the whole resident frame into MATCH_ROI_BUFFER. The FFT path
+// needs exactly these two inputs; it deliberately does not run the anchor export, whose
+// shared-memory scoring kernel rejects large templates and whose int64 prefix planes it never uses.
+static int prepare_pattern_frame(
+    PersistentContext* persistent, const uint8_t* templ, int template_width, int template_height) {
+    const int frame_width = persistent->resident_width;
+    const int frame_height = persistent->resident_height;
+    const size_t template_bytes = static_cast<size_t>(template_width) * template_height;
+    int result = reserve_device(
+        &persistent->u8[MATCH_TEMPLATE_BUFFER], &persistent->u8_capacity[MATCH_TEMPLATE_BUFFER],
+        template_bytes, &persistent->allocation_count);
+    if (result != VF_CUDA_OK) return result;
+    // The gray frame is fully rewritten here, so it must be exactly this size: a larger leftover
+    // buffer from an earlier call would keep the old row pitch.
+    result = reserve_exact(
+        &persistent->u8[MATCH_ROI_BUFFER], &persistent->u8_capacity[MATCH_ROI_BUFFER],
+        static_cast<size_t>(frame_width) * frame_height, &persistent->allocation_count);
+    if (result != VF_CUDA_OK) return result;
+    update_context_memory_peak(persistent);
+
+    cudaError_t error = cudaMemcpyAsync(
+        persistent->u8[MATCH_TEMPLATE_BUFFER], templ, template_bytes,
+        cudaMemcpyHostToDevice, persistent->stream);
+    if (error != cudaSuccess) return cuda_result(error);
+    if (persistent->resident_channels == 3) {
+        bgr_gray_roi_kernel<<<
+            grid2d(frame_width, frame_height), dim3(BLOCK_X, BLOCK_Y), 0, persistent->stream>>>(
+            persistent->resident_u8, frame_width, 0, 0,
+            persistent->u8[MATCH_ROI_BUFFER], frame_width, frame_height);
+        result = visionflow_cuda::kernel_launch_result();
+        if (result != VF_CUDA_OK) return result;
+    } else {
+        error = cudaMemcpyAsync(
+            persistent->u8[MATCH_ROI_BUFFER], persistent->resident_u8,
+            static_cast<size_t>(frame_width) * frame_height,
+            cudaMemcpyDeviceToDevice, persistent->stream);
+        if (error != cudaSuccess) return cuda_result(error);
+    }
+    return VF_CUDA_OK;
+}
+
+// Fills persistent->pattern_scores with the TM_CCOEFF_NORMED response of the whole resident frame
+// through an FFT cross correlation plus exact summed-area window statistics. Returns
+// VF_CUDA_UNSUPPORTED when cuFFT is not installed, which leaves the caller on its CPU reference.
+static int pattern_match_fft_response(
+    PersistentContext* persistent, int template_width, int template_height,
+    int output_width, int output_height, double template_mean, double template_variance) {
+    const visionflow_cufft::Api& fft = visionflow_cufft::api();
+    if (!fft.loaded) return VF_CUDA_UNSUPPORTED;
+
+    const int frame_width = persistent->resident_width;
+    const int frame_height = persistent->resident_height;
+    const int pad_width = pattern_fft_length(frame_width);
+    const int pad_height = pattern_fft_length(frame_height);
+    const size_t real_count = static_cast<size_t>(pad_width) * static_cast<size_t>(pad_height);
+    const size_t spectrum_count =
+        (static_cast<size_t>(pad_width) / 2 + 1) * static_cast<size_t>(pad_height);
+    const size_t frame_pixels = static_cast<size_t>(frame_width) * frame_height;
+
+    int result = reserve_device(
+        &persistent->pattern_fft_real, &persistent->pattern_fft_real_capacity,
+        real_count, &persistent->allocation_count);
+    if (result != VF_CUDA_OK) return result;
+    result = reserve_device(
+        &persistent->pattern_fft_image, &persistent->pattern_fft_image_capacity,
+        spectrum_count, &persistent->allocation_count);
+    if (result != VF_CUDA_OK) return result;
+    result = reserve_device(
+        &persistent->pattern_fft_template, &persistent->pattern_fft_template_capacity,
+        spectrum_count, &persistent->allocation_count);
+    if (result != VF_CUDA_OK) return result;
+    result = reserve_device(
+        &persistent->pattern_sat_sum, &persistent->pattern_sat_sum_capacity,
+        frame_pixels, &persistent->allocation_count);
+    if (result != VF_CUDA_OK) return result;
+    result = reserve_device(
+        &persistent->pattern_sat_square, &persistent->pattern_sat_square_capacity,
+        frame_pixels, &persistent->allocation_count);
+    if (result != VF_CUDA_OK) return result;
+    update_context_memory_peak(persistent);
+
+    if (!persistent->pattern_fft_plans_valid ||
+        persistent->pattern_fft_plan_width != pad_width ||
+        persistent->pattern_fft_plan_height != pad_height) {
+        if (persistent->pattern_fft_plans_valid) {
+            fft.destroy(persistent->pattern_fft_forward_plan);
+            fft.destroy(persistent->pattern_fft_inverse_plan);
+            persistent->pattern_fft_plans_valid = false;
+        }
+        int forward = 0;
+        int inverse = 0;
+        // cuFFT takes the slowest dimension first, so this is (rows, columns).
+        if (fft.plan2d(&forward, pad_height, pad_width, visionflow_cufft::PLAN_R2C) !=
+            visionflow_cufft::RESULT_SUCCESS) {
+            return VF_CUDA_ALLOCATION_FAILED;
+        }
+        if (fft.plan2d(&inverse, pad_height, pad_width, visionflow_cufft::PLAN_C2R) !=
+            visionflow_cufft::RESULT_SUCCESS) {
+            fft.destroy(forward);
+            return VF_CUDA_ALLOCATION_FAILED;
+        }
+        if (fft.set_stream(forward, persistent->stream) != visionflow_cufft::RESULT_SUCCESS ||
+            fft.set_stream(inverse, persistent->stream) != visionflow_cufft::RESULT_SUCCESS) {
+            fft.destroy(forward);
+            fft.destroy(inverse);
+            return VF_CUDA_INTERNAL_ERROR;
+        }
+        persistent->pattern_fft_forward_plan = forward;
+        persistent->pattern_fft_inverse_plan = inverse;
+        persistent->pattern_fft_plan_width = pad_width;
+        persistent->pattern_fft_plan_height = pad_height;
+        persistent->pattern_fft_plans_valid = true;
+        ++persistent->allocation_count;
+        update_context_memory_peak(persistent);
+    }
+
+    pattern_sat_rows_kernel<<<
+        frame_height, PATTERN_SAT_SCAN_THREADS, 0, persistent->stream>>>(
+        persistent->u8[MATCH_ROI_BUFFER], frame_width, frame_height,
+        persistent->pattern_sat_sum, persistent->pattern_sat_square);
+    result = visionflow_cuda::kernel_launch_result();
+    if (result != VF_CUDA_OK) return result;
+    pattern_sat_columns_kernel<<<
+        (frame_width + PATTERN_SAT_SCAN_THREADS - 1) / PATTERN_SAT_SCAN_THREADS,
+        PATTERN_SAT_SCAN_THREADS, 0, persistent->stream>>>(
+        persistent->pattern_sat_sum, persistent->pattern_sat_square, frame_width, frame_height);
+    result = visionflow_cuda::kernel_launch_result();
+    if (result != VF_CUDA_OK) return result;
+
+    cudaError_t error = cudaMemsetAsync(
+        persistent->pattern_fft_real, 0, real_count * sizeof(float), persistent->stream);
+    if (error != cudaSuccess) return cuda_result(error);
+    pattern_pad_u8_kernel<<<
+        grid2d(frame_width, frame_height), dim3(BLOCK_X, BLOCK_Y), 0, persistent->stream>>>(
+        persistent->u8[MATCH_ROI_BUFFER], frame_width, frame_height, frame_width,
+        persistent->pattern_fft_real, pad_width);
+    result = visionflow_cuda::kernel_launch_result();
+    if (result != VF_CUDA_OK) return result;
+    if (fft.exec_r2c(
+            persistent->pattern_fft_forward_plan, persistent->pattern_fft_real,
+            persistent->pattern_fft_image) != visionflow_cufft::RESULT_SUCCESS) {
+        return VF_CUDA_INTERNAL_ERROR;
+    }
+
+    error = cudaMemsetAsync(
+        persistent->pattern_fft_real, 0, real_count * sizeof(float), persistent->stream);
+    if (error != cudaSuccess) return cuda_result(error);
+    pattern_pad_u8_kernel<<<
+        grid2d(template_width, template_height), dim3(BLOCK_X, BLOCK_Y), 0, persistent->stream>>>(
+        persistent->u8[MATCH_TEMPLATE_BUFFER], template_width, template_height, template_width,
+        persistent->pattern_fft_real, pad_width);
+    result = visionflow_cuda::kernel_launch_result();
+    if (result != VF_CUDA_OK) return result;
+    if (fft.exec_r2c(
+            persistent->pattern_fft_forward_plan, persistent->pattern_fft_real,
+            persistent->pattern_fft_template) != visionflow_cufft::RESULT_SUCCESS) {
+        return VF_CUDA_INTERNAL_ERROR;
+    }
+
+    const int correlate_threads = 256;
+    pattern_spectrum_correlate_kernel<<<
+        static_cast<unsigned int>((spectrum_count + correlate_threads - 1) / correlate_threads),
+        correlate_threads, 0, persistent->stream>>>(
+        persistent->pattern_fft_image, persistent->pattern_fft_template, spectrum_count,
+        1.0f / static_cast<float>(real_count));
+    result = visionflow_cuda::kernel_launch_result();
+    if (result != VF_CUDA_OK) return result;
+    // The inverse transform consumes the product spectrum; neither spectrum is needed afterwards.
+    if (fft.exec_c2r(
+            persistent->pattern_fft_inverse_plan, persistent->pattern_fft_image,
+            persistent->pattern_fft_real) != visionflow_cufft::RESULT_SUCCESS) {
+        return VF_CUDA_INTERNAL_ERROR;
+    }
+
+    pattern_fft_score_kernel<<<
+        grid2d(output_width, output_height), dim3(BLOCK_X, BLOCK_Y), 0, persistent->stream>>>(
+        persistent->pattern_fft_real, pad_width,
+        persistent->pattern_sat_sum, persistent->pattern_sat_square, frame_width,
+        output_width, output_height, template_width, template_height,
+        template_width * template_height, template_mean, template_variance,
+        persistent->pattern_scores);
+    return visionflow_cuda::kernel_launch_result();
+}
+
 VF_CUDA_API int vf_pattern_match_gray_u8(
     void* context,
     uint64_t generation,
@@ -4345,14 +4816,54 @@ VF_CUDA_API int vf_pattern_match_gray_u8(
     if (element_count_ll <= 0 || element_count_ll > INT_MAX) return VF_CUDA_UNSUPPORTED;
     const int element_count = static_cast<int>(element_count_ll);
 
-    // Reuse the verified anchor call to validate the template, upload it, gray the resident image
-    // and establish the same scratch/lifetime rules. Its single-best result is deliberately ignored.
-    int ignored_match[4] = {0, 0, 0, 0};
-    float ignored_score = 0.0f;
-    int result = vf_match_template_gray_u8(
-        context, generation, 0, 0,
-        persistent->resident_width, persistent->resident_height,
-        templ, template_width, template_height, ignored_match, &ignored_score);
+    // Template statistics on the host: the template is constant per Recipe, and both response
+    // paths need the mean and variance before any device work is scheduled.
+    double template_sum_host = 0.0;
+    double template_square_sum_host = 0.0;
+    const int template_pixel_count = template_width * template_height;
+    for (int index = 0; index < template_pixel_count; ++index) {
+        const int value = templ[index];
+        template_sum_host += value;
+        template_square_sum_host += static_cast<double>(value) * value;
+    }
+    const double template_mean_host = template_sum_host / template_pixel_count;
+    const double template_variance_host =
+        template_square_sum_host / template_pixel_count - template_mean_host * template_mean_host;
+    if (!(template_variance_host > 1e-12)) return VF_CUDA_UNSUPPORTED;
+
+    // pattern_score_map_kernel costs output_elements x template_pixels while the FFT path is
+    // dominated by the frame-sized transforms, so a large template has to take the FFT route.
+    // Measured on RTX 3090 with a 16384x13000 frame: see gpu/validate_pattern_match_fft.py.
+    const double brute_force_work =
+        static_cast<double>(element_count) * static_cast<double>(template_pixel_count);
+    const double frame_pixels = static_cast<double>(persistent->resident_width) *
+                                static_cast<double>(persistent->resident_height);
+    const bool prefer_fft =
+        brute_force_work > PATTERN_FFT_CROSSOVER_WORK_PER_PIXEL * frame_pixels &&
+        visionflow_cufft::api().loaded;
+
+    bool use_fft = prefer_fft;
+    int result = VF_CUDA_OK;
+    if (!prefer_fft) {
+        // Reuse the verified anchor call to validate the template, upload it, gray the resident
+        // image and establish the same scratch/lifetime rules. Its single-best result is ignored.
+        int ignored_match[4] = {0, 0, 0, 0};
+        float ignored_score = 0.0f;
+        result = vf_match_template_gray_u8(
+            context, generation, 0, 0,
+            persistent->resident_width, persistent->resident_height,
+            templ, template_width, template_height, ignored_match, &ignored_score);
+        // A template whose shared-memory halo does not fit is not a failure here: the FFT path
+        // has no such limit, so fall through to it when cuFFT is installed.
+        if (result == VF_CUDA_UNSUPPORTED && visionflow_cufft::api().loaded) {
+            use_fft = true;
+            result = prepare_pattern_frame(persistent, templ, template_width, template_height);
+        } else if (result != VF_CUDA_OK) {
+            return result;
+        }
+    } else {
+        result = prepare_pattern_frame(persistent, templ, template_width, template_height);
+    }
     if (result != VF_CUDA_OK) return result;
 
     result = reserve_device(
@@ -4396,27 +4907,24 @@ VF_CUDA_API int vf_pattern_match_gray_u8(
     if (result != VF_CUDA_OK) return result;
     update_context_memory_peak(persistent);
 
-    double template_sum = 0.0;
-    double template_square_sum = 0.0;
-    const int template_pixels = template_width * template_height;
-    for (int index = 0; index < template_pixels; ++index) {
-        const int value = templ[index];
-        template_sum += value;
-        template_square_sum += static_cast<double>(value) * value;
-    }
-    const double template_mean = template_sum / template_pixels;
-    const double template_variance =
-        template_square_sum / template_pixels - template_mean * template_mean;
-    if (!(template_variance > 1e-12)) return VF_CUDA_UNSUPPORTED;
+    const int template_pixels = template_pixel_count;
+    const double template_mean = template_mean_host;
+    const double template_variance = template_variance_host;
 
     reset_timing(persistent, false);
-    pattern_score_map_kernel<<<
-        grid2d(output_width, output_height), dim3(BLOCK_X, BLOCK_Y), 0, persistent->stream>>>(
-        persistent->u8[MATCH_ROI_BUFFER], persistent->resident_width,
-        output_width, output_height, template_width, template_height, template_pixels,
-        template_mean, template_variance,
-        persistent->u8[MATCH_TEMPLATE_BUFFER], persistent->pattern_scores);
-    result = visionflow_cuda::kernel_launch_result();
+    if (use_fft) {
+        result = pattern_match_fft_response(
+            persistent, template_width, template_height, output_width, output_height,
+            template_mean, template_variance);
+    } else {
+        pattern_score_map_kernel<<<
+            grid2d(output_width, output_height), dim3(BLOCK_X, BLOCK_Y), 0, persistent->stream>>>(
+            persistent->u8[MATCH_ROI_BUFFER], persistent->resident_width,
+            output_width, output_height, template_width, template_height, template_pixels,
+            template_mean, template_variance,
+            persistent->u8[MATCH_TEMPLATE_BUFFER], persistent->pattern_scores);
+        result = visionflow_cuda::kernel_launch_result();
+    }
     if (result != VF_CUDA_OK) return result;
     const int peak_width = min(template_width, output_width);
     const int peak_height = min(template_height, output_height);
@@ -4467,6 +4975,10 @@ VF_CUDA_API int vf_pattern_match_gray_u8(
     finalize_timing(persistent);
     *out_count = count;
     return VF_CUDA_OK;
+}
+
+VF_CUDA_API int vf_pattern_match_fft_available() {
+    return visionflow_cufft::api().loaded ? 1 : 0;
 }
 
 VF_CUDA_API int vf_match_template_debug_key(void* context, unsigned long long* out_key) {

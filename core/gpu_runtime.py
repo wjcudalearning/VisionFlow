@@ -209,6 +209,11 @@ class GpuRuntime:
         return self._capabilities.pattern_match
 
     @property
+    def supports_pattern_match_fft(self) -> bool:
+        """Whether a template too large for the scoring kernel can still run through cuFFT."""
+        return self._capabilities.pattern_match_fft
+
+    @property
     def supports_find_contours(self) -> bool:
         return self._capabilities.find_contours
 
@@ -271,6 +276,7 @@ class GpuRuntime:
                 "fused_401_2": self.supports_fused_401_2,
                 "template_match": self.supports_template_match,
                 "pattern_match": self.supports_pattern_match,
+                "pattern_match_fft": self.supports_pattern_match_fft,
                 "find_contours": self.supports_find_contours,
                 "plan_find_contours": self.supports_plan_find_contours,
                 "exact_median": self.supports_exact_median,
