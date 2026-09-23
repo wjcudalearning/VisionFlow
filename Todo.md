@@ -285,7 +285,7 @@
   - 小模板維持現行暴力 kernel（已驗證且較快）；門檻須以量測決定並記錄。
   - VRAM admission 須涵蓋 FFT 工作集（padded real、image/template spectrum、IFFT 輸出、cuFFT workspace），不得低估。
   - 驗收：與 OpenCV `TM_CCOEFF_NORMED` 的分數誤差上限與座標／排序一致性（decision-exact）、1／3 channel、模板大於輸入、無命中、多命中重疊、crop padding／邊界、缺 cuFFT／舊 DLL 路徑、`auto` fallback、strict CUDA 失敗、PASS／NG 與 metadata 等價；RTX 3090 量測 16384×13000＋2000×12000 的 warm median／P95、VRAM 與長跑穩定性，並與 CPU 16.80 s 對比。
-- [ ] 【實物】**大模板 Pattern Match 產線驗收**：上方 FFT 路徑以合成圖完成 RTX 3090 驗證；仍需以真實產品影像與正式 Recipe 確認命中數、PASS／NG、節拍與連續執行穩定性，並決定發行套件是否隨附 `cufft64_12.dll`（244 MB）或改由機台安裝 CUDA Toolkit 提供。
+- [ ] 【實物】**大模板 Pattern Match 產線驗收**：上方 FFT 路徑以合成圖完成 RTX 3090 驗證；仍需以真實產品影像與正式 Recipe 確認命中數、PASS／NG、節拍與連續執行穩定性。散布方式已於 2026-09-23 決定：`cufft64_12.dll`（244 MB）隨發行套件一起打包。
 - [ ] **`contour` resident VRAM admission 改用實際 Tile 尺寸上限**：目前 contour 模式的 Tile 大小要等輪廓找到後才知道，admission 仍以整張影像計算 Detector plan／DAG／202 scratch，會高估；需以 shape filter 上限或兩段式 admission（定位後再檢查 Detector 工作集）改善，且不得低估。
 - [ ] **完整 `contour` GPU geometry 與分類，且須先證明端到端收益**：目前 GPU 只完成 threshold／前處理與 contour trace，shape analyze、rectangle／circle／polygon 分類、subpixel／篩選與 deterministic Tile ordering 仍在 CPU；不得把 `vf_plan_find_contours_roi` 視為全 GPU 切圖完成。只有新的候選區域／統計設計在正式尺寸 warm median／P95 明顯勝過 OpenCV，並覆蓋 holes／邊界接觸、多 component、shape metadata、padding／座標／順序、舊／缺少 DLL、fallback、strict CUDA、PASS／NG、VRAM 與長跑穩定性後，才可考慮讓 `auto` 啟用。
 - [x] GPU resident tile 不再預製所有 CPU tile 副本；PreprocessPlan／native linear 與 DAG 能力查詢及 device ROI 執行可用非連續 NumPy view 的 shape／dtype／channels 驗證，避免 `np.ascontiguousarray` 偷做等量複製。ROI inset、generation／bounds 與 batch／monitor 共用 session 沿用既有生命週期。
