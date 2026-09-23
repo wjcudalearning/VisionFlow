@@ -233,6 +233,7 @@ detectors:
 output:
   save_overlay: true
   save_ng_tiles: true
+  group_ng_tiles_by_defect: false
   save_csv: true
   save_matrix_csv: true
   save_json: true
@@ -346,6 +347,10 @@ GUI 管理模式在「CCD 控制」頁也能執行同一套診斷、查看缺漏
 | JSON | 完整 Recipe、結果、座標、metadata 與實際 backend |
 | Logs | 輪替應用程式日誌 |
 | Debug images | 僅 `--debug` 且 Detector 支援時產生 |
+
+GUI「設定」可開啟「NG tiles 依 defect 分資料夾」。開啟後會以 `defect.type`
+建立 `ng_tiles/<defect type>/` 子資料夾；同一 Tile 若含多種 defect，會各存一份到
+對應資料夾。關閉時維持既有的 `ng_tiles/` 平鋪輸出。
 
 GPU 執行資訊會記錄 requested／actual backend、fallback reason、device/host split 與本次執行 metrics；GUI 也以實際結果而不是 Recipe 請求值顯示 backend。
 

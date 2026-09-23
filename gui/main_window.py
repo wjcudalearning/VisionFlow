@@ -87,6 +87,7 @@ CAMERA_MONITOR_NO_ORIGINAL_MESSAGE = "這張相機影像沒有保存原圖（檢
 OUTPUT_TOGGLE_LABELS = {
     "save_overlay": "儲存 overlay 影像",
     "save_ng_tiles": "儲存 NG tiles",
+    "group_ng_tiles_by_defect": "NG tiles 依 defect 分資料夾",
     "save_csv": "輸出 CSV 報表",
     "save_json": "輸出 JSON 報表",
 }
@@ -200,6 +201,7 @@ class MainWindow(QMainWindow, LogMixin):
         default_output_opts = {
             "save_overlay": True,
             "save_ng_tiles": True,
+            "group_ng_tiles_by_defect": False,
             "save_csv": True,
             "save_matrix_csv": True,
             "save_json": True,
@@ -458,8 +460,11 @@ class MainWindow(QMainWindow, LogMixin):
         for key, label in OUTPUT_TOGGLE_LABELS.items():
             toggle = Toggle(checked=self.output_opts[key])
             toggle.toggled.connect(lambda checked, k=key: self._on_output_opt_toggled(k, checked))
+            if key == "group_ng_tiles_by_defect":
+                toggle.setToolTip("同一張 NG tile 含多種 defect 時，會各存一份到對應子資料夾。")
             self.output_toggles[key] = toggle
             output_form.addRow(label, toggle)
+        self._sync_ng_tile_group_toggle()
 
         drawer.add_layout(output_form)
 
@@ -709,6 +714,13 @@ class MainWindow(QMainWindow, LogMixin):
     # ------------------------------------------------------------------
     def _on_output_opt_toggled(self, key: str, checked: bool) -> None:
         self.output_opts[key] = checked
+        if key == "save_ng_tiles":
+            self._sync_ng_tile_group_toggle()
+
+    def _sync_ng_tile_group_toggle(self) -> None:
+        toggle = self.output_toggles.get("group_ng_tiles_by_defect")
+        if toggle is not None:
+            toggle.setEnabled(bool(self.output_opts.get("save_ng_tiles", True)))
 
     def _on_output_dir_changed(self) -> None:
         self.output_dir = self.output_dir_edit.text() or "outputs"

@@ -181,6 +181,13 @@ class RecipeManager:
         if not isinstance(output, dict):
             raise RecipeError("Recipe output section must be a mapping.")
 
+        if "group_ng_tiles_by_defect" in output and not isinstance(
+            output["group_ng_tiles_by_defect"], bool
+        ):
+            raise RecipeError(
+                "Recipe output.group_ng_tiles_by_defect must be true or false."
+            )
+
         pixel_size = output.get("pixel_size_um_per_px")
         if pixel_size is None:
             return

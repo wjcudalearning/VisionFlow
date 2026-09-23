@@ -22,7 +22,12 @@ from core.provenance import (
     sha256_bytes,
 )
 from core.recipe_manager import RecipeError, RecipeManager
-from core.report_artifacts import CsvExporter, MatrixCsvExporter
+from core.report_artifacts import (
+    CsvExporter,
+    MatrixCsvExporter,
+    NgTileExporter,
+    ReportImageEncoder,
+)
 from gpu.benchmark_gate import compare_p95
 
 
@@ -44,6 +49,18 @@ class StrictRecipeContractTests(unittest.TestCase):
         self.recipe["detectors"]["401-AS-SN-1"]["params"]["morph_kernal"] = 5
         with self.assertRaisesRegex(RecipeError, "unknown keys: morph_kernal"):
             RecipeManager().validate(self.recipe)
+
+    def test_ng_tile_defect_grouping_requires_boolean(self):
+        valid = deepcopy(self.recipe)
+        valid["output"]["group_ng_tiles_by_defect"] = True
+        RecipeManager().validate(valid)
+
+        invalid = deepcopy(self.recipe)
+        invalid["output"]["group_ng_tiles_by_defect"] = "true"
+        with self.assertRaisesRegex(
+            RecipeError, "output.group_ng_tiles_by_defect must be true or false"
+        ):
+            RecipeManager().validate(invalid)
 
     def test_rejects_wrong_type_range_enum_and_unknown_detector(self):
         invalid = deepcopy(self.recipe)
@@ -345,6 +362,69 @@ class ReporterAreaCalibrationTests(unittest.TestCase):
 
         self.assertEqual(float(row["area"]), 250.0)
         self.assertEqual(row["area_unit"], "px^2")
+
+
+class NgTileDefectGroupingTests(unittest.TestCase):
+    @staticmethod
+    def _result() -> dict:
+        return {
+            "image_name": "input.png",
+            "recipe_name": "recipe",
+            "recipe_version": "1",
+            "provenance": {},
+            "tiles": [{
+                "result": "NG",
+                "tile": {"tile_id": "T1"},
+                "_tile_image": np.zeros((16, 16, 3), dtype=np.uint8),
+                "detectors": [{
+                    "detector_id": "401",
+                    "pass": False,
+                    "defects": [
+                        {"type": "scratch", "bbox_local": [1, 1, 2, 2]},
+                        {"type": "dent/burr", "bbox_local": [4, 4, 2, 2]},
+                    ],
+                }],
+            }],
+        }
+
+    def test_grouping_disabled_keeps_flat_ng_tile_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            exporter = NgTileExporter({}, ReportImageEncoder({}))
+            sidecars = exporter.write_ng_tiles(self._result(), "run", root)
+
+            self.assertEqual(sidecars, [str(root / "run_T1.json")])
+            self.assertTrue((root / "run_T1.png").is_file())
+
+    def test_grouping_enabled_copies_multi_defect_tile_to_safe_subfolders(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            exporter = NgTileExporter(
+                {"group_ng_tiles_by_defect": True}, ReportImageEncoder({})
+            )
+            sidecars = exporter.write_ng_tiles(self._result(), "run", root)
+
+            expected = [
+                root / "scratch" / "run_T1.json",
+                root / "dent_burr" / "run_T1.json",
+            ]
+            self.assertEqual(sidecars, [str(path) for path in expected])
+            for sidecar in expected:
+                self.assertTrue(sidecar.is_file())
+                self.assertTrue(sidecar.with_suffix(".png").is_file())
+
+    def test_grouping_uses_ng_folder_when_detector_has_no_defect_rows(self):
+        result = self._result()
+        result["tiles"][0]["detectors"][0]["defects"] = []
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            exporter = NgTileExporter(
+                {"group_ng_tiles_by_defect": True}, ReportImageEncoder({})
+            )
+            sidecars = exporter.write_ng_tiles(result, "run", root)
+
+            self.assertEqual(sidecars, [str(root / "NG" / "run_T1.json")])
+            self.assertTrue((root / "NG" / "run_T1.png").is_file())
 
 
 

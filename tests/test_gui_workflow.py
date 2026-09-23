@@ -971,6 +971,29 @@ class GuiWorkflowTests(unittest.TestCase):
             preferences.set_value("output/options", "[]")
             self.assertEqual(preferences.output_options({"save_csv": True}), {"save_csv": True})
 
+    def test_settings_can_persist_ng_tile_defect_grouping(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = QSettings(str(Path(temp_dir) / "window.ini"), QSettings.Format.IniFormat)
+            window = MainWindow(settings=settings)
+
+            grouping = window.output_toggles["group_ng_tiles_by_defect"]
+            self.assertFalse(grouping.isChecked())
+            self.assertTrue(grouping.isEnabled())
+            grouping.setChecked(True)
+            window.output_toggles["save_ng_tiles"].setChecked(False)
+            self.assertFalse(grouping.isEnabled())
+            window._save_preferences()
+            window.deleteLater()
+            self.app.processEvents()
+
+            restored = GuiPreferences(settings).output_options(
+                {"save_ng_tiles": True, "group_ng_tiles_by_defect": False}
+            )
+            self.assertEqual(
+                restored,
+                {"save_ng_tiles": False, "group_ng_tiles_by_defect": True},
+            )
+
     def test_main_window_restores_and_saves_working_context(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings = QSettings(str(Path(temp_dir) / "window.ini"), QSettings.Format.IniFormat)

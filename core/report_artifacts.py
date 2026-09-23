@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -218,9 +219,12 @@ class NgTileExporter:
             tile_image = tile_result.get("_tile_image")
             if tile_image is None:
                 continue
-            path = ng_tiles_dir / f"{base_name}_{tile['tile_id']}.png"
-            sidecar = self._ng_tile_sidecar(result, tile_result, path.name)
-            pending.append((tile_result, tile_image, path, sidecar))
+            file_name = f"{base_name}_{tile['tile_id']}.png"
+            directories = self._ng_tile_directories(tile_result, ng_tiles_dir)
+            for directory in directories:
+                path = directory / file_name
+                sidecar = self._ng_tile_sidecar(result, tile_result, path.name)
+                pending.append((tile_result, tile_image, path, sidecar))
 
         if not pending:
             return []
@@ -234,6 +238,7 @@ class NgTileExporter:
         return [str(path.with_suffix(".json")) for _, _, path, _ in pending]
 
     def _write_single_ng_tile(self, tile_result: dict, tile_image, path: Path, sidecar: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
         self.image_encoder.write_png(path, self._make_ng_tile_overlay(tile_image, tile_result))
         sidecar_path = path.with_suffix(".json")
         with sidecar_path.open("w", encoding="utf-8") as handle:
@@ -247,6 +252,38 @@ class NgTileExporter:
             except (TypeError, ValueError):
                 pass
         return 4
+
+    def _ng_tile_directories(self, tile_result: dict, ng_tiles_dir: Path) -> list[Path]:
+        if not self.output_config.get("group_ng_tiles_by_defect", False):
+            return [ng_tiles_dir]
+        defect_types = [
+            str(defect.get("type") or "defect")
+            for detector_result in tile_result.get("detectors", []) or []
+            for defect in detector_result.get("defects", []) or []
+        ]
+        if not defect_types:
+            defect_types = ["NG"]
+        safe_names = dict.fromkeys(
+            self._safe_defect_directory_name(defect_type)
+            for defect_type in defect_types
+        )
+        return [ng_tiles_dir / name for name in safe_names]
+
+    @staticmethod
+    def _safe_defect_directory_name(defect_type: str) -> str:
+        name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(defect_type)).strip(" .")
+        if not name:
+            return "defect"
+        if name.upper() in {
+            "CON",
+            "PRN",
+            "AUX",
+            "NUL",
+            *(f"COM{index}" for index in range(1, 10)),
+            *(f"LPT{index}" for index in range(1, 10)),
+        }:
+            return f"_{name}"
+        return name
 
     @staticmethod
     def _ng_tile_sidecar(result: dict, tile_result: dict, image_file: str) -> dict:
