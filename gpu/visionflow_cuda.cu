@@ -23,6 +23,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <new>
 #include <string>
@@ -149,6 +150,32 @@ struct PersistentContext {
     size_t contour_row_start_capacity = 0;
     int32_t* contour_transitions = nullptr;
     size_t contour_transition_capacity = 0;
+    // OpenCV-style 2x2 BKE connected-component scratch for the large RETR_EXTERNAL route.
+    // The parent plane and block flags are independent of the padded border-trace image; root
+    // tiles are compacted, converted to raster seeds, and sorted before per-component tracing.
+    int32_t* contour_bke_parent = nullptr;
+    size_t contour_bke_parent_capacity = 0;
+    uint8_t* contour_bke_info = nullptr;
+    size_t contour_bke_info_capacity = 0;
+    uint8_t* contour_bke_flags = nullptr;
+    size_t contour_bke_flag_capacity = 0;
+    int32_t* contour_bke_tile_ids = nullptr;
+    size_t contour_bke_tile_id_capacity = 0;
+    int32_t* contour_bke_roots = nullptr;
+    size_t contour_bke_root_capacity = 0;
+    int32_t* contour_bke_seeds = nullptr;
+    size_t contour_bke_seed_capacity = 0;
+    int32_t* contour_bke_sorted_seeds = nullptr;
+    size_t contour_bke_sorted_seed_capacity = 0;
+    int* contour_bke_component_count = nullptr;
+    size_t contour_bke_component_count_capacity = 0;
+    int32_t* contour_component_point_counts = nullptr;
+    size_t contour_component_point_count_capacity = 0;
+    uint8_t* contour_bke_cub_scratch = nullptr;
+    size_t contour_bke_cub_scratch_capacity = 0;
+    std::vector<int32_t> contour_host_offsets;
+    std::vector<int32_t> contour_host_points;
+    bool contour_host_result_valid = false;
     int contour_count = 0;
     int contour_point_count = 0;
     uint64_t contour_generation = 0;
@@ -311,6 +338,16 @@ struct PersistentContext {
         visionflow_cuda::free_device(contour_row_counts);
         visionflow_cuda::free_device(contour_row_start);
         visionflow_cuda::free_device(contour_transitions);
+        visionflow_cuda::free_device(contour_bke_parent);
+        visionflow_cuda::free_device(contour_bke_info);
+        visionflow_cuda::free_device(contour_bke_flags);
+        visionflow_cuda::free_device(contour_bke_tile_ids);
+        visionflow_cuda::free_device(contour_bke_roots);
+        visionflow_cuda::free_device(contour_bke_seeds);
+        visionflow_cuda::free_device(contour_bke_sorted_seeds);
+        visionflow_cuda::free_device(contour_bke_component_count);
+        visionflow_cuda::free_device(contour_component_point_counts);
+        visionflow_cuda::free_device(contour_bke_cub_scratch);
         visionflow_cuda::free_device(median_values);
         visionflow_cuda::free_device(median_keys);
         visionflow_cuda::free_device(median_sorted_keys);
@@ -423,7 +460,17 @@ ContextMemoryBreakdown context_memory_breakdown(const PersistentContext* context
         capacity_bytes(context->contour_count_capacity, sizeof(int)) +
         capacity_bytes(context->contour_row_count_capacity, sizeof(int)) +
         capacity_bytes(context->contour_row_start_capacity, sizeof(int)) +
-        capacity_bytes(context->contour_transition_capacity, sizeof(int32_t));
+        capacity_bytes(context->contour_transition_capacity, sizeof(int32_t)) +
+        capacity_bytes(context->contour_bke_parent_capacity, sizeof(int32_t)) +
+        capacity_bytes(context->contour_bke_info_capacity, sizeof(uint8_t)) +
+        capacity_bytes(context->contour_bke_flag_capacity, sizeof(uint8_t)) +
+        capacity_bytes(context->contour_bke_tile_id_capacity, sizeof(int32_t)) +
+        capacity_bytes(context->contour_bke_root_capacity, sizeof(int32_t)) +
+        capacity_bytes(context->contour_bke_seed_capacity, sizeof(int32_t)) +
+        capacity_bytes(context->contour_bke_sorted_seed_capacity, sizeof(int32_t)) +
+        capacity_bytes(context->contour_bke_component_count_capacity, sizeof(int)) +
+        capacity_bytes(context->contour_component_point_count_capacity, sizeof(int32_t)) +
+        capacity_bytes(context->contour_bke_cub_scratch_capacity, sizeof(uint8_t));
 
     memory.median_bytes =
         capacity_bytes(context->median_value_capacity, sizeof(float)) +
@@ -2575,11 +2622,13 @@ __device__ __forceinline__ void contour_ring_step(int index, int* dy, int* dx) {
 __device__ __forceinline__ void contour_store_point(
     int32_t* points, int point_capacity, int* point_index, int* overflow, int px, int py) {
     const int index = *point_index;
-    if (index < point_capacity) {
-        points[static_cast<size_t>(index) * 2] = px;
-        points[static_cast<size_t>(index) * 2 + 1] = py;
-    } else {
-        *overflow = 1;
+    if (points != nullptr) {
+        if (index < point_capacity) {
+            points[static_cast<size_t>(index) * 2] = px;
+            points[static_cast<size_t>(index) * 2 + 1] = py;
+        } else {
+            *overflow = 1;
+        }
     }
     *point_index = index + 1;
 }
@@ -2848,21 +2897,23 @@ __device__ __forceinline__ void contour_open_border_warp(
     __syncwarp(warp_mask);
 }
 
-// Serial port of the cvStartFindContours_Impl / cvFindNextContour raster scan plus the per-border
-// trace. A single thread owns the whole scan, so the marking order is the reference order and no
-// synchronization or atomic is involved; that is what makes the operator deterministic.
+// Warp-assisted port of the cvStartFindContours_Impl / cvFindNextContour raster scan. The warp
+// probes the next 32 label positions together, but commits only the earliest stop before probing
+// again. Border handling and lnbd updates therefore remain in strict raster order. The next chunk
+// is always loaded after tracing, since the trace may have changed labels in that row.
 //
 // counts[0] = contour count, counts[1] = point count, counts[2] = overflow flag. The counts are
 // reported even when the buffers were too small, so the caller can retry with the exact size.
-// This literal row walk is the reference form and stays in charge of RETR_EXTERNAL, where the
-// scan's lnbd bookkeeping can be updated by stops that this walk sees and a transition list does
-// not. RETR_LIST takes contour_scan_list_kernel instead.
+// RETR_EXTERNAL uses this order-preserving parallel search because its lnbd bookkeeping depends
+// on every stop. RETR_LIST takes contour_scan_list_kernel instead.
 __global__ void contour_scan_kernel(
     signed char* image, int stride, int width, int height, int mode,
     int32_t* offsets, int offset_capacity,
     int32_t* points, int point_capacity,
     int* counts) {
-    if (blockIdx.x != 0 || blockIdx.y != 0 || threadIdx.x != 0 || threadIdx.y != 0) return;
+    if (blockIdx.x != 0 || blockIdx.y != 0 || threadIdx.x >= warpSize || threadIdx.y != 0) return;
+    constexpr unsigned int warp_mask = 0xffffffffu;
+    const int lane = static_cast<int>(threadIdx.x) & (warpSize - 1);
     const int scan_w = width + 1;  // scanner->img_size.width  = W + 2 - 1
     const int scan_h = height + 1; // scanner->img_size.height = H + 2 - 1
     int contour_count = 0;
@@ -2876,35 +2927,274 @@ __global__ void contour_scan_kernel(
     int prev = static_cast<int>(image[static_cast<size_t>(y) * stride + (x - 1)]);
 
     while (y < scan_h) {
-        int restarted = 0;
-        signed char* row = image + static_cast<size_t>(y) * stride;
-        while (x < scan_w) {
-            while (x < scan_w && static_cast<int>(row[x]) == prev) x += 1;
-            if (x >= scan_w) break;
-            int is_hole = 0;
-            if (contour_stop_starts_border(image, stride, y, x, mode, &lnbd_x, &lnbd_y, &is_hole)) {
+        if (x >= scan_w) {
+            lnbd_x = 0;
+            lnbd_y = y + 1;
+            x = 1;
+            prev = 0;
+            y += 1;
+            continue;
+        }
+
+        const int candidate_x = x + lane;
+        const bool changed = candidate_x < scan_w &&
+            static_cast<int>(image[static_cast<size_t>(y) * stride + candidate_x]) != prev;
+        const unsigned int changed_lanes = __ballot_sync(warp_mask, changed);
+        if (changed_lanes == 0) {
+            x += warpSize;
+            continue;
+        }
+
+        const int first_changed_lane = __ffs(static_cast<int>(changed_lanes)) - 1;
+        x += first_changed_lane;
+        int starts_border = 0;
+        int is_hole = 0;
+        if (lane == 0) {
+            starts_border = contour_stop_starts_border(
+                image, stride, y, x, mode, &lnbd_x, &lnbd_y, &is_hole) ? 1 : 0;
+            if (starts_border != 0) {
                 lnbd_x = x - is_hole;
                 lnbd_y = y;
-                contour_open_border(
-                    image, stride, y, x, is_hole, offsets, offset_capacity,
-                    points, point_capacity, &contour_count, &point_index, &overflow);
-                restarted = 1;
             }
-            x += 1;
-            prev = static_cast<int>(row[x - 1]);
-            if (restarted) break;
         }
-        if (restarted) continue;
-        lnbd_x = 0;
-        lnbd_y = y + 1;
-        x = 1;
-        prev = 0;
-        y += 1;
+        starts_border = __shfl_sync(warp_mask, starts_border, 0);
+        is_hole = __shfl_sync(warp_mask, is_hole, 0);
+        lnbd_x = __shfl_sync(warp_mask, lnbd_x, 0);
+        lnbd_y = __shfl_sync(warp_mask, lnbd_y, 0);
+
+        if (starts_border != 0) {
+            contour_open_border_warp(
+                image, stride, y, x, is_hole, offsets, offset_capacity,
+                points, point_capacity, &contour_count, &point_index, &overflow);
+        }
+
+        // Match cvFindNextContour's resume_scan step. In particular, read this after the trace:
+        // the border walker may have changed the stop pixel from 1 to 2 or -126.
+        x += 1;
+        if (lane == 0) {
+            prev = static_cast<int>(image[static_cast<size_t>(y) * stride + (x - 1)]);
+        }
+        prev = __shfl_sync(warp_mask, prev, 0);
     }
 
-    counts[0] = contour_count;
-    counts[1] = point_index;
-    counts[2] = overflow;
+    if (lane == 0) {
+        counts[0] = contour_count;
+        counts[1] = point_index;
+        counts[2] = overflow;
+    }
+}
+
+// Adapted from OpenCV's CUDA Block-Based Komura Equivalence connected-components implementation
+// (opencv_contrib/modules/cudaimgproc/src/cuda/connectedcomponents.cu, Apache-2.0). This AOI-local
+// variant keeps BKE parent links and block metadata separate, then emits component raster seeds for
+// the existing exact OpenCV border tracer. It does not depend on OpenCV binaries at runtime.
+enum ContourBkeInfo : uint8_t {
+    CONTOUR_BKE_A = 1u << 0,
+    CONTOUR_BKE_B = 1u << 1,
+    CONTOUR_BKE_C = 1u << 2,
+    CONTOUR_BKE_D = 1u << 3,
+    CONTOUR_BKE_Q = 1u << 5,
+    CONTOUR_BKE_R = 1u << 6,
+    CONTOUR_BKE_S = 1u << 7,
+};
+
+__device__ __forceinline__ int contour_bke_read_pixel(
+    const uint8_t* mask, int mask_stride, int x0, int y0, int width, int height,
+    int row, int column) {
+    if (row < 0 || row >= height || column < 0 || column >= width) return 0;
+    return mask[static_cast<size_t>(y0 + row) * mask_stride + x0 + column] != 0;
+}
+
+__global__ void contour_bke_init_kernel(
+    const uint8_t* mask, int mask_stride, int x0, int y0, int width, int height,
+    int tiles_x, int32_t* parent, uint8_t* info_by_tile) {
+    const int row = (blockIdx.y * 16 + threadIdx.y) * 2;
+    const int column = (blockIdx.x * 16 + threadIdx.x) * 2;
+    if (row >= height || column >= width) return;
+
+    const int index = row * width + column;
+    const int tile = (row / 2) * tiles_x + column / 2;
+    const int a = contour_bke_read_pixel(mask, mask_stride, x0, y0, width, height, row, column);
+    const int b = contour_bke_read_pixel(mask, mask_stride, x0, y0, width, height, row, column + 1);
+    const int c = contour_bke_read_pixel(mask, mask_stride, x0, y0, width, height, row + 1, column);
+    const int d = contour_bke_read_pixel(mask, mask_stride, x0, y0, width, height, row + 1, column + 1);
+
+    unsigned int neighbors = 0;
+    uint8_t info = 0;
+    if (a) {
+        neighbors |= 0x0777u;
+        info |= CONTOUR_BKE_A;
+    }
+    if (b) {
+        neighbors |= (0x0777u << 1);
+        info |= CONTOUR_BKE_B;
+    }
+    if (c) {
+        neighbors |= (0x0777u << 4);
+        info |= CONTOUR_BKE_C;
+    }
+    if (d) info |= CONTOUR_BKE_D;
+
+    if (column == 0) neighbors &= 0xEEEEu;
+    if (column + 1 >= width) neighbors &= 0x3333u;
+    else if (column + 2 >= width) neighbors &= 0x7777u;
+    if (row == 0) neighbors &= 0xFFF0u;
+    if (row + 1 >= height) neighbors &= 0x00FFu;
+    else if (row + 2 >= height) neighbors &= 0x0FFFu;
+
+    int father_offset = 0;
+    if ((neighbors & (1u << 0)) != 0 &&
+        contour_bke_read_pixel(mask, mask_stride, x0, y0, width, height, row - 1, column - 1)) {
+        father_offset = -(2 * width + 2);
+    }
+    if (((neighbors & (1u << 1)) != 0 &&
+         contour_bke_read_pixel(mask, mask_stride, x0, y0, width, height, row - 1, column)) ||
+        ((neighbors & (1u << 2)) != 0 &&
+         contour_bke_read_pixel(mask, mask_stride, x0, y0, width, height, row - 1, column + 1))) {
+        if (father_offset == 0) father_offset = -(2 * width);
+        else info |= CONTOUR_BKE_Q;
+    }
+    if ((neighbors & (1u << 3)) != 0 &&
+        contour_bke_read_pixel(mask, mask_stride, x0, y0, width, height, row - 1, column + 2)) {
+        if (father_offset == 0) father_offset = -(2 * width) + 2;
+        else info |= CONTOUR_BKE_R;
+    }
+    if (((neighbors & (1u << 4)) != 0 &&
+         contour_bke_read_pixel(mask, mask_stride, x0, y0, width, height, row, column - 1)) ||
+        ((neighbors & (1u << 8)) != 0 &&
+         contour_bke_read_pixel(mask, mask_stride, x0, y0, width, height, row + 1, column - 1))) {
+        if (father_offset == 0) father_offset = -2;
+        else info |= CONTOUR_BKE_S;
+    }
+
+    parent[index] = index + father_offset;
+    info_by_tile[tile] = info;
+}
+
+__device__ __forceinline__ int contour_bke_find(int32_t* parent, int node) {
+    while (parent[node] != node) node = parent[node];
+    return node;
+}
+
+__device__ __forceinline__ int contour_bke_find_compress(int32_t* parent, int node) {
+    int current = node;
+    while (parent[current] != current) {
+        current = parent[current];
+        parent[node] = current;
+    }
+    return current;
+}
+
+__device__ __forceinline__ void contour_bke_union(int32_t* parent, int lhs, int rhs) {
+    bool done = false;
+    while (!done) {
+        lhs = contour_bke_find(parent, lhs);
+        rhs = contour_bke_find(parent, rhs);
+        if (lhs < rhs) {
+            const int old = atomicMin(parent + rhs, lhs);
+            done = old == rhs;
+            rhs = old;
+        } else if (rhs < lhs) {
+            const int old = atomicMin(parent + lhs, rhs);
+            done = old == lhs;
+            lhs = old;
+        } else {
+            done = true;
+        }
+    }
+}
+
+__global__ void contour_bke_compress_kernel(int width, int height, int32_t* parent) {
+    const int row = (blockIdx.y * 16 + threadIdx.y) * 2;
+    const int column = (blockIdx.x * 16 + threadIdx.x) * 2;
+    if (row >= height || column >= width) return;
+    const int index = row * width + column;
+    contour_bke_find_compress(parent, index);
+}
+
+__global__ void contour_bke_merge_kernel(
+    int width, int height, int tiles_x, int32_t* parent, const uint8_t* info_by_tile) {
+    const int row = (blockIdx.y * 16 + threadIdx.y) * 2;
+    const int column = (blockIdx.x * 16 + threadIdx.x) * 2;
+    if (row >= height || column >= width) return;
+    const int index = row * width + column;
+    const uint8_t info = info_by_tile[(row / 2) * tiles_x + column / 2];
+    if ((info & CONTOUR_BKE_Q) != 0) contour_bke_union(parent, index, index - 2 * width);
+    if ((info & CONTOUR_BKE_R) != 0) contour_bke_union(parent, index, index - 2 * width + 2);
+    if ((info & CONTOUR_BKE_S) != 0) contour_bke_union(parent, index, index - 2);
+}
+
+__global__ void contour_bke_root_flags_kernel(
+    int width, int height, int tiles_x, int tile_count,
+    const int32_t* parent, const uint8_t* info_by_tile, uint8_t* flags, int32_t* tile_ids) {
+    const int tile = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tile >= tile_count) return;
+    const int row = (tile / tiles_x) * 2;
+    const int column = (tile % tiles_x) * 2;
+    const int index = row * width + column;
+    const uint8_t info = info_by_tile[tile];
+    flags[tile] = static_cast<uint8_t>(parent[index] == index && (info & 0x0Fu) != 0);
+    tile_ids[tile] = tile;
+}
+
+__global__ void contour_bke_seed_kernel(
+    int width, int tiles_x, const int32_t* root_tiles, int component_count,
+    const uint8_t* info_by_tile, int32_t* seeds) {
+    const int component = blockIdx.x * blockDim.x + threadIdx.x;
+    if (component >= component_count) return;
+    const int tile = root_tiles[component];
+    const int row = (tile / tiles_x) * 2;
+    const int column = (tile % tiles_x) * 2;
+    const int32_t root_index = row * width + column;
+    const uint8_t info = info_by_tile[tile];
+    int seed = -1;
+    if ((info & CONTOUR_BKE_A) != 0) seed = root_index;
+    else if ((info & CONTOUR_BKE_B) != 0) seed = root_index + 1;
+    else if ((info & CONTOUR_BKE_C) != 0) seed = root_index + width;
+    else if ((info & CONTOUR_BKE_D) != 0) seed = root_index + width + 1;
+    seeds[component] = seed;
+}
+
+__global__ void contour_bke_finish_counts_kernel(
+    int component_count, int32_t* offsets, const int32_t* point_counts, int* counts) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    if (component_count == 0) {
+        counts[0] = 0;
+        counts[1] = 0;
+        counts[2] = 0;
+        return;
+    }
+    const int total_points = offsets[component_count - 1] + point_counts[component_count - 1];
+    offsets[component_count] = total_points;
+    counts[0] = component_count;
+    counts[1] = total_points;
+    counts[2] = 0;
+}
+
+__global__ void contour_bke_trace_kernel(
+    signed char* image, int stride, int width, const int32_t* seeds, int component_count,
+    const int32_t* offsets, int32_t* point_counts, int32_t* points, int* global_overflow) {
+    const int component = blockIdx.x;
+    if (component >= component_count || threadIdx.x >= warpSize) return;
+    const int seed = seeds[component];
+    const int seed_y = seed / width;
+    const int seed_x = seed - seed_y * width;
+    int point_index = 0;
+    int overflow = 0;
+    int32_t* component_points = nullptr;
+    int point_capacity = 0;
+    if (points != nullptr) {
+        const int start = offsets[component];
+        point_capacity = point_counts[component];
+        component_points = points + static_cast<size_t>(start) * 2;
+    }
+    contour_fetch_warp(
+        image, stride, seed_y + 1, seed_x + 1, 0, seed_x, seed_y,
+        component_points, point_capacity, &point_index, &overflow);
+    if (threadIdx.x == 0) {
+        if (points == nullptr) point_counts[component] = point_index;
+        else if (overflow != 0 || point_index != point_capacity) atomicOr(global_overflow, 1);
+    }
 }
 
 // Row transition counts of the region's zero-ness: a column where the binary value differs from its
@@ -3459,6 +3749,24 @@ VF_CUDA_API int vf_context_trim_analysis_scratch(
     release_device_buffer(&persistent->cnr_mask_residual, &persistent->cnr_mask_residual_capacity);
     release_device_buffer(&persistent->cnr_mask_absdev, &persistent->cnr_mask_absdev_capacity);
     release_device_buffer(&persistent->cnr_mask_mask, &persistent->cnr_mask_mask_capacity);
+
+    // The component labels, roots, and CUB temporary storage are no longer needed once the
+    // downloaded contour result is materialized. Keep the result/output buffers intact.
+    release_device_buffer(&persistent->contour_bke_parent, &persistent->contour_bke_parent_capacity);
+    release_device_buffer(&persistent->contour_bke_info, &persistent->contour_bke_info_capacity);
+    release_device_buffer(&persistent->contour_bke_flags, &persistent->contour_bke_flag_capacity);
+    release_device_buffer(&persistent->contour_bke_tile_ids, &persistent->contour_bke_tile_id_capacity);
+    release_device_buffer(&persistent->contour_bke_roots, &persistent->contour_bke_root_capacity);
+    release_device_buffer(&persistent->contour_bke_seeds, &persistent->contour_bke_seed_capacity);
+    release_device_buffer(
+        &persistent->contour_bke_sorted_seeds, &persistent->contour_bke_sorted_seed_capacity);
+    release_device_buffer(
+        &persistent->contour_bke_component_count, &persistent->contour_bke_component_count_capacity);
+    release_device_buffer(
+        &persistent->contour_component_point_counts,
+        &persistent->contour_component_point_count_capacity);
+    release_device_buffer(
+        &persistent->contour_bke_cub_scratch, &persistent->contour_bke_cub_scratch_capacity);
 
     release_device_buffer(&persistent->cand_mask_scratch, &persistent->cand_mask_scratch_capacity);
     release_device_buffer(&persistent->ccl_parent, &persistent->ccl_parent_capacity);
@@ -5076,6 +5384,395 @@ VF_CUDA_API int vf_match_template_debug_candidates(
 // Contour trace of the requested region of the resident binary mask. Scratch buffers are grow-only;
 // when the first guess at the output size is too small the kernel reports the exact requirement and
 // the whole trace is re-run with that capacity, so a result is never truncated silently.
+struct ContourHostBounds {
+    int min_x = INT_MAX;
+    int min_y = INT_MAX;
+    int max_x = INT_MIN;
+    int max_y = INT_MIN;
+    double area = 0.0;
+};
+
+bool contour_point_in_polygon_strict(
+    const int32_t* points, int start, int end, int x, int y) {
+    bool inside = false;
+    for (int current = start, previous = end - 1; current < end; previous = current++) {
+        const int x0 = points[static_cast<size_t>(current) * 2];
+        const int y0 = points[static_cast<size_t>(current) * 2 + 1];
+        const int x1 = points[static_cast<size_t>(previous) * 2];
+        const int y1 = points[static_cast<size_t>(previous) * 2 + 1];
+        const long long cross = static_cast<long long>(x - x0) * (y1 - y0) -
+            static_cast<long long>(y - y0) * (x1 - x0);
+        if (cross == 0 && x >= std::min(x0, x1) && x <= std::max(x0, x1) &&
+            y >= std::min(y0, y1) && y <= std::max(y0, y1)) {
+            // Treat a boundary hit as ambiguous so the exact ordered scanner handles it.
+            return true;
+        }
+        if ((y0 > y) != (y1 > y)) {
+            const double crossing_x = static_cast<double>(x1 - x0) * (y - y0) /
+                static_cast<double>(y1 - y0) + x0;
+            if (static_cast<double>(x) < crossing_x) inside = !inside;
+        }
+    }
+    return inside;
+}
+
+bool contour_host_components_may_be_nested(
+    const std::vector<int32_t>& offsets, const std::vector<int32_t>& points) {
+    if (offsets.size() <= 2) return false;
+    const int contour_count = static_cast<int>(offsets.size()) - 1;
+    std::vector<ContourHostBounds> bounds;
+    try {
+        bounds.resize(static_cast<size_t>(contour_count));
+    } catch (const std::bad_alloc&) {
+        return true;
+    }
+    for (int contour = 0; contour < contour_count; ++contour) {
+        const int start = offsets[static_cast<size_t>(contour)];
+        const int end = offsets[static_cast<size_t>(contour + 1)];
+        if (end <= start) continue;
+        ContourHostBounds& box = bounds[static_cast<size_t>(contour)];
+        double twice_area = 0.0;
+        for (int index = start, previous = end - 1; index < end; previous = index++) {
+            const int x = points[static_cast<size_t>(index) * 2];
+            const int y = points[static_cast<size_t>(index) * 2 + 1];
+            const int px = points[static_cast<size_t>(previous) * 2];
+            const int py = points[static_cast<size_t>(previous) * 2 + 1];
+            box.min_x = std::min(box.min_x, x);
+            box.min_y = std::min(box.min_y, y);
+            box.max_x = std::max(box.max_x, x);
+            box.max_y = std::max(box.max_y, y);
+            twice_area += static_cast<double>(px) * y - static_cast<double>(x) * py;
+        }
+        box.area = std::abs(twice_area) * 0.5;
+    }
+
+    for (int child = 0; child < contour_count; ++child) {
+        const int child_start = offsets[static_cast<size_t>(child)];
+        const int child_end = offsets[static_cast<size_t>(child + 1)];
+        if (child_end <= child_start) continue;
+        const int x = points[static_cast<size_t>(child_start) * 2];
+        const int y = points[static_cast<size_t>(child_start) * 2 + 1];
+        const ContourHostBounds& child_box = bounds[static_cast<size_t>(child)];
+        for (int parent = 0; parent < contour_count; ++parent) {
+            if (parent == child) continue;
+            const ContourHostBounds& parent_box = bounds[static_cast<size_t>(parent)];
+            if (parent_box.area <= child_box.area || parent_box.min_x > x || parent_box.max_x < x ||
+                parent_box.min_y > y || parent_box.max_y < y) {
+                continue;
+            }
+            const int parent_start = offsets[static_cast<size_t>(parent)];
+            const int parent_end = offsets[static_cast<size_t>(parent + 1)];
+            if (contour_point_in_polygon_strict(points.data(), parent_start, parent_end, x, y)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+int run_contour_bke_external(
+    PersistentContext* persistent, const uint8_t* mask, int mask_stride,
+    int x0, int y0, int width, int height, int padded_stride, int counts[3]) {
+    const int tiles_x = (width + 1) / 2;
+    const int tiles_y = (height + 1) / 2;
+    const long long tile_count_wide = static_cast<long long>(tiles_x) * tiles_y;
+    const long long pixel_count_wide = static_cast<long long>(width) * height;
+    if (tile_count_wide <= 0 || tile_count_wide > INT_MAX ||
+        pixel_count_wide <= 0 || pixel_count_wide > INT_MAX) {
+        return VF_CUDA_INVALID_ARGUMENT;
+    }
+    const int tile_count = static_cast<int>(tile_count_wide);
+    const size_t tiles = static_cast<size_t>(tile_count);
+    const size_t pixels = static_cast<size_t>(pixel_count_wide);
+    int result = reserve_device(
+        &persistent->contour_bke_parent, &persistent->contour_bke_parent_capacity,
+        pixels, &persistent->allocation_count);
+    if (result == VF_CUDA_OK) result = reserve_device(
+        &persistent->contour_bke_info, &persistent->contour_bke_info_capacity,
+        tiles, &persistent->allocation_count);
+    if (result == VF_CUDA_OK) result = reserve_device(
+        &persistent->contour_bke_flags, &persistent->contour_bke_flag_capacity,
+        tiles, &persistent->allocation_count);
+    if (result == VF_CUDA_OK) result = reserve_device(
+        &persistent->contour_bke_tile_ids, &persistent->contour_bke_tile_id_capacity,
+        tiles, &persistent->allocation_count);
+    if (result == VF_CUDA_OK) result = reserve_device(
+        &persistent->contour_bke_roots, &persistent->contour_bke_root_capacity,
+        tiles, &persistent->allocation_count);
+    if (result == VF_CUDA_OK) result = reserve_device(
+        &persistent->contour_bke_seeds, &persistent->contour_bke_seed_capacity,
+        tiles, &persistent->allocation_count);
+    if (result == VF_CUDA_OK) result = reserve_device(
+        &persistent->contour_bke_sorted_seeds, &persistent->contour_bke_sorted_seed_capacity,
+        tiles, &persistent->allocation_count);
+    if (result == VF_CUDA_OK) result = reserve_device(
+        &persistent->contour_bke_component_count, &persistent->contour_bke_component_count_capacity,
+        static_cast<size_t>(1), &persistent->allocation_count);
+    if (result == VF_CUDA_OK) result = reserve_device(
+        &persistent->contour_component_point_counts,
+        &persistent->contour_component_point_count_capacity, tiles,
+        &persistent->allocation_count);
+    if (result != VF_CUDA_OK) return result;
+
+    const dim3 ccl_grid(
+        static_cast<unsigned int>((tiles_x + 15) / 16),
+        static_cast<unsigned int>((tiles_y + 15) / 16), 1);
+    const dim3 ccl_block(16, 16, 1);
+    contour_bke_init_kernel<<<ccl_grid, ccl_block, 0, persistent->stream>>>(
+        mask, mask_stride, x0, y0, width, height, tiles_x,
+        persistent->contour_bke_parent, persistent->contour_bke_info);
+    result = visionflow_cuda::kernel_launch_result();
+    if (result != VF_CUDA_OK) return result;
+    contour_bke_compress_kernel<<<ccl_grid, ccl_block, 0, persistent->stream>>>(
+        width, height, persistent->contour_bke_parent);
+    result = visionflow_cuda::kernel_launch_result();
+    if (result != VF_CUDA_OK) return result;
+    contour_bke_merge_kernel<<<ccl_grid, ccl_block, 0, persistent->stream>>>(
+        width, height, tiles_x, persistent->contour_bke_parent, persistent->contour_bke_info);
+    result = visionflow_cuda::kernel_launch_result();
+    if (result != VF_CUDA_OK) return result;
+    contour_bke_compress_kernel<<<ccl_grid, ccl_block, 0, persistent->stream>>>(
+        width, height, persistent->contour_bke_parent);
+    result = visionflow_cuda::kernel_launch_result();
+    if (result != VF_CUDA_OK) return result;
+
+    constexpr int threads = 256;
+    const int tile_blocks = (tile_count + threads - 1) / threads;
+    contour_bke_root_flags_kernel<<<tile_blocks, threads, 0, persistent->stream>>>(
+        width, height, tiles_x, tile_count, persistent->contour_bke_parent,
+        persistent->contour_bke_info, persistent->contour_bke_flags,
+        persistent->contour_bke_tile_ids);
+    result = visionflow_cuda::kernel_launch_result();
+    if (result != VF_CUDA_OK) return result;
+
+    size_t select_bytes = 0;
+    cudaError_t error = cub::DeviceSelect::Flagged(
+        nullptr, select_bytes, persistent->contour_bke_tile_ids, persistent->contour_bke_flags,
+        persistent->contour_bke_roots, persistent->contour_bke_component_count,
+        tile_count, persistent->stream);
+    if (error != cudaSuccess) return cuda_result(error);
+    result = reserve_device(
+        &persistent->contour_bke_cub_scratch, &persistent->contour_bke_cub_scratch_capacity,
+        select_bytes, &persistent->allocation_count);
+    if (result != VF_CUDA_OK) return result;
+    error = cub::DeviceSelect::Flagged(
+        persistent->contour_bke_cub_scratch, select_bytes, persistent->contour_bke_tile_ids,
+        persistent->contour_bke_flags, persistent->contour_bke_roots,
+        persistent->contour_bke_component_count, tile_count, persistent->stream);
+    if (error != cudaSuccess) return cuda_result(error);
+
+    int component_count = 0;
+    error = cudaMemcpyAsync(
+        &component_count, persistent->contour_bke_component_count, sizeof(int),
+        cudaMemcpyDeviceToHost, persistent->stream);
+    if (error != cudaSuccess) return cuda_result(error);
+    result = visionflow_cuda::stream_result(persistent->stream);
+    if (result != VF_CUDA_OK) return result;
+    if (component_count < 0 || component_count > tile_count) return VF_CUDA_INTERNAL_ERROR;
+    record_timing_event(persistent, TIMING_AFTER_INPUT);
+    if (component_count == 0) {
+        try {
+            persistent->contour_host_offsets.assign(1, 0);
+            persistent->contour_host_points.clear();
+        } catch (const std::bad_alloc&) {
+            return VF_CUDA_ALLOCATION_FAILED;
+        }
+        persistent->contour_host_result_valid = true;
+        counts[0] = 0;
+        counts[1] = 0;
+        counts[2] = 0;
+        record_timing_event(persistent, TIMING_AFTER_KERNEL);
+        record_timing_event(persistent, TIMING_AFTER_OUTPUT);
+        return VF_CUDA_OK;
+    }
+
+    const int component_blocks = (component_count + threads - 1) / threads;
+    contour_bke_seed_kernel<<<component_blocks, threads, 0, persistent->stream>>>(
+        width, tiles_x, persistent->contour_bke_roots, component_count,
+        persistent->contour_bke_info, persistent->contour_bke_seeds);
+    result = visionflow_cuda::kernel_launch_result();
+    if (result != VF_CUDA_OK) return result;
+    size_t sort_bytes = 0;
+    error = cub::DeviceRadixSort::SortKeys(
+        nullptr, sort_bytes, persistent->contour_bke_seeds,
+        persistent->contour_bke_sorted_seeds, component_count, 0,
+        static_cast<int>(sizeof(int32_t) * 8), persistent->stream);
+    if (error != cudaSuccess) return cuda_result(error);
+    if (sort_bytes > persistent->contour_bke_cub_scratch_capacity) {
+        result = reserve_device(
+            &persistent->contour_bke_cub_scratch, &persistent->contour_bke_cub_scratch_capacity,
+            sort_bytes, &persistent->allocation_count);
+        if (result != VF_CUDA_OK) return result;
+    }
+    error = cub::DeviceRadixSort::SortKeys(
+        persistent->contour_bke_cub_scratch, sort_bytes, persistent->contour_bke_seeds,
+        persistent->contour_bke_sorted_seeds, component_count, 0,
+        static_cast<int>(sizeof(int32_t) * 8), persistent->stream);
+    if (error != cudaSuccess) return cuda_result(error);
+
+    result = reserve_device(
+        &persistent->contour_component_point_counts,
+        &persistent->contour_component_point_count_capacity,
+        static_cast<size_t>(component_count), &persistent->allocation_count);
+    if (result == VF_CUDA_OK) result = reserve_device(
+        &persistent->contour_offsets, &persistent->contour_offset_capacity,
+        static_cast<size_t>(component_count) + 1, &persistent->allocation_count);
+    if (result != VF_CUDA_OK) return result;
+
+    contour_init_label_kernel<<<
+        grid2d(padded_stride, height + 2), dim3(BLOCK_X, BLOCK_Y), 0, persistent->stream>>>(
+        mask, mask_stride, x0, y0, width, height, persistent->contour_label, padded_stride);
+    result = visionflow_cuda::kernel_launch_result();
+    if (result != VF_CUDA_OK) return result;
+    contour_bke_trace_kernel<<<component_count, 32, 0, persistent->stream>>>(
+        persistent->contour_label, padded_stride, width, persistent->contour_bke_sorted_seeds,
+        component_count, nullptr, persistent->contour_component_point_counts,
+        nullptr, nullptr);
+    result = visionflow_cuda::kernel_launch_result();
+    if (result != VF_CUDA_OK) return result;
+
+    size_t scan_bytes = 0;
+    error = cub::DeviceScan::ExclusiveSum(
+        nullptr, scan_bytes, persistent->contour_component_point_counts,
+        persistent->contour_offsets, component_count, persistent->stream);
+    if (error != cudaSuccess) return cuda_result(error);
+    const size_t cub_required = std::max(select_bytes, std::max(sort_bytes, scan_bytes));
+    if (cub_required > persistent->contour_bke_cub_scratch_capacity) {
+        result = reserve_device(
+            &persistent->contour_bke_cub_scratch, &persistent->contour_bke_cub_scratch_capacity,
+            cub_required, &persistent->allocation_count);
+        if (result != VF_CUDA_OK) return result;
+    }
+    error = cub::DeviceScan::ExclusiveSum(
+        persistent->contour_bke_cub_scratch, scan_bytes,
+        persistent->contour_component_point_counts, persistent->contour_offsets,
+        component_count, persistent->stream);
+    if (error != cudaSuccess) return cuda_result(error);
+    contour_bke_finish_counts_kernel<<<1, 1, 0, persistent->stream>>>(
+        component_count, persistent->contour_offsets,
+        persistent->contour_component_point_counts, persistent->contour_counts);
+    result = visionflow_cuda::kernel_launch_result();
+    if (result != VF_CUDA_OK) return result;
+    error = cudaMemcpyAsync(
+        counts, persistent->contour_counts, sizeof(int) * 3,
+        cudaMemcpyDeviceToHost, persistent->stream);
+    if (error != cudaSuccess) return cuda_result(error);
+    result = visionflow_cuda::stream_result(persistent->stream);
+    if (result != VF_CUDA_OK) return result;
+    if (counts[0] != component_count || counts[1] < 0 || counts[2] != 0) {
+        return VF_CUDA_INTERNAL_ERROR;
+    }
+    if (static_cast<size_t>(counts[1]) > std::numeric_limits<size_t>::max() / 2) {
+        return VF_CUDA_INVALID_ARGUMENT;
+    }
+
+    result = reserve_device(
+        &persistent->contour_points, &persistent->contour_point_capacity,
+        static_cast<size_t>(counts[1]) * 2, &persistent->allocation_count);
+    if (result == VF_CUDA_OK) result = reserve_device(
+        &persistent->contour_out_offsets, &persistent->contour_out_offset_capacity,
+        static_cast<size_t>(component_count) + 1, &persistent->allocation_count);
+    if (result == VF_CUDA_OK) result = reserve_device(
+        &persistent->contour_out_points, &persistent->contour_out_point_capacity,
+        static_cast<size_t>(counts[1]) * 2, &persistent->allocation_count);
+    if (result != VF_CUDA_OK) return result;
+
+    contour_init_label_kernel<<<
+        grid2d(padded_stride, height + 2), dim3(BLOCK_X, BLOCK_Y), 0, persistent->stream>>>(
+        mask, mask_stride, x0, y0, width, height, persistent->contour_label, padded_stride);
+    result = visionflow_cuda::kernel_launch_result();
+    if (result != VF_CUDA_OK) return result;
+    contour_bke_trace_kernel<<<component_count, 32, 0, persistent->stream>>>(
+        persistent->contour_label, padded_stride, width, persistent->contour_bke_sorted_seeds,
+        component_count, persistent->contour_offsets, persistent->contour_component_point_counts,
+        persistent->contour_points, persistent->contour_counts + 2);
+    result = visionflow_cuda::kernel_launch_result();
+    if (result != VF_CUDA_OK) return result;
+    contour_reverse_kernel<<<
+        dim3(static_cast<unsigned int>((component_count + 127) / 128), 1, 1), dim3(128, 1, 1),
+        0, persistent->stream>>>(
+        persistent->contour_offsets, persistent->contour_points, component_count, counts[1],
+        persistent->contour_out_offsets, persistent->contour_out_points);
+    result = visionflow_cuda::kernel_launch_result();
+    if (result != VF_CUDA_OK) return result;
+    record_timing_event(persistent, TIMING_AFTER_KERNEL);
+
+    try {
+        persistent->contour_host_offsets.resize(static_cast<size_t>(component_count) + 1);
+        persistent->contour_host_points.resize(static_cast<size_t>(counts[1]) * 2);
+    } catch (const std::bad_alloc&) {
+        return VF_CUDA_ALLOCATION_FAILED;
+    }
+    error = cudaMemcpyAsync(
+        persistent->contour_host_offsets.data(), persistent->contour_out_offsets,
+        sizeof(int32_t) * (static_cast<size_t>(component_count) + 1),
+        cudaMemcpyDeviceToHost, persistent->stream);
+    if (error == cudaSuccess && counts[1] > 0) {
+        error = cudaMemcpyAsync(
+            persistent->contour_host_points.data(), persistent->contour_out_points,
+            sizeof(int32_t) * static_cast<size_t>(counts[1]) * 2,
+            cudaMemcpyDeviceToHost, persistent->stream);
+    }
+    if (error != cudaSuccess) return cuda_result(error);
+    result = visionflow_cuda::stream_result(persistent->stream);
+    if (result != VF_CUDA_OK) return result;
+
+    if (!contour_host_components_may_be_nested(
+            persistent->contour_host_offsets, persistent->contour_host_points)) {
+        persistent->contour_host_result_valid = true;
+        record_timing_event(persistent, TIMING_AFTER_OUTPUT);
+        return VF_CUDA_OK;
+    }
+
+    // RETR_EXTERNAL omits disconnected foreground islands enclosed by another contour. BKE traces
+    // each 8-connected component independently; if geometric containment is possible, rerun the
+    // exact ordered scanner instead of risking a hierarchy mismatch.
+    persistent->contour_host_result_valid = false;
+    persistent->contour_host_offsets.clear();
+    persistent->contour_host_points.clear();
+    const int all_component_points = counts[1];
+    contour_init_label_kernel<<<
+        grid2d(padded_stride, height + 2), dim3(BLOCK_X, BLOCK_Y), 0, persistent->stream>>>(
+        mask, mask_stride, x0, y0, width, height, persistent->contour_label, padded_stride);
+    result = visionflow_cuda::kernel_launch_result();
+    if (result != VF_CUDA_OK) return result;
+    contour_scan_kernel<<<1, 32, 0, persistent->stream>>>(
+        persistent->contour_label, padded_stride, width, height, VF_CONTOURS_RETR_EXTERNAL,
+        persistent->contour_offsets, component_count + 1, persistent->contour_points,
+        all_component_points, persistent->contour_counts);
+    result = visionflow_cuda::kernel_launch_result();
+    if (result != VF_CUDA_OK) return result;
+    error = cudaMemcpyAsync(
+        counts, persistent->contour_counts, sizeof(int) * 3,
+        cudaMemcpyDeviceToHost, persistent->stream);
+    if (error != cudaSuccess) return cuda_result(error);
+    result = visionflow_cuda::stream_result(persistent->stream);
+    if (result != VF_CUDA_OK) return result;
+    if (counts[2] != 0 || counts[0] > component_count || counts[1] > all_component_points) {
+        return VF_CUDA_INTERNAL_ERROR;
+    }
+    if (counts[0] > 0) {
+        contour_reverse_kernel<<<
+            dim3(static_cast<unsigned int>((counts[0] + 127) / 128), 1, 1), dim3(128, 1, 1),
+            0, persistent->stream>>>(
+            persistent->contour_offsets, persistent->contour_points, counts[0], counts[1],
+            persistent->contour_out_offsets, persistent->contour_out_points);
+        result = visionflow_cuda::kernel_launch_result();
+        if (result != VF_CUDA_OK) return result;
+    }
+    record_timing_event(persistent, TIMING_AFTER_KERNEL);
+    int fallback_overflow = 0;
+    error = cudaMemcpyAsync(
+        &fallback_overflow, persistent->contour_counts + 2,
+        sizeof(int), cudaMemcpyDeviceToHost, persistent->stream);
+    if (error != cudaSuccess) return cuda_result(error);
+    result = visionflow_cuda::stream_result(persistent->stream);
+    if (result != VF_CUDA_OK) return result;
+    if (fallback_overflow != 0) return VF_CUDA_INTERNAL_ERROR;
+    record_timing_event(persistent, TIMING_AFTER_OUTPUT);
+    return VF_CUDA_OK;
+}
+
 VF_CUDA_API int vf_find_contours_u8(
     void* context,
     uint64_t generation,
@@ -5096,6 +5793,10 @@ VF_CUDA_API int vf_find_contours_u8(
         y > persistent->resident_height - height) {
         return VF_CUDA_INVALID_ARGUMENT;
     }
+    persistent->contour_result_valid = false;
+    persistent->contour_host_result_valid = false;
+    persistent->contour_host_offsets.clear();
+    persistent->contour_host_points.clear();
     const int label_stride = width + 2;
     const size_t padded = static_cast<size_t>(label_stride) * static_cast<size_t>(height + 2);
     if (padded > static_cast<size_t>(INT_MAX)) return VF_CUDA_INVALID_ARGUMENT;
@@ -5130,6 +5831,24 @@ VF_CUDA_API int vf_find_contours_u8(
     // only on the mask, so it is built once, before the retry loop, and its size is exact (the
     // per-row counts come back to the host and are prefix-summed there).
     const bool list_mode = (mode == VF_CONTOURS_RETR_LIST);
+    constexpr long long CONTOUR_BKE_MIN_PIXELS = 1LL << 20;
+    const long long roi_pixels = static_cast<long long>(width) * height;
+    if (!list_mode && roi_pixels >= CONTOUR_BKE_MIN_PIXELS) {
+        result = run_contour_bke_external(
+            persistent, mask, static_cast<int>(resident_pitch), x, y, width, height,
+            label_stride, counts);
+        if (result != VF_CUDA_OK) return result;
+        result = visionflow_cuda::stream_result(persistent->stream);
+        if (result != VF_CUDA_OK) return result;
+        finalize_timing(persistent);
+        persistent->contour_count = counts[0];
+        persistent->contour_point_count = counts[1];
+        persistent->contour_generation = generation;
+        persistent->contour_result_valid = true;
+        *out_contour_count = counts[0];
+        *out_point_count = counts[1];
+        return VF_CUDA_OK;
+    }
     if (list_mode) {
         std::vector<int> row_counts;
         std::vector<int> row_start;
@@ -5224,7 +5943,7 @@ VF_CUDA_API int vf_find_contours_u8(
                 persistent->contour_points, static_cast<int>(persistent->contour_point_capacity / 2),
                 persistent->contour_counts);
         } else {
-            contour_scan_kernel<<<1, 1, 0, persistent->stream>>>(
+            contour_scan_kernel<<<1, 32, 0, persistent->stream>>>(
                 persistent->contour_label, label_stride, width, height, mode,
                 persistent->contour_offsets, static_cast<int>(persistent->contour_offset_capacity),
                 persistent->contour_points, static_cast<int>(persistent->contour_point_capacity / 2),
@@ -5291,6 +6010,21 @@ VF_CUDA_API int vf_find_contours_download(
     if (offset_capacity < contour_count + 1) return VF_CUDA_INVALID_ARGUMENT;
     if (point_count > 0 && (out_points == nullptr || point_capacity < point_count)) {
         return VF_CUDA_INVALID_ARGUMENT;
+    }
+    if (persistent->contour_host_result_valid) {
+        if (contour_count == 0) {
+            out_offsets[0] = 0;
+            return VF_CUDA_OK;
+        }
+        std::memcpy(
+            out_offsets, persistent->contour_host_offsets.data(),
+            sizeof(int32_t) * static_cast<size_t>(contour_count + 1));
+        if (point_count > 0) {
+            std::memcpy(
+                out_points, persistent->contour_host_points.data(),
+                sizeof(int32_t) * static_cast<size_t>(point_count) * 2);
+        }
+        return VF_CUDA_OK;
     }
     if (contour_count == 0) {
         out_offsets[0] = 0;

@@ -81,22 +81,29 @@ plan，tile metadata 以 `cpu_crossover` 路線與 `preprocess_routes` 標示。
   370 ms（35.7×），座標與排序相同、分數在 1e-4 內，context 保留 10.37 GiB、context 外無配置。
 - `vf_plan_find_contours_roi`（Contour 切圖 resident 原型）：**只供 strict CUDA 實驗，`auto` 不啟用**。
   它讓 resident ROI 的等尺寸 preprocess plan 直接餵 GPU contour tracer，省去 mask D2H 後再 H2D；
-  shape geometry、rectangle／circle／polygon 分類與 Tile 排序仍在 CPU。622/622 OpenCV contour 案例
-  逐點相同且決定性，切圖 Tile descriptor 等價；但 RTX 3090 切圖 median 為 CPU 4.55 ms、GPU
-  66.64 ms（0.068×），未達效能 gate，因此 runtime metadata 如實回報 CPU／hybrid 路線，不宣稱
-  已完成全 GPU contour tiling。
-- `vf_find_contours_u8` / `vf_find_contours_download`（輪廓抽取）：**正確且已改善，但尚未全面勝過 CPU，
-  因此不接入產線**。與 `cv2.findContours(RETR_LIST/RETR_EXTERNAL,
-  CHAIN_APPROX_SIMPLE)` 在 `tools/check_contour_equivalence.py` 的 **314 個案例全部逐點
-  相同且決定性**（含輪廓數、每條 shape、點順序、子區域座標契約）。**warp 改善前在每一個量測
+  `RETR_EXTERNAL` 大 ROI 現在使用 OpenCV CUDA BKE 2×2 component-root pass，按 raster seed 排序後
+  以一個 warp／component 平行追蹤；若 component 輪廓可能巢狀，保守退回 exact ordered scanner。
+  Shape geometry、rectangle／circle／polygon 分類與 Tile 排序仍在 CPU。634/634 OpenCV contour
+  案例逐點相同且決定性（含 100 組隨機 mask、奇數尺寸邊界與巢狀輪廓），Tile descriptors 等價。
+  RTX 3090 以 12000×2000、200 個分離矩形完整比較 ContourTiler：CPU median／P95 54.99／57.00 ms，
+  GPU 18.32／22.76 ms（3.00×）。此為合成 production-shape，不代表實際 recipe 樣本，故 `auto`
+  暫維持 CPU，runtime metadata 不宣稱全部 contour geometry 在 GPU。
+- `vf_find_contours_u8` / `vf_find_contours_download`（輪廓抽取）：**正確且已改善，但 `auto` 尚未接入**。
+  與 `cv2.findContours(RETR_LIST/RETR_EXTERNAL, CHAIN_APPROX_SIMPLE)` 在
+  `tools/check_contour_equivalence.py` 的 **634 個案例全部逐點相同且決定性**（含輪廓數、每條 shape、
+  點順序、子區域座標契約與重複呼叫）。**warp 改善前在每一個量測
   形狀都慢於 cv2**（GPU／CPU 毫秒）：512×512 稀疏 0.24→1.06（0.22×）、512×512 密集
   0.23→3.91（0.06×）、2048×2048 密集 3.04→23.17（0.13×）、2000×12000 稀疏
   13.77→34.16（0.40×）、中型 18.63→136.54（0.14×）、大型 26.97→261.85（0.10×）、
-  `RETR_EXTERNAL` 13.83→1234.75（0.01×）。這是 warp 改善前的完整 enablement matrix；目前仍不訂
-  啟用界線、維持停用。2026-09-15 把 `RETR_LIST` 每一步序列讀取 8 鄰域改成 warp 同時讀取、只由
+  `RETR_EXTERNAL` 13.83→1234.75（0.01×）。2026-09-23 舊／新 DLL 交錯 A/B（各 15 次，RTX 3090，
+  2000×12000 mask）：warp scanner → BKE external 稀疏 291.75→4.37 ms（66.7×）、密集
+  270.18→4.53 ms（59.7×）；CPU median 分別 11.94／11.21 ms。BKE resident contour scratch 的
+  context peak 約 327 MB（含 24 MB resident mask），稀疏／密集交替 40 次後 reserved bytes 與
+  allocation count 不再增長。2026-09-15 把 `RETR_LIST` 每一步序列讀取 8 鄰域改成 warp 同時讀取、只由
   lane 0 寫標記與點，舊／新 DLL 各暖機後 15 次 A/B：高 12000×寬 2000 的稀疏長輪廓
   **37.08→29.89 ms（減少 19.4%）**、密集短輪廓 **8.93→8.00 ms（減少 10.4%）**，314/314
-  逐點相同。稀疏長輪廓仍慢於 cv2，`RETR_EXTERNAL` 也仍是序列 byte 掃描，故尚不能接入 Detector。
+  逐點相同。`RETR_LIST` 稀疏仍較慢，`ContourShapeAnalyzer` 的 geometry 與 Tile descriptor
+  排序仍由 CPU 處理，實際 recipe 尚待驗收，因此不自動切換 CUDA。
 - `vf_cnr_mask_f32`（residual 門檻與候選遮罩一次算完）：**已接入** `detectors/detector_202_1.py`
   的 `_residual_statistics`。它把 `residual` 與 `|residual − median|` 都建在 device 上，用與
   `vf_median_f32` 相同的 key／排序機制取兩個中位數、以 double 算門檻、再以 **float32** 比較

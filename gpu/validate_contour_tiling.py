@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import statistics
 import sys
 import time
@@ -39,12 +40,26 @@ def timed(callable_, count=10):
 
 
 def main() -> int:
-    rng = np.random.default_rng(20260922)
-    image = rng.integers(0, 80, (1024, 1280, 3), dtype=np.uint8)
-    cv2.rectangle(image, (80, 90), (310, 360), (240, 240, 240), -1)
-    cv2.circle(image, (700, 350), 120, (230, 230, 230), -1)
-    polygon = np.array([[820, 700], [980, 610], [1120, 780], [950, 930]], np.int32)
-    cv2.fillPoly(image, [polygon], (250, 250, 250))
+    parser = argparse.ArgumentParser(description="Compare CPU/GPU contour tiling end-to-end.")
+    parser.add_argument(
+        "--production",
+        action="store_true",
+        help="use a 12000x2000 sparse ROI with 200 separated components",
+    )
+    args = parser.parse_args()
+    if args.production:
+        image = np.zeros((12000, 2000, 3), dtype=np.uint8)
+        for index in range(200):
+            row = 40 + (index // 10) * (image.shape[0] - 200) // 20
+            column = 40 + (index % 10) * (image.shape[1] - 200) // 10
+            cv2.rectangle(image, (column, row), (column + 39, row + 59), (240, 240, 240), -1)
+    else:
+        rng = np.random.default_rng(20260922)
+        image = rng.integers(0, 80, (1024, 1280, 3), dtype=np.uint8)
+        cv2.rectangle(image, (80, 90), (310, 360), (240, 240, 240), -1)
+        cv2.circle(image, (700, 350), 120, (230, 230, 230), -1)
+        polygon = np.array([[820, 700], [980, 610], [1120, 780], [950, 930]], np.int32)
+        cv2.fillPoly(image, [polygon], (250, 250, 250))
     threshold = BinaryThresholdConfig(
         method="global", threshold=128, max_value=255,
         blur_size=3, morph_open_kernel=3, morph_open_iterations=1,
@@ -93,7 +108,8 @@ def main() -> int:
             ).iter_tiles(image))
         )
         print(
-            f"Contour tiling GPU equivalence passed: contours={len(actual)} tiles={len(gpu_tiles)} "
+            f"Contour tiling GPU equivalence passed: shape={image.shape[1]}x{image.shape[0]} "
+            f"contours={len(actual)} tiles={len(gpu_tiles)} "
             f"cpu_median/p95={cpu_median:.3f}/{cpu_p95:.3f} ms "
             f"gpu_median/p95={gpu_median:.3f}/{gpu_p95:.3f} ms "
             f"ratio={cpu_median / gpu_median:.3f}x device={runtime.device_name}"

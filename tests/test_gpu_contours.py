@@ -258,6 +258,23 @@ class ContourSourceContractTests(unittest.TestCase):
         # Lane zero remains the sole writer; the optimization must not make contour marking race.
         self.assertIn("Lane zero remains the sole writer", source)
 
+    def test_retr_external_scan_probes_pixels_in_warp_but_keeps_first_stop_order(self):
+        source = (ROOT / "gpu" / "visionflow_cuda.cu").read_text(encoding="utf-8")
+        self.assertIn("contour_scan_kernel<<<1, 32", source)
+        self.assertIn("const unsigned int changed_lanes = __ballot_sync(warp_mask, changed)", source)
+        self.assertIn("const int first_changed_lane = __ffs(static_cast<int>(changed_lanes)) - 1", source)
+        self.assertIn("contour_open_border_warp(", source)
+        self.assertIn("the trace may have changed labels in that row", source)
+
+    def test_large_external_route_uses_bke_and_falls_back_for_nested_components(self):
+        source = (ROOT / "gpu" / "visionflow_cuda.cu").read_text(encoding="utf-8")
+        self.assertIn("contour_bke_init_kernel", source)
+        self.assertIn("contour_bke_merge_kernel", source)
+        self.assertIn("contour_bke_trace_kernel", source)
+        self.assertIn("contour_host_components_may_be_nested", source)
+        self.assertIn("constexpr long long CONTOUR_BKE_MIN_PIXELS = 1LL << 20", source)
+        self.assertIn("hierarchy mismatch", source)
+
 
 if __name__ == "__main__":
     unittest.main()

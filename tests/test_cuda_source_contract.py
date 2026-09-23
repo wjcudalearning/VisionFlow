@@ -229,9 +229,14 @@ class CudaSourceContractTests(unittest.TestCase):
         for family in ("median_", "gaussian_f32_", "cnr_mask_", "cand_"):
             self.assertIn(f"&persistent->{family}", trim)
         for protected in (
-            "resident_data", "plan_", "match_", "contour_", "find_contours_"
+            "resident_data", "plan_", "match_", "find_contours_",
+            "contour_label", "contour_offsets", "contour_points",
+            "contour_out_offsets", "contour_out_points", "contour_counts",
+            "contour_row_counts", "contour_row_start", "contour_transitions",
         ):
             self.assertNotIn(f"&persistent->{protected}", trim)
+        self.assertIn("&persistent->contour_bke_parent", trim)
+        self.assertIn("&persistent->contour_bke_cub_scratch", trim)
         self.assertIn("peak_memory_bytes", source)
         self.assertIn("vf_context_memory_stats_v2(context", smoke)
         self.assertIn("vf_context_trim_analysis_scratch(context", smoke)

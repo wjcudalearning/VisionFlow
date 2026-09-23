@@ -94,6 +94,24 @@ def cases() -> list[tuple[str, np.ndarray]]:
     comb[10:54, 10:70:4] = 0
     shapes.append(("comb_holes", comb))
 
+    # Exercise the large-ROI BKE path with odd dimensions, right/bottom edge tiles, and diagonal
+    # 8-connectivity cases in addition to the small serial/transition-list scanner matrix.
+    odd_edges = np.zeros((1025, 1027), dtype=np.uint8)
+    odd_edges[0:2, 1025:1027] = 255
+    odd_edges[1022:1025, 1023:1027] = 255
+    odd_edges[120:180, 120:180] = 255
+    for step in range(80):
+        odd_edges[300 + step, 300 + step] = 255
+    shapes.append(("large_odd_edges_and_diagonal", odd_edges))
+
+    nested_large = np.zeros((1025, 1027), dtype=np.uint8)
+    nested_large[50:975, 50:975] = 255
+    nested_large[150:875, 150:875] = 0
+    nested_large[250:775, 250:775] = 255
+    nested_large[350:675, 350:675] = 0
+    nested_large[450:575, 450:575] = 255
+    shapes.append(("large_nested_components", nested_large))
+
     for seed in (1, 2, 3, 4, 5):
         random_mask = (rng.integers(0, 100, (64, 80)) > 80).astype(np.uint8) * 255
         shapes.append((
@@ -187,39 +205,44 @@ def time_call(function, repetitions: int) -> dict:
 
 
 def benchmark(runtime: GpuRuntime, rows: list[str], report: dict) -> None:
+    timing_enabled = runtime.enable_native_timing(True)
+    report["native_timing_enabled"] = bool(timing_enabled)
     for name, mask in benchmark_masks():
-        reference, _ = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-        cpu = time_call(
-            lambda: cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE), 7
-        )
-        # Warm up both paths and use medians. Single-call readings previously produced a false
-        # dense-mask win, so the acceptance gate must not make routing decisions from one sample.
-        contours = runtime.find_contours_gray(mask, "list")
-        gpu = time_call(lambda: runtime.find_contours_gray(mask, "list"), 7)
-        timings = runtime.performance_stats().get("native_timings_ms") or {}
-        same, detail = compare(reference, contours)
-        entry = {
-            "name": name,
-            "shape": list(mask.shape),
-            "contours": len(reference),
-            "points": int(sum(contour.shape[0] for contour in reference)),
-            "identical": bool(same),
-            "detail": detail,
-            "cv2": cpu,
-            "operator": gpu,
-            "operator_vs_cv2": gpu["median_ms"] / cpu["median_ms"] if cpu["median_ms"] else 0.0,
-            "native_timings_ms": timings,
-        }
-        report["benchmark"].append(entry)
-        line = (
-            f"{name}: contours={entry['contours']} identical={same} "
-            f"cv2={cpu['median_ms']:.2f} ms operator={gpu['median_ms']:.2f} ms "
-            f"({entry['operator_vs_cv2']:.2f}x cv2) "
-            f"h2d={timings.get('h2d_ms', 0.0):.2f} kernel={timings.get('kernel_ms', 0.0):.2f} "
-            f"d2h={timings.get('d2h_ms', 0.0):.2f}"
-        )
-        rows.append(line)
-        print(line)
+        for mode, mode_flag in MODES:
+            reference, _ = cv2.findContours(mask, mode_flag, cv2.CHAIN_APPROX_SIMPLE)
+            cpu = time_call(
+                lambda: cv2.findContours(mask, mode_flag, cv2.CHAIN_APPROX_SIMPLE), 7
+            )
+            # Warm up both paths and use medians. Single-call readings previously produced a
+            # false dense-mask win, so the acceptance gate must not route from one sample.
+            contours = runtime.find_contours_gray(mask, mode)
+            gpu = time_call(lambda: runtime.find_contours_gray(mask, mode), 7)
+            timings = runtime.performance_stats().get("native_timings_ms") or {}
+            same, detail = compare(reference, contours)
+            entry = {
+                "name": name,
+                "mode": mode,
+                "shape": list(mask.shape),
+                "contours": len(reference),
+                "points": int(sum(contour.shape[0] for contour in reference)),
+                "identical": bool(same),
+                "detail": detail,
+                "cv2": cpu,
+                "operator": gpu,
+                "operator_vs_cv2": gpu["median_ms"] / cpu["median_ms"] if cpu["median_ms"] else 0.0,
+                "native_timings_ms": timings,
+                "persistent_context": runtime.performance_stats().get("persistent_context"),
+            }
+            report["benchmark"].append(entry)
+            line = (
+                f"{name}/{mode}: contours={entry['contours']} identical={same} "
+                f"cv2={cpu['median_ms']:.2f} ms operator={gpu['median_ms']:.2f} ms "
+                f"({entry['operator_vs_cv2']:.2f}x cv2) "
+                f"h2d={timings.get('h2d_ms', 0.0):.2f} kernel={timings.get('kernel_ms', 0.0):.2f} "
+                f"d2h={timings.get('d2h_ms', 0.0):.2f}"
+            )
+            rows.append(line)
+            print(line)
 
 
 def main() -> int:
@@ -323,14 +346,15 @@ def main() -> int:
     for name, mask in matrix:
         if not mask.any():
             continue
-        first = runtime.find_contours_gray(mask, "list")
-        second = runtime.find_contours_gray(mask, "list")
-        repeatable = len(first) == len(second) and all(
-            np.array_equal(left, right) for left, right in zip(first, second)
-        )
-        deterministic = deterministic and repeatable
-        if not repeatable:
-            rows.append(f"{name}: NOT DETERMINISTIC across repeated calls")
+        for mode, _ in MODES:
+            first = runtime.find_contours_gray(mask, mode)
+            second = runtime.find_contours_gray(mask, mode)
+            repeatable = len(first) == len(second) and all(
+                np.array_equal(left, right) for left, right in zip(first, second)
+            )
+            deterministic = deterministic and repeatable
+            if not repeatable:
+                rows.append(f"{name}/{mode}: NOT DETERMINISTIC across repeated calls")
     report["deterministic"] = bool(deterministic)
     rows.append(f"deterministic: {deterministic}")
     print(rows[-1])
