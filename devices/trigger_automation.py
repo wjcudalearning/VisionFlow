@@ -159,3 +159,136 @@ class SoftwareTriggerMonitor:
         except DeviceError as exc:
             self._stop_event.set()
             self._on_error(exc)
+
+
+# ============================================================
+# External-trigger capture watch ("智能偵測").
+# Field assumption (xx_ccd design): a sensor pulse starts the frame on the grabber, and the LSI-8181
+# CMP_OUT in compare auto-increment mode supplies one line pulse per `compare_increment` counts. CMP_OUT
+# only pulses when the encoder counts up onto the compare value, so the compare must stay ahead of the
+# encoder. The watch reads the meter wheel on the GUI poll and names the stage that stopped a frame.
+# ============================================================
+
+COUNTER_MAX = 2_147_483_647
+REVERSE_MIN_COUNTS = 50
+NO_TRIGGER_LENGTHS = 2
+NO_FRAME_LENGTH_RATIO = 1.5
+
+
+def compare_arm_value(encoder_value: int, compare_value: int, compare_increment: int) -> int | None:
+    """Compare value that lets CMP_OUT pulse as the encoder counts up, or None when already ahead."""
+    if int(compare_value) > int(encoder_value):
+        return None
+    return min(COUNTER_MAX, int(encoder_value) + max(1, int(compare_increment)))
+
+
+@dataclass(frozen=True)
+class CaptureWatchFinding:
+    code: str  # progress | reverse | compare_stalled | no_trigger | no_frame
+    level: str  # info | warning | error
+    message: str
+    rearm_compare: int | None = None
+
+
+class ExternalCaptureWatch:
+    """Follows one external-trigger grab through meter-wheel readings. GUI thread only."""
+
+    def __init__(self, length_lines: int, compare_increment: int, waits_for_trigger: bool, encoder_value: int):
+        self.length_lines = max(1, int(length_lines))
+        self.step = max(1, int(compare_increment))
+        self.waits_for_trigger = bool(waits_for_trigger)
+        self.trigger_events_missing = False
+        self.frames = 0
+        self._begin_phase(int(encoder_value), triggered=not self.waits_for_trigger)
+
+    @property
+    def expected_counts(self) -> int:
+        return self.length_lines * self.step
+
+    @property
+    def triggered(self) -> bool:
+        return self._triggered
+
+    def _begin_phase(self, encoder_value: int, triggered: bool) -> None:
+        self._start = int(encoder_value)
+        self._triggered = bool(triggered)
+        self._reported: set[str] = set()
+        self._quarter = 0
+
+    def on_trigger(self, encoder_value: int) -> None:
+        self._begin_phase(encoder_value, triggered=True)
+
+    def on_frame(self, encoder_value: int, trigger_seen: bool) -> None:
+        if self.waits_for_trigger and not trigger_seen:
+            # The grabber completed a frame without reporting its trigger event: stop judging the sensor.
+            self.trigger_events_missing = True
+        self.frames += 1
+        self._begin_phase(encoder_value, triggered=not self.waits_for_trigger or self.trigger_events_missing)
+
+    def observe(self, encoder_value: int, compare_value: int) -> list[CaptureWatchFinding]:
+        encoder_value, compare_value = int(encoder_value), int(compare_value)
+        delta = encoder_value - self._start
+        findings: list[CaptureWatchFinding] = []
+        if delta <= -max(REVERSE_MIN_COUNTS, self.step * 10) and self._once("reverse"):
+            findings.append(
+                CaptureWatchFinding(
+                    "reverse",
+                    "warning",
+                    f"米輪 Encoder 正在往下數（{self._start} → {encoder_value}）；Compare 只在往上數時出脈衝，"
+                    "板卡收不到線觸發。請在米輪設定切換「反向」後再試。",
+                )
+            )
+        if delta > 0 and compare_value < encoder_value:
+            # Auto-increment keeps the compare ahead of an up-counting encoder; behind means CMP_OUT stopped.
+            rearm = compare_arm_value(encoder_value, compare_value, self.step)
+            message = (
+                f"Compare {compare_value} 落在 Encoder {encoder_value} 後面，CMP_OUT 不會再出脈衝；"
+                f"已自動改寫 Compare 為 {rearm}。"
+            )
+            findings.append(
+                CaptureWatchFinding(
+                    "compare_stalled", "warning" if self._once("compare_stalled") else "silent", message, rearm
+                )
+            )
+        expected = self.expected_counts
+        if not self._triggered:
+            if (
+                not self.trigger_events_missing
+                and delta >= NO_TRIGGER_LENGTHS * expected
+                and self._once("no_trigger")
+            ):
+                findings.append(
+                    CaptureWatchFinding(
+                        "no_trigger",
+                        "error",
+                        f"米輪已走 {delta} 格（約 {NO_TRIGGER_LENGTHS} 張的長度），擷取卡仍未收到 Sensor 觸發。"
+                        "請確認 Sensor 接在擷取卡的外部 Frame Trigger 輸入、Sensor 有被遮擋到、訊號極性正確。",
+                    )
+                )
+            return findings
+        quarter = min(4, max(0, delta) * 4 // expected)
+        if quarter > self._quarter:
+            self._quarter = quarter
+            lines = min(self.length_lines, max(0, delta) // self.step)
+            findings.append(
+                CaptureWatchFinding(
+                    "progress", "info", f"長度偵測：約 {lines} / {self.length_lines} 行（Encoder +{delta}）。"
+                )
+            )
+        if delta >= int(expected * NO_FRAME_LENGTH_RATIO) + self.step and self._once("no_frame"):
+            findings.append(
+                CaptureWatchFinding(
+                    "no_frame",
+                    "error",
+                    f"米輪已走過 Length（{self.length_lines} 行 ≈ {expected} 格，實際 +{delta}），影像仍未完成："
+                    "擷取卡沒收到每一行的線觸發脈衝。請確認米輪卡 CMP_OUT 接到擷取卡的線觸發輸入，"
+                    "並確認「自動遞增」是每行的格數。",
+                )
+            )
+        return findings
+
+    def _once(self, code: str) -> bool:
+        if code in self._reported:
+            return False
+        self._reported.add(code)
+        return True

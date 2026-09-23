@@ -27,8 +27,10 @@ from devices.factory import CcdDevices
 from devices.simulated import SimulatedLineScanCamera, SimulatedMeterWheel
 from devices.trigger_automation import (
     AutoSaveRequests,
+    ExternalCaptureWatch,
     ExternalTriggerActions,
     SoftwareTriggerMonitor,
+    compare_arm_value,
     external_trigger_actions,
     software_frame_requests_auto_save,
 )
@@ -119,6 +121,51 @@ class SoftwareTriggerMonitorTests(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("米輪未連線", str(errors[0]))
         monitor.stop()
+
+
+class ExternalCaptureWatchTests(unittest.TestCase):
+    def test_compare_arm_value_keeps_a_compare_ahead_of_the_encoder(self):
+        self.assertIsNone(compare_arm_value(10, 11, 1))
+        self.assertEqual(compare_arm_value(10, 10, 1), 11)
+        self.assertEqual(compare_arm_value(500, 3, 4), 504)
+        self.assertEqual(compare_arm_value(500, 3, 0), 501, "an increment of 0 still arms one count ahead")
+
+    def test_reports_missing_sensor_trigger_after_two_lengths(self):
+        watch = ExternalCaptureWatch(length_lines=100, compare_increment=2, waits_for_trigger=True, encoder_value=0)
+        self.assertEqual([f.code for f in watch.observe(399, 400)], [])
+        codes = [f.code for f in watch.observe(400, 402)]
+        self.assertEqual(codes, ["no_trigger"])
+        self.assertEqual(watch.observe(800, 802), [], "each finding is reported once per phase")
+
+    def test_reports_progress_then_missing_line_pulses_after_the_trigger(self):
+        watch = ExternalCaptureWatch(length_lines=100, compare_increment=1, waits_for_trigger=True, encoder_value=0)
+        watch.on_trigger(1000)
+        progress = watch.observe(1025, 1026)
+        self.assertEqual([f.code for f in progress], ["progress"])
+        self.assertIn("25 / 100", progress[0].message)
+        codes = [f.code for f in watch.observe(1151, 1152)]
+        self.assertEqual(codes, ["progress", "no_frame"])
+        watch.on_frame(1160, trigger_seen=True)
+        self.assertFalse(watch.triggered, "one-frame mode waits for the next sensor trigger")
+        self.assertEqual(watch.frames, 1)
+
+    def test_detects_reverse_counting_and_a_stalled_compare(self):
+        watch = ExternalCaptureWatch(length_lines=10, compare_increment=1, waits_for_trigger=False, encoder_value=1000)
+        reverse = watch.observe(940, 1001)
+        self.assertEqual([f.code for f in reverse], ["reverse"])
+        stalled = ExternalCaptureWatch(length_lines=100, compare_increment=3, waits_for_trigger=False, encoder_value=0)
+        findings = stalled.observe(20, 5)
+        self.assertEqual(findings[0].code, "compare_stalled")
+        self.assertEqual(findings[0].rearm_compare, 23)
+        self.assertEqual(findings[0].level, "warning")
+        self.assertEqual(stalled.observe(30, 5)[0].level, "silent", "later re-arms do not repeat the notice")
+
+    def test_frames_without_trigger_events_stop_judging_the_sensor(self):
+        watch = ExternalCaptureWatch(length_lines=10, compare_increment=1, waits_for_trigger=True, encoder_value=0)
+        watch.on_frame(10, trigger_seen=False)
+        self.assertTrue(watch.trigger_events_missing)
+        self.assertTrue(watch.triggered)
+        self.assertNotIn("no_trigger", [f.code for f in watch.observe(100, 101)])
 
 
 class TriggerRuleTests(unittest.TestCase):
@@ -351,6 +398,64 @@ class ControllerTriggerAutomationTests(unittest.TestCase):
         self.app.processEvents()
         self.assertEqual(self.meter_wheel.read_compare(), 1)
         self.assertEqual(self.controller.pending_auto_saves, 0)
+
+
+    def test_external_preview_arms_the_meter_wheel_and_watches_the_length(self):
+        self._connect(TriggerSettings(TriggerMode.EXTERNAL, True), auto_save_external_one_frame=True)
+        self.assertTrue(self.controller.connect_meter_wheel(0))
+        self.meter_wheel.set_encoder(5000)
+        self.meter_wheel.set_compare(0)
+        self.assertEqual(self.controller.machine_settings.meter_wheel.compare_increment, 0)
+
+        self.controller.start_preview()
+        self.assertEqual(self.controller.machine_settings.meter_wheel.compare_increment, 1)
+        self.assertEqual(self.meter_wheel.read_compare(), 5001, "the compare is moved ahead of the encoder")
+        self.assertEqual(self.controller.machine_settings.meter_wheel.compare_value, 0, "the saved compare is kept")
+        self.assertTrue(any("自動遞增" in message for message, _kind in self.notices))
+        watch = self.controller.external_capture_watch
+        self.assertIsNotNone(watch)
+        self.assertEqual(watch.expected_counts, 720)
+
+        self.meter_wheel.advance(2 * 720)
+        self.controller.poll_meter_wheel()
+        self.assertTrue(any("Sensor 觸發" in message and kind == "error" for message, kind in self.notices))
+
+        self.camera.emit_external_trigger()
+        self.assertTrue(_wait_until(lambda: self.controller.external_capture_watch.triggered))
+        self.meter_wheel.advance(360)
+        self.controller.poll_meter_wheel()
+        self.assertTrue(any("360 / 720" in message for message in self.messages))
+
+        self.camera.emit_frame()
+        self.assertTrue(_wait_until(lambda: self.controller.external_capture_watch.frames == 1))
+        self.assertFalse(self.controller.external_capture_watch.triggered)
+        self.assertEqual(len(self._saved_files()), 1)
+
+        self.controller.stop_preview()
+        self.assertIsNone(self.controller.external_capture_watch)
+
+    def test_external_trigger_moves_a_saved_compare_that_is_behind_the_encoder(self):
+        self._connect(TriggerSettings(TriggerMode.EXTERNAL, True, True))
+        self._connect_meter_wheel(compare=10, encoder_origin=7)
+        self.controller.apply_compare_increment(2)
+        self.meter_wheel.set_encoder(900)
+
+        self.camera.emit_external_trigger()
+        self.assertTrue(_wait_until(lambda: self.meter_wheel.read_compare() == 902))
+        self.assertTrue(any("已自動前移" in message for message in self.messages))
+        self.assertEqual(self.controller.machine_settings.meter_wheel.compare_value, 10)
+
+    def test_external_frames_auto_save_when_the_grabber_never_reports_trigger_events(self):
+        self._connect(TriggerSettings(TriggerMode.EXTERNAL, True), auto_save_external_one_frame=True)
+        self.camera.emit_frame()
+        self.assertEqual(len(self._saved_files()), 1)
+        self.assertTrue(_wait_until(lambda: any("沒有回報外部觸發事件" in message for message, _ in self.notices)))
+
+    def test_external_preview_without_meter_wheel_explains_why_no_frame_completes(self):
+        self._connect(TriggerSettings(TriggerMode.EXTERNAL, True))
+        self.controller.start_preview()
+        self.assertIsNone(self.controller.external_capture_watch)
+        self.assertTrue(any("米輪未連線" in message and kind == "warning" for message, kind in self.notices))
 
 
 if __name__ == "__main__":
