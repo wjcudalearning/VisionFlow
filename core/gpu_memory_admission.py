@@ -12,23 +12,18 @@ MIB = 1024 * 1024
 # exactly the same templates. Keep both in step.
 PATTERN_FFT_CROSSOVER_WORK_PER_PIXEL = 4000.0
 
-# cuFFT allocates its own work area outside the context, so it never appears in the context memory
-# breakdown. Measured on RTX 3090 for the padded production transform; expressed as a multiple of
-# the padded real plane so it scales with the frame.
-_CUFFT_WORK_AREA_MULTIPLIER = 3.0
+# The FFT response keeps three complex planes at once: the template spectrum, the image spectrum
+# and one ping-pong scratch. The transforms are built into the CUDA library, so nothing is
+# allocated outside the context any more.
+_FFT_COMPLEX_PLANES = 3
 
 
 def pattern_fft_length(value: int) -> int:
-    """Smallest 2/3/5/7-smooth transform length >= value, as the native path pads to."""
-    candidate = max(1, int(value))
-    while True:
-        remaining = candidate
-        for factor in (2, 3, 5, 7):
-            while remaining % factor == 0:
-                remaining //= factor
-        if remaining == 1:
-            return candidate
-        candidate += 1
+    """Smallest power of two >= value, as the native radix-2/4 transforms pad to."""
+    length = 1
+    while length < max(1, int(value)):
+        length <<= 1
+    return length
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,18 +182,15 @@ def estimate_resident_working_set(
             frame_pixels = image_width * image_height
             brute_force_work = response_elements * template_width * template_height
             if brute_force_work > PATTERN_FFT_CROSSOVER_WORK_PER_PIXEL * frame_pixels:
-                # FFT response path: the gray frame, two int64 summed-area tables, the padded real
-                # plane, two R2C spectra, the same response/sort arrays as above, the template and
-                # an allowance for cuFFT's own work area, which it allocates outside the context.
+                # FFT response path: the gray frame (1 B/px), two int64 summed-area tables
+                # (16 B/px), three padded complex planes, the same response/sort arrays as above
+                # and the template.
                 pad_width = pattern_fft_length(image_width)
                 pad_height = pattern_fft_length(image_height)
-                spectrum_elements = (pad_width // 2 + 1) * pad_height
-                fft_bytes = 4 * pad_width * pad_height + 16 * spectrum_elements
+                fft_bytes = _FFT_COMPLEX_PLANES * 8 * pad_width * pad_height
                 anchor_scratch_bytes = (
-                    frame_pixels
-                    + 16 * frame_pixels
+                    17 * frame_pixels
                     + fft_bytes
-                    + int(_CUFFT_WORK_AREA_MULTIPLIER * 4 * pad_width * pad_height)
                     + response_elements * 29
                     + template_width * template_height
                     + 1 * MIB

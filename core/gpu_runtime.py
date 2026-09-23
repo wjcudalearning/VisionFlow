@@ -210,7 +210,7 @@ class GpuRuntime:
 
     @property
     def supports_pattern_match_fft(self) -> bool:
-        """Whether a template too large for the scoring kernel can still run through cuFFT."""
+        """Whether a template too large for the scoring kernel can still run through the FFT."""
         return self._capabilities.pattern_match_fft
 
     @property

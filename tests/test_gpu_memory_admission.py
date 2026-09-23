@@ -206,22 +206,20 @@ class ResidentWorkingSetAdmissionTests(unittest.TestCase):
         self.assertGreaterEqual(pad_width, 1200)
         self.assertGreaterEqual(pad_height, 800)
 
-    def test_pattern_fft_length_avoids_transform_sizes_cufft_handles_badly(self):
-        for value, expected in ((13000, 13122), (16384, 16384), (1, 1), (11, 12)):
+    def test_pattern_fft_length_pads_to_the_power_of_two_the_kernels_need(self):
+        # The native transforms are radix-2/4 Stockham stages, so every padded length is a power
+        # of two. Admission has to pad the same way or it would under-count the complex planes.
+        for value, expected in ((13000, 16384), (16384, 16384), (1, 1), (11, 16)):
             with self.subTest(value=value):
                 self.assertEqual(pattern_fft_length(value), expected)
         for value in (97, 1021, 13000):
             padded = pattern_fft_length(value)
             self.assertGreaterEqual(padded, value)
-            remaining = padded
-            for factor in (2, 3, 5, 7):
-                while remaining % factor == 0:
-                    remaining //= factor
-            self.assertEqual(remaining, 1)
+            self.assertEqual(padded & (padded - 1), 0)
 
     def test_production_pattern_match_fft_working_set_fits_a_24_gib_card(self):
-        # RTX 3090 measurement for this exact case: the native context holds 6.87 GiB and the whole
-        # localization runs in 191.6 ms, so admission must accept it on a 24 GiB card.
+        # RTX 3090 measurement for this exact case: the native context holds 10.37 GiB and the
+        # whole localization runs in 370 ms, so admission must accept it on a 24 GiB card.
         estimate = estimate_resident_working_set(
             (13000, 16384, 3), 13000 * 16384 * 3,
             {"mode": "pattern_match", "pattern_match": {"crop_padding": 20}},
@@ -231,7 +229,10 @@ class ResidentWorkingSetAdmissionTests(unittest.TestCase):
         )
 
         self.assertEqual(estimate.tile_input_bytes, 2040 * 12040 * 3)
-        self.assertGreater(estimate.anchor_scratch_bytes, 6.87 * (1 << 30))
+        # The resident frame plus the FFT working set has to cover the measured context.
+        self.assertGreater(
+            estimate.resident_frame_bytes + estimate.anchor_scratch_bytes, 10.37 * (1 << 30)
+        )
         self.assertLess(estimate.required_free_bytes, 20 << 30)
 
     def test_16k_pattern_match_with_gpu_detectors_fits_a_24_gib_card(self):

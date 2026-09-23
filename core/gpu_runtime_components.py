@@ -135,7 +135,7 @@ class GpuCapabilities:
 
     @property
     def pattern_match_fft(self) -> bool:
-        """Large-template Pattern Match also needs the optional cuFFT runtime, so ask the DLL."""
+        """Whether this DLL has the large-template FFT response; a pre-v1.8.2 DLL does not."""
         if not self.pattern_match or not self.has_exports(
             ("vf_pattern_match_fft_available",), context=False
         ):

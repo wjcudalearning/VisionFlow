@@ -108,9 +108,16 @@ def main() -> int:
     parser.add_argument("--repeats", type=int, default=3)
     arguments = parser.parse_args()
 
+    # The padded transform is a power of two per axis, and the Stockham stages ping-pong between
+    # planes, so the plane holding each spectrum depends on the total stage count. These shapes
+    # cover both parities on both axes: an earlier build was correct only for the even total and
+    # silently overwrote the template spectrum otherwise.
     cases = [
-        ("small template, brute force", (1024, 1536), (64, 96), 11),
-        ("medium template", (2048, 3072), (256, 384), 12),
+        ("small template, odd+even padding", (1024, 1536), (64, 96), 11),
+        ("square padding, odd total", (1024, 1024), (256, 256), 21),
+        ("both axes odd powers", (2048, 2048), (256, 256), 22),
+        ("tall padding, even+odd", (3072, 2048), (384, 256), 23),
+        ("wide padding, odd+even", (2048, 3072), (256, 384), 12),
         ("tall template", (4096, 6144), (3000, 512), 13),
     ]
     if not arguments.quick:

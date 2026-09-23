@@ -76,7 +76,7 @@ class PatternMatchFftCapabilityTests(unittest.TestCase):
         self.assertTrue(capabilities.pattern_match)
         self.assertFalse(capabilities.pattern_match_fft)
 
-    def test_probe_result_decides_whether_cufft_is_installed(self):
+    def test_probe_result_decides_whether_the_fft_response_is_present(self):
         for available, expected in ((1, True), (0, False)):
             with self.subTest(available=available):
                 capabilities = self._capabilities(

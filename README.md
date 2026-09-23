@@ -8,7 +8,7 @@ CPU-only 是完整支援的執行模式，也是結果正確性的基準。專�
 
 | 項目 | 現況 |
 |---|---|
-| 最新發行版 | [VisionFlow AOI v1.8.2](https://github.com/wjcudalearning/VisionFlow/releases/tag/v1.8.2)，Windows x64、CUDA `sm_86` |
+| 最新發行版 | [VisionFlow AOI v1.8.3](https://github.com/wjcudalearning/VisionFlow/releases/tag/v1.8.3)，Windows x64、CUDA `sm_86` |
 | 支援環境 | Windows 10／11、Python 3.13 |
 | 檢測方式 | 10 個傳統 CV Detector + 1 個 YOLOX Detector |
 | 操作入口 | CLI、PySide6 GUI、批次資料夾、資料夾監控、相機直連監控 |
@@ -374,9 +374,9 @@ CUDA DLL 建置與驗證：
 
 ### 大模板 Pattern Match（選用 cuFFT）
 
-`tile.mode: pattern_match` 的模板若大到逐點比對不敷成本，GPU 會改用 FFT 計算 response：互相關分子由 cuFFT 計算，視窗統計以 int64 summed-area table 保持精確，判定與排序沿用同一條路徑。RTX 3090、16384×13000 影像配 2000×12000 模板實測，定位由 CPU 的 16.7 s 降為 190.5 ms（87×），座標與排序和 `cv2.matchTemplate` 相同、分數差在 1e-4 內。
+`tile.mode: pattern_match` 的模板若大到逐點比對不敷成本，GPU 會改用 FFT 計算 response：互相關分子由 FFT 計算，視窗統計以 int64 summed-area table 保持精確，判定與排序沿用同一條路徑。座標與排序和 `cv2.matchTemplate` 相同、分數差在 1e-4 內。
 
-這條路徑需要 NVIDIA 的 cuFFT runtime（`cufft64_12.dll`，約 244 MB）。把它放到 `gpu\` 目錄即可被打包收錄，也可由機器上已安裝的 CUDA Toolkit 提供；兩者都沒有時，大模板會回報不支援，`auto` 以 CPU 定位、`cuda` 明確失敗，其餘功能不受影響。實際是否可用列在執行結果的 `capabilities.pattern_match_fft`。
+FFT 是 `visionflow_cuda.dll` 內建的 Stockham radix-2／4 kernel，不需要 cuFFT 或任何外部 FFT runtime，發行套件仍是單一 CUDA DLL。舊版 DLL 沒有這條路徑，此時大模板會回報不支援，`auto` 以 CPU 定位、`cuda` 明確失敗；是否具備列在執行結果的 `capabilities.pattern_match_fft`。
 
 完整的 ABI、resident image、傳輸量、CPU/GPU 等價、benchmark 口徑、已撤回方案與 RTX 指令請閱讀 [`gpu/README.md`](gpu/README.md)。
 
