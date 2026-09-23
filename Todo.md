@@ -960,6 +960,36 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 - 逐排（橫排）訊號與 `RowEventSink` 架構（2026-09-18 使用者駁回）。
 - 缺陷類型對照表的維護工具（等確認需要後另列）。
 
+## P13：2026-09-23 程式審查新增待辦
+
+本節依目前原始碼核對後新增。正確性項目優先處理；效能項目須先量測實際路徑與成本，再決定是否改動。已由既有 Todo 覆蓋、與現況不符或需要清理使用者資料的建議不在此重複登錄。
+
+### 正確性與可診斷性
+
+- [ ] **修正 401 家族 `contour_mode=ccomp` 靜默改成 external**：`detector_401.py`、`detector_401_1.py`、`detector_401_2.py` 的參數規格都列出 `ccomp`，但 `_contour_mode()` 未映射 `cv2.RETR_CCOMP`；應統一四種 mode 的映射，或明確拒絕未支援值，不得靜默換語意。補各模式與巢狀輪廓的回歸測試。
+- [ ] **縮限 `BaseDetector.run()` 的 GPU fallback 例外分類**：目前 GPU 曾啟用時會捕捉整個 preprocess/detect 區段的所有例外，可能把 detector 邏輯錯誤或設計性錯誤也當成 CUDA 故障重跑 CPU。明確辨識 backend／plan 執行失敗後才允許完整 CPU 重跑；其他錯誤保留原始 traceback。驗證 strict CUDA、auto fallback、故意注入的非 GPU 錯誤與 stage timing 不會混入兩次執行。
+- [ ] **為等值缺陷排序加上穩定次排序鍵**：401／401-1 依 area 排序、401-2 依白像素比例排序時，等值結果目前沿用 `findContours` 回傳順序。定義穩定的 bbox／座標次排序鍵，並覆蓋多個同 area／同 ratio 缺陷及重複執行的輸出順序。
+- [ ] **將 401-1 圓形 bbox 限制在影像範圍內**：目前只 clamp 左、上座標，圓形接觸右／下影像邊緣時 bbox 可越界。補四邊及 ROI offset 案例，確認 bbox 尺寸、全域座標和既有 detector 結果契約一致。
+
+### Core／Detector 每張圖成本
+
+- [ ] **跨影像重用 Recipe template 的灰階解碼**：Pattern Match／Template Anchor Grid 每張圖會重讀固定 template 並轉灰階。以 canonical path、mtime、size 做有界快取或在執行 session 內載入一次；檔案變更即失效，快取資料不可被 matcher 修改。量測 batch／monitor 的冷、暖成本。
+- [ ] **ContourTiler 在 subpixel 關閉時略過全圖灰階轉換**：目前即使不做 subpixel refinement 仍會把整張輸入轉灰階；關閉時應避免這項配置，開啟時再評估只準備 refine 需要的像素區域。以全尺寸圖量測記憶體／時間並確認 Tile metadata、座標與順序不變。
+- [ ] **避免每張影像重算 Recipe provenance**：`inspection_provenance()` 每次讀 Recipe 檔、計算 source SHA-256，並序列化有效 Recipe 計算 canonical SHA-256。讓 batch／monitor 共用同一份不可變 Recipe provenance，依 path＋mtime_ns＋size 失效；不得沿用僅針對 build commit 的既有 cache 來宣稱此項已完成。
+- [ ] **合併重複的 runtime tile 清理**：`AOIPipeline._without_runtime_images()` 與 JSON serializer 都複製 tile dict 並移除 `_tile_image`／`_debug_images`。改為共用一次已驗證的公開結果整理，避免每張圖重複配置；確認 Pipeline 回傳、JSON、debug 輸出仍各自符合公開 schema。
+- [ ] **降低 Folder Monitor 大資料夾掃描成本**：目前每輪輪詢都遞迴列舉並排序整個輸入樹，pending list membership 為線性掃描，`_seen` 也隨已處理檔案增加。先量測大量歷史檔案下的 scan time／記憶體，再以增量發現與 set-based queue membership 改善；維持穩定檢查、檔案只處理一次及既有排序語意。
+- [ ] **縮減 202-1 每像素重複運算與暫存**：CPU automatic CNR 路徑對同一 residual deviation 做兩次全圖 `abs`，再建立 candidate mask 暫存；hoist per-image／per-contour 固定參數並評估重用 deviation 或單次 threshold 寫入。以逐像素 mask 等價、PASS／NG、峰值 RAM 與大 ROI median/P95 驗收。
+- [ ] **優化 YOLOX 固定模型輸出解碼**：`decode_yolox_output()` 每個 tile 重建固定 manifest 的 grid／stride 陣列，並逐 anchor 執行 Python candidate loop。評估按 manifest/輸出尺寸快取 grid，先向量化 class/confidence prefilter；`prepare_yolox_input()` 對 resize 前後尺寸相同時略過無效 resize。保持實際 resized width/height 導出的 scale、threshold 邊界、NMS、排序與 CPU golden 結果完全一致；目前座標還原已使用實際 resize 尺寸，不將此項記為 scale bug。
+
+### GUI／CCD 與 CUDA 條件式量測
+
+- [ ] **合併相機 frame 到達時的 UI 狀態更新**：每個 frame 都觸發 camera status refresh；若相機高 frame rate 下 UI event／paint 成本可見，以 timer 合併狀態刷新並保留正確線數與最新狀態。版本資訊目前不在此 frame callback 重建，勿重複登錄該說法。
+- [ ] **讓 Sapera 診斷 Stop 真正可取消**：`SaperaDiagnoseWorker.stop_requested` 目前沒有傳入診斷步驟或被 worker 使用；加入可合作取消的檢查點，並驗證關窗不需等完整診斷逾時、原生相機資源安全釋放。
+- [ ] **關窗前排空相機 lifecycle 工作**：Sapera connect／disconnect 在 daemon thread 執行，但 `CcdController.close()` 會直接關閉 device 而未持有／等待該 thread。管理單一 lifecycle worker 的完成狀態，確保不會與 `devices.close()` 同時碰原生 driver；涵蓋成功、例外及關窗競態。
+- [ ] **量測米輪輪詢對 GUI 的阻塞**：200 ms `QTimer` 目前直接在 GUI thread 讀取 encoder、compare 與 extension status，DeviceError 亦立即斷線。以真實 driver latency／抖動量測 UI stall；若可重現阻塞，再改成有界序列化的背景讀取，並明確定義錯誤寬限與 stale 狀態，保持硬體命令不並行。
+- [ ] **量測 CUDA resident ROI 前置拷貝與 Gaussian 權重準備**：`vf_plan_execute_roi()` 目前先將 ROI D2D 複製至 scratch；plan 每次執行 Gaussian 也會重建／上傳固定 kernel weights。用 RTX event 與端到端 profile 判斷是否值得讓首個可相容 operator 直接讀 resident ROI，或按 context/plan 重用權重；須維持 pitch、ROI 邊界、plan 等價及舊 DLL fallback。
+- [ ] **盤點 one-shot CUDA primitive 的配置成本**：stateless exports 每次呼叫各自配置／釋放裝置 buffer，與 persistent native plan 的 grow-only buffer 路徑不同。先確認相容舊 DLL或其他實際執行路徑是否常走這些 exports，再量測呼叫占比；只有端到端有可重現收益才設計可重用 buffer，且須維持 ABI v1／thread safety。
+
 ## RTX 3090 編譯與實機驗收
 
 ### 環境與編譯
@@ -1100,6 +1130,8 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 - [ ] 加速不得犧牲 GUI 回應、打包啟動、結果追溯、錯誤訊息或 CPU fallback。
 
 ## 完成紀錄
+
+- [x] 2026-09-23：核對外部程式審查建議與目前原始碼，新增 P13 候選待辦：4 項 correctness/diagnostic 缺陷，以及 template/cache、monitor 掃描、YOLOX、CCD 與條件式 CUDA profile 工作；本次只新增規畫，未改執行程式。確認 `CameraMonitorProcessor` 正常停止時已關閉 `CameraFrameQueue`、YOLOX 座標還原使用實際 resize 寬高、persistent plan 已快取 INTER_AREA 表，因此不把這幾項誤列為待辦；`xx_ccd` 保持另一 repository 的行為參考。
 
 - [x] 2026-09-23：發布 VisionFlow AOI `v1.8.6`。annotated tag `v1.8.6` → `e55bd0f`（位於 `origin/main`），GitHub Release 為 Latest、非 draft／prerelease，網址 <https://github.com/wjcudalearning/VisionFlow/releases/tag/v1.8.6>；資產 `VisionFlow-AOI-v1.8.6-windows-x64.zip` 為 122,666,830 bytes、SHA-256 `14A2A3B94FA5F36225856B3758C6EDF36A36D8FF920C60A2AAB22955179F5513`（ZIP 以正斜線路徑建立，389 files、7 recipes、1 CUDA DLL）。release commit 以 CUDA 13.3／MSVC x64／`sm_86` 重建 DLL（1,491,456 bytes、SHA-256 `A26A10134FBA8AF54B5424926CE82A31698F32FE16093C4DF0CEDEFB517387B4`），RTX 3090 native smoke、完整 CUDA validator 與 10／100／1000 stress 通過。套件 provenance 為 `e55bd0f`／非 dirty；dist 與解壓 ZIP 的 packaged `--smoke-test` exit 0。完整 995 tests、compileall、preflight、CLI synthetic、GUI offscreen smoke 通過。公開下載網址取得的檔案位元組數／SHA-256 相符；`gh release download` 仍回報無資產（與 v1.8.5 相同），以 release API digest 與公開網址驗證。CCD 外部觸發智能偵測、自動重連與背景連線尚待相機機台實測。
 - [x] 2026-09-23：準備 VisionFlow AOI `v1.8.6` CUDA-enabled Windows x64 發行原始碼，GUI Pipeline 版本、根目錄 README、文件索引與 release notes 同步為 1.8.6。發行內容為 CCD 外部觸發智能偵測（米輪 Compare／自動遞增自動補正、長度進度與觸發／線脈衝／方向提示、觸發事件缺失時的自動存圖）以及套用設定自動重連、Sapera 背景連線；上述相機功能尚待相機機台實測。正式套件須針對本 release commit 以 CUDA 13.3／`sm_86` 重建並驗證 DLL；套件、smoke、tag 與 GitHub Release 結果另於發布後記錄。
