@@ -315,7 +315,8 @@ class ControllerTriggerAutomationTests(unittest.TestCase):
         self.assertIn("相機未連線", self.notices[-1][0])
 
         self._connect(TriggerSettings(TriggerMode.CONTINUOUS))
-        self.controller.apply_camera_settings(CameraConnectionSettings(), CameraRecipeSettings(trigger=TriggerSettings(TriggerMode.SOFTWARE)))
+        # A Recipe load never reconnects, so the camera keeps its continuous connection.
+        self.controller.set_recipe_camera_settings(CameraRecipeSettings(trigger=TriggerSettings(TriggerMode.SOFTWARE)), "R")
         self.controller.start_preview()
         self.assertFalse(self.controller.software_trigger_monitor_running)
         self.assertEqual(self.camera.status().state, CameraState.PREVIEWING, "hardware is still in continuous mode")

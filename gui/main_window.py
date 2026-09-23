@@ -894,8 +894,12 @@ class MainWindow(QMainWindow, LogMixin):
             self._update_monitor_ready()
 
     def _on_ccd_product_settings_applied(self, settings: CameraRecipeSettings) -> None:
-        if self.ccd_controller.pending_hardware_write():
+        if self.ccd_controller.camera_busy:
+            write_text = "正在自動重新連線寫入相機。"
+        elif self.ccd_controller.pending_hardware_write():
             write_text = "需斷線重連才會寫入相機。"
+        elif self.ccd_controller.camera_status().connected:
+            write_text = "已重新連線寫入相機。"
         else:
             write_text = "下次連線時寫入相機。"
         if self.recipe is None:

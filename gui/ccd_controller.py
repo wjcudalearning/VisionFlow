@@ -198,6 +198,8 @@ class CcdController(QObject, LogMixin):
     """
 
     camera_status_changed = Signal(object)
+    #: Non-empty while a camera connect/disconnect runs in the background (text for the screen).
+    camera_busy_changed = Signal(str)
     camera_settings_changed = Signal(object)
     product_settings_applied = Signal(object)
     meter_wheel_changed = Signal(object)
@@ -220,6 +222,7 @@ class CcdController(QObject, LogMixin):
     _software_monitor_failed = Signal(str)
     _auto_save_rejected = Signal()
     _auto_save_fallback_used = Signal()
+    _camera_lifecycle_done = Signal(object)
 
     software_trigger_poll_sec = SOFTWARE_TRIGGER_POLL_SEC
     #: Bound to the controller so tests can replace how the location dialog probes the machine.
@@ -252,6 +255,7 @@ class CcdController(QObject, LogMixin):
         self._trigger_seen_since_frame = False
         self._auto_save_fallback_noted = False
         self._auto_save_hint_shown = False
+        self._camera_busy_text = ""
         self._software_capture_lock = threading.Lock()
         self._software_capture_queued = False
         self._inspection_queue: CameraFrameQueue | None = None
@@ -280,6 +284,7 @@ class CcdController(QObject, LogMixin):
         self._software_monitor_failed.connect(self._on_software_monitor_failed, queued)
         self._auto_save_rejected.connect(self._on_auto_save_rejected, queued)
         self._auto_save_fallback_used.connect(self._on_auto_save_fallback_used, queued)
+        self._camera_lifecycle_done.connect(self._finish_camera_lifecycle, queued)
         self.devices.camera.set_frame_listener(self._on_device_frame)
         self.devices.camera.set_external_trigger_listener(self._on_external_trigger)
 
@@ -325,6 +330,7 @@ class CcdController(QObject, LogMixin):
         screen.meter_wheel_dll_requested.connect(self.request_meter_wheel_dll)
 
         self.camera_status_changed.connect(screen.set_camera_status)
+        self.camera_busy_changed.connect(screen.set_camera_busy)
         self.camera_settings_changed.connect(screen.set_camera_settings)
         self.preview_image_ready.connect(screen.set_preview_image)
         self.save_stats_changed.connect(screen.set_save_stats)
@@ -419,6 +425,8 @@ class CcdController(QObject, LogMixin):
         availability = self.devices.camera.availability()
         if not availability.available:
             return f"相機不可用：{availability.reason}"
+        if self.camera_busy:
+            return f"相機{self._camera_busy_text}請稍候。"
         hardware = self.hardware_trigger()
         if hardware is None or not self.camera_status().connected:
             return "相機未連線，請先到 CCD 控制連線相機。"
@@ -465,6 +473,7 @@ class CcdController(QObject, LogMixin):
             return
         self._product = product.normalized()
         self._product_edited_since_recipe = self._recipe_name is not None
+        self._auto_reconnect_for_new_settings()
         self.camera_settings_changed.emit(self.camera_settings_view())
         self.product_settings_applied.emit(self._product)
 
@@ -481,31 +490,138 @@ class CcdController(QObject, LogMixin):
                 f"Recipe「{self._recipe_name}」的相機設定與相機目前設定不同，需斷線重連才會寫入相機。", "info"
             )
 
-    def connect_camera(self) -> None:
-        connection, acquisition, trigger = self._hardware_settings()
-        try:
-            status = self.devices.camera.connect(connection, acquisition, trigger)
-        except DeviceError as exc:
-            self.notice.emit(f"相機連線失敗：{exc}", "error")
-        else:
-            self._applied = (connection, acquisition, trigger)
-            self._trigger_seen_since_connect = False
-            self._trigger_seen_since_frame = False
-            self._auto_save_fallback_noted = False
-            self._auto_save_hint_shown = False
-            self.notice.emit(f"相機已連線：{status.camera_name or '線掃相機'}", "success")
-            self.camera_settings_changed.emit(self.camera_settings_view())
-        self.refresh_camera_status()
+    @property
+    def camera_busy(self) -> bool:
+        return bool(self._camera_busy_text)
 
-    def disconnect_camera(self) -> None:
+    def connect_camera(self) -> None:
+        settings = self._hardware_settings()
+        self._run_camera_lifecycle(
+            "連線中…",
+            lambda: self.devices.camera.connect(*settings),
+            lambda status, error: self._finish_connect(settings, status, error, resume_preview=False),
+        )
+
+    def reconnect_camera(self) -> None:
+        """Disconnect and connect again so the current settings are written; preview resumes afterwards."""
+        if self.camera_busy:
+            self.notice.emit(f"相機{self._camera_busy_text}請稍候。", "warning")
+            return
+        resume_preview = self.camera_status().previewing or self.software_trigger_monitor_running
         self.stop_software_trigger_monitor()
         self._external_watch = None
-        self._run_camera_command(self.devices.camera.disconnect, "相機中斷連線失敗")
+        settings = self._hardware_settings()
+        camera = self.devices.camera
+
+        def job():
+            camera.disconnect()
+            return camera.connect(*settings)
+
         self._applied = None
-        self._auto_save_requests.clear()
+        self._run_camera_lifecycle(
+            "重新連線中…",
+            job,
+            lambda status, error: self._finish_connect(settings, status, error, resume_preview=resume_preview),
+        )
+
+    def _finish_connect(self, settings, status, error, resume_preview: bool) -> None:
+        if error is not None:
+            self._applied = None
+            self.notice.emit(f"相機連線失敗：{error}", "error")
+            self.camera_settings_changed.emit(self.camera_settings_view())
+            self.refresh_camera_status()
+            return
+        self._applied = settings
+        self._trigger_seen_since_connect = False
+        self._trigger_seen_since_frame = False
+        self._auto_save_fallback_noted = False
+        self._auto_save_hint_shown = False
+        self.notice.emit(f"相機已連線：{status.camera_name or '線掃相機'}", "success")
         self.camera_settings_changed.emit(self.camera_settings_view())
+        self.refresh_camera_status()
+        if resume_preview:
+            self.start_preview()
+
+    def disconnect_camera(self) -> None:
+        if self.camera_busy:
+            self.notice.emit(f"相機{self._camera_busy_text}請稍候。", "warning")
+            return
+        self.stop_software_trigger_monitor()
+        self._external_watch = None
+
+        def finish(_result, error) -> None:
+            if error is not None:
+                self.notice.emit(f"相機中斷連線失敗：{error}", "error")
+            self._applied = None
+            self._auto_save_requests.clear()
+            self.camera_settings_changed.emit(self.camera_settings_view())
+            self.refresh_camera_status()
+
+        self._run_camera_lifecycle("斷線中…", self.devices.camera.disconnect, finish)
+
+    def _auto_reconnect_for_new_settings(self) -> None:
+        # Operator applies from the CCD screen only; Recipe loads never write hardware.
+        if self.camera_busy or not self.pending_hardware_write():
+            return
+        if self._inspection_queue is not None:
+            self.notice.emit("相機直連監控執行中，新設定會在停止監控並重新連線後寫入相機。", "warning")
+            return
+        if self.camera_status().capture_in_progress:
+            self.notice.emit("相機擷取中，新設定未寫入；請等影像完成後按斷線／連線。", "warning")
+            return
+        self.notice.emit("相機設定已變更，自動重新連線寫入相機。", "info")
+        self.reconnect_camera()
+
+    def _run_camera_lifecycle(
+        self,
+        busy_text: str,
+        job: Callable[[], object],
+        finish: Callable[[object, DeviceError | None], None],
+    ) -> None:
+        """Run a camera connect/disconnect; `finish(result, error)` always runs on the GUI thread.
+
+        Backends whose lifecycle blocks (Sapera) run it on one background thread while every other
+        camera command is refused, so the window never freezes and commands never overlap.
+        """
+        if self.camera_busy:
+            self.notice.emit(f"相機{self._camera_busy_text}請稍候。", "warning")
+            return
+        if not getattr(self.devices.camera, "lifecycle_blocks", False):
+            try:
+                result, error = job(), None
+            except DeviceError as exc:
+                result, error = None, exc
+            finish(result, error)
+            return
+        self._set_camera_busy(busy_text)
+
+        def work() -> None:
+            try:
+                result, error = job(), None
+            except DeviceError as exc:
+                result, error = None, exc
+            except Exception as exc:  # noqa: BLE001 - a driver fault must still release the busy state
+                self.logger.exception("Camera lifecycle job failed")
+                result, error = None, DeviceError(f"{type(exc).__name__}: {exc}")
+            self._camera_lifecycle_done.emit((finish, result, error))
+
+        threading.Thread(target=work, name="ccd-camera-lifecycle", daemon=True).start()
+
+    def _finish_camera_lifecycle(self, payload) -> None:
+        finish, result, error = payload
+        self._set_camera_busy("")
+        if not self._closed:
+            finish(result, error)
+
+    def _set_camera_busy(self, text: str) -> None:
+        self._camera_busy_text = str(text)
+        self.camera_busy_changed.emit(self._camera_busy_text)
+        self.refresh_camera_status()
 
     def start_preview(self) -> None:
+        if self.camera_busy:
+            self.notice.emit(f"相機{self._camera_busy_text}請稍候。", "warning")
+            return
         trigger = self.hardware_trigger() or self._product.trigger
         if trigger.mode == TriggerMode.SOFTWARE:
             # Software Trigger does not grab continuously: it monitors the meter wheel and snaps one frame per crossing.
@@ -521,6 +637,9 @@ class CcdController(QObject, LogMixin):
         self._run_camera_command(self.devices.camera.stop_preview, "無法停止取像")
 
     def capture_frame(self) -> None:
+        if self.camera_busy:
+            self.notice.emit(f"相機{self._camera_busy_text}請稍候。", "warning")
+            return
         self._warn_unapplied_trigger()
         if self._run_camera_command(self.devices.camera.capture_frame, "無法擷取影像"):
             self._begin_external_watch()

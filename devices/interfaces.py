@@ -28,6 +28,10 @@ class LineScanCamera(ABC):
     called from a driver thread with a read-only full-resolution grayscale `uint8` frame.
     """
 
+    #: True when `connect()`/`disconnect()` can take seconds (runtime load, serial feature writes,
+    #: Destroy waiting for the driver); the GUI then runs them off its thread.
+    lifecycle_blocks: bool = False
+
     @abstractmethod
     def availability(self) -> DeviceAvailability: ...
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -76,6 +77,38 @@ def _type_into(stepper, value) -> None:
     """Edit a NumStepper the way an operator does: type, then finish editing."""
     stepper.edit.setText(str(value))
     stepper.edit.editingFinished.emit()
+
+
+
+class _SlowLifecycleCamera(SimulatedLineScanCamera):
+    """Simulator whose connect blocks like Sapera until the test releases it."""
+
+    lifecycle_blocks = True
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.release = threading.Event()
+        self.connect_threads: list[str] = []
+        self.fail_with: BaseException | None = None
+
+    def connect(self, connection, acquisition, trigger):
+        self.connect_threads.append(threading.current_thread().name)
+        if not self.release.wait(5):
+            raise AssertionError("connect was never released")
+        if self.fail_with is not None:
+            raise self.fail_with
+        return super().connect(connection, acquisition, trigger)
+
+
+def _wait_for(predicate, timeout: float = 5.0) -> bool:
+    app = QApplication.instance()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.005)
+    return predicate()
 
 
 class CcdGuiTests(unittest.TestCase):
@@ -245,7 +278,7 @@ class CcdGuiTests(unittest.TestCase):
         self.assertTrue(screen.one_frame_check.isEnabled())
         self.assertFalse(screen.compare_follow_check.isEnabled())
 
-    def test_camera_settings_are_written_on_connect_and_flag_reconnect(self):
+    def test_camera_settings_are_written_on_connect_and_reconnect_automatically(self):
         screen, controller = self._controller()
         screen.set_mode("admin")
         screen.connect_button.click()
@@ -256,18 +289,72 @@ class CcdGuiTests(unittest.TestCase):
 
         _type_into(screen.length_input, 4096)
         screen.server_name_edit.setText("Xtium-CL_MX4_1")
+        notices: list[str] = []
+        controller.notice.connect(lambda message, _kind: notices.append(message))
         screen.apply_camera_button.click()
-        self.assertTrue(controller.pending_hardware_write())
-        self.assertFalse(screen.pending_label.isHidden())
-        self.assertEqual(screen.status_values["settings"].text(), "待重新連線寫入")
-        self.assertIn("未載入 Recipe", screen.product_source_label.text())
-        self.assertEqual(self.store.load().connection.server_name, "Xtium-CL_MX4_1")
-
-        screen.disconnect_button.click()
-        screen.connect_button.click()
+        # Applying while connected reconnects so the new settings reach the camera at once.
         self.assertFalse(controller.pending_hardware_write())
         self.assertEqual(self.camera.status().frame_height, 4096)
         self.assertTrue(screen.pending_label.isHidden())
+        self.assertEqual(screen.status_values["settings"].text(), "已寫入相機")
+        self.assertTrue(any("自動重新連線" in message for message in notices))
+        self.assertIn("未載入 Recipe", screen.product_source_label.text())
+        self.assertEqual(self.store.load().connection.server_name, "Xtium-CL_MX4_1")
+
+        controller.start_preview()
+        _type_into(screen.length_input, 2048)
+        screen.apply_camera_button.click()
+        self.assertEqual(self.camera.status().frame_height, 2048)
+        self.assertEqual(controller.camera_status().state, CameraState.PREVIEWING, "preview resumes after reconnect")
+        controller.stop_preview()
+
+        self.camera.capture_frame()
+        _type_into(screen.length_input, 1024)
+        screen.apply_camera_button.click()
+        self.assertTrue(controller.pending_hardware_write(), "a frame in progress is never interrupted")
+        self.assertFalse(screen.pending_label.isHidden())
+        self.assertEqual(screen.status_values["settings"].text(), "待重新連線寫入")
+        self.camera.complete_capture()
+        screen.disconnect_button.click()
+        screen.connect_button.click()
+        self.assertFalse(controller.pending_hardware_write())
+        self.assertEqual(self.camera.status().frame_height, 1024)
+
+    def test_blocking_camera_connect_runs_in_the_background_and_locks_camera_controls(self):
+        self.camera = _SlowLifecycleCamera(width=32, auto_emit=False)
+        screen, controller = self._controller()
+        screen.set_mode("admin")
+        notices: list[tuple[str, str]] = []
+        controller.notice.connect(lambda message, kind: notices.append((message, kind)))
+
+        started = time.monotonic()
+        screen.connect_button.click()
+        self.assertLess(time.monotonic() - started, 1.0, "the GUI thread must not wait for the driver")
+        self.assertTrue(controller.camera_busy)
+        self.assertEqual(screen.status_values["connection"].text(), "連線中…")
+        self.assertFalse(screen.connect_button.isEnabled())
+        self.assertFalse(screen.disconnect_button.isEnabled())
+        controller.start_preview()
+        self.assertIn("請稍候", notices[-1][0])
+
+        self.camera.release.set()
+        self.assertTrue(_wait_for(lambda: not controller.camera_busy))
+        self.assertEqual(self.camera.connect_threads, ["ccd-camera-lifecycle"])
+        self.assertEqual(controller.camera_status().state, CameraState.IDLE)
+        self.assertEqual(screen.status_values["connection"].text(), "已連線")
+        self.assertTrue(screen.disconnect_button.isEnabled())
+
+        self.camera.release.clear()
+        _type_into(screen.length_input, 4096)
+        screen.apply_camera_button.click()
+        self.assertEqual(screen.status_values["connection"].text(), "重新連線中…")
+        self.camera.fail_with = RuntimeError("driver fault")
+        self.camera.release.set()
+        self.assertTrue(_wait_for(lambda: not controller.camera_busy))
+        self.assertIn("driver fault", notices[-1][0])
+        self.assertEqual(notices[-1][1], "error")
+        self.assertIsNone(controller.hardware_trigger())
+        self.assertTrue(screen.connect_button.isEnabled())
 
     def test_capture_preview_and_snapshot_use_the_full_resolution_frame(self):
         screen, controller = self._controller()

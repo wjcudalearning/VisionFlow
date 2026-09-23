@@ -120,6 +120,8 @@ class SaperaLineScanCamera(LineScanCamera):
     finished buffer into a new read-only `uint8` frame and hand it to the listener.
     """
 
+    lifecycle_blocks = True
+
     def __init__(
         self,
         runtime_loader: Callable[[], SaperaRuntime] | None = None,

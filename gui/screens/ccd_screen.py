@@ -233,6 +233,7 @@ class CcdScreen(QWidget):
         self._trigger_mode = TriggerMode.CONTINUOUS
         self._pending_hardware_write = False
         self._software_trigger_monitor_running = False
+        self._camera_busy_text = ""
         self._sapera_diagnose_running = False
         self.sapera_diagnose_lines: tuple[str, ...] = ()
         self._save_settings = SaveSettings()
@@ -320,7 +321,7 @@ class CcdScreen(QWidget):
         panel.add_widget(
             _hint(
                 "Sapera 位置保存於本機；取像參數、觸發與自動存圖屬於產品設定，套用後會同步到 Recipe 設計等待儲存。"
-                "設定於下次連線時寫入相機，已連線時需斷線重連。"
+                "設定於連線時寫入相機；已連線時按套用會自動重新連線寫入（擷取中或相機直連監控中除外）。"
             )
         )
         self.product_source_label = _hint(color=COLORS["text_2"])
@@ -720,6 +721,12 @@ class CcdScreen(QWidget):
         self._refresh_status_values()
         self._refresh_camera_controls()
 
+    def set_camera_busy(self, text: str) -> None:
+        """Connect/disconnect running in the background: show it and lock the camera controls."""
+        self._camera_busy_text = str(text)
+        self._refresh_status_values()
+        self._refresh_camera_controls()
+
     def set_camera_status(self, status: CameraStatus) -> None:
         self._status = status
         self._refresh_status_values()
@@ -955,7 +962,7 @@ class CcdScreen(QWidget):
     def _refresh_status_values(self) -> None:
         status = self._status
         values = self.status_values
-        values["connection"].setText("已連線" if status.connected else "離線")
+        values["connection"].setText(self._camera_busy_text or ("已連線" if status.connected else "離線"))
         values["camera"].setText(status.camera_name or "—")
         values["resolution"].setText(
             f"{status.frame_width} × {status.frame_height} px" if status.frame_width and status.frame_height else "—"
@@ -977,16 +984,19 @@ class CcdScreen(QWidget):
     def _refresh_camera_controls(self) -> None:
         status = self._status
         state = status.state
-        self.gate.set_enabled(self.connect_button, self._camera_available.available and not status.connected)
-        self.gate.set_enabled(self.disconnect_button, status.connected)
+        busy = bool(self._camera_busy_text)
+        self.gate.set_enabled(
+            self.connect_button, self._camera_available.available and not status.connected and not busy
+        )
+        self.gate.set_enabled(self.disconnect_button, status.connected and not busy)
         monitoring = self._software_trigger_monitor_running
         # Software Trigger replaces continuous preview with meter-wheel monitoring (same button, as in the reference).
         self.preview_button.setText("開始軟體觸發" if self._trigger_mode == TriggerMode.SOFTWARE else "開始預覽")
-        self.gate.set_enabled(self.preview_button, state == CameraState.IDLE and not monitoring)
+        self.gate.set_enabled(self.preview_button, state == CameraState.IDLE and not monitoring and not busy)
         self.gate.set_enabled(
-            self.stop_button, monitoring or state in (CameraState.PREVIEWING, CameraState.CAPTURING)
+            self.stop_button, not busy and (monitoring or state in (CameraState.PREVIEWING, CameraState.CAPTURING))
         )
-        self.gate.set_enabled(self.capture_button, state == CameraState.IDLE and not monitoring)
+        self.gate.set_enabled(self.capture_button, state == CameraState.IDLE and not monitoring and not busy)
         self.gate.set_enabled(self.snapshot_button, self.preview_view.has_image())
 
     def _refresh_meter_wheel_controls(self) -> None:
