@@ -1101,6 +1101,7 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 
 ## 完成紀錄
 
+- [x] 2026-09-23：準備 VisionFlow AOI `v1.8.6` CUDA-enabled Windows x64 發行原始碼，GUI Pipeline 版本、根目錄 README、文件索引與 release notes 同步為 1.8.6。發行內容為 CCD 外部觸發智能偵測（米輪 Compare／自動遞增自動補正、長度進度與觸發／線脈衝／方向提示、觸發事件缺失時的自動存圖）以及套用設定自動重連、Sapera 背景連線；上述相機功能尚待相機機台實測。正式套件須針對本 release commit 以 CUDA 13.3／`sm_86` 重建並驗證 DLL；套件、smoke、tag 與 GitHub Release 結果另於發布後記錄。
 - [x] 2026-09-23：CCD 相機套用設定時自動重連、連線改背景執行。`CcdController` 新增 `reconnect_camera` 與背景 lifecycle 執行（`LineScanCamera.lifecycle_blocks`，Sapera 為 True）：已連線時套用設定會自動斷線重連並恢復預覽／軟體觸發監控，擷取中或相機直連監控中只標示待重連，Recipe 載入不重連；連線／斷線期間畫面顯示「連線中…」「重新連線中…」並停用相機按鈕，其他相機指令拒絕執行，驅動例外也會解除忙碌並提示。AGENT.md 相機契約同步更新。完整 unittest、compileall、preflight、GUI offscreen smoke 通過；尚未在相機機台驗證。
 - [x] 2026-09-23：新增 CCD 外部觸發智能偵測（`devices/trigger_automation.py` `ExternalCaptureWatch`／`compare_arm_value`，`gui/ccd_controller.py`）。開始外部觸發預覽或擷取時自動補正米輪「自動遞增」0→1、把硬體 Compare 移到 Encoder 前方；觸發時寫入的已存 Compare 若落後也自動前移；依米輪讀值提示長度進度、方向相反、Compare 停止遞增（自動重設）、Sensor 未觸發、線脈衝未到板卡；擷取卡不回報觸發事件時以影像完成為準自動存圖。接線依 xx_ccd 設計推定，尚未在相機機台驗證。新增 9 項測試；完整 unittest、compileall、preflight、GUI offscreen smoke 通過。
 - [x] 2026-09-23：準備 VisionFlow AOI `v1.8.5` CUDA-enabled Windows x64 發行原始碼，GUI Pipeline 版本、根目錄 README、文件索引與 release notes 同步為 1.8.5。發行內容聚焦 RTX 3090 上大型 `RETR_EXTERNAL` CUDA contour tiling：12000×2000、200 個合成 Tile CPU median/P95 61.15/65.17 ms、GPU 20.15/24.23 ms（3.04×），Tile descriptors 相同；634/634 OpenCV contour 案例逐點相同。`auto` 仍使用 CPU，待真實 recipe 與冷啟動／長壓測驗收。正式套件須針對本 release commit 以 CUDA 13.3／`sm_86` 重建並驗證 DLL；套件、smoke、tag 與 GitHub Release 結果另於發布後記錄。
