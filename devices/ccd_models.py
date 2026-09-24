@@ -291,6 +291,80 @@ class MeterWheelSettings:
         )
 
 
+DIO_PORT_RANGE = (0, 15)
+DIO_BIT_RANGE = (0, 7)
+SENSOR_PULSE_MS_RANGE = (0.1, 100.0)
+SENSOR_MIN_INTERVAL_MS_RANGE = (0, 60_000)
+SENSOR_POLL_MS_RANGE = (0.0, 20.0)
+DEFAULT_DIO_DEVICE = "PCIe-1730,BID#0"
+
+
+@dataclass(frozen=True)
+class SensorRelaySettings:
+    """Machine-level Sensor relay through an Advantech DI/DO card (PCIe-1730).
+
+    On this machine the Sensor is wired into a DI of the I/O card and a DO of the card is wired to
+    the grabber's frame-trigger input, so nothing reaches the grabber unless a program forwards
+    the Sensor. When enabled, VisionFlow polls the DI and, depending on the trigger mode written to
+    the camera, pulses the DO (External Trigger One Frame) or starts a Software Trigger `Snap()`.
+    Off by default: the machine's original program also drives this card and must not run at the
+    same time.
+    """
+
+    enabled: bool = False
+    device: str = DEFAULT_DIO_DEVICE
+    di_port: int = 0
+    di_bit: int = 0
+    di_active_low: bool = False
+    do_port: int = 0
+    do_bit: int = 0
+    do_active_low: bool = False
+    pulse_ms: float = 1.0
+    min_interval_ms: int = 50
+    poll_interval_ms: float = 1.0
+    # Automation.BDaq4.dll location; empty means the .NET assembly search (GAC) finds it.
+    assembly_path: str = ""
+
+    def normalized(self) -> "SensorRelaySettings":
+        return SensorRelaySettings(
+            enabled=bool(self.enabled),
+            device=str(self.device).strip() or DEFAULT_DIO_DEVICE,
+            di_port=int(_clamp(int(self.di_port), DIO_PORT_RANGE)),
+            di_bit=int(_clamp(int(self.di_bit), DIO_BIT_RANGE)),
+            di_active_low=bool(self.di_active_low),
+            do_port=int(_clamp(int(self.do_port), DIO_PORT_RANGE)),
+            do_bit=int(_clamp(int(self.do_bit), DIO_BIT_RANGE)),
+            do_active_low=bool(self.do_active_low),
+            pulse_ms=float(_clamp(float(self.pulse_ms), SENSOR_PULSE_MS_RANGE)),
+            min_interval_ms=int(_clamp(int(self.min_interval_ms), SENSOR_MIN_INTERVAL_MS_RANGE)),
+            poll_interval_ms=float(_clamp(float(self.poll_interval_ms), SENSOR_POLL_MS_RANGE)),
+            assembly_path=str(self.assembly_path).strip(),
+        )
+
+    @property
+    def di_label(self) -> str:
+        return f"DI port {self.di_port} bit {self.di_bit}"
+
+    @property
+    def do_label(self) -> str:
+        return f"DO port {self.do_port} bit {self.do_bit}"
+
+
+@dataclass(frozen=True)
+class SensorRelayStats:
+    """What the Sensor relay observed since it started (thread-safe snapshot)."""
+
+    running: bool = False
+    mode: str = ""  # forward | snap
+    polls: int = 0
+    edges: int = 0
+    ignored_edges: int = 0
+    pulses: int = 0
+    di_active: bool | None = None
+    max_poll_gap_ms: float = 0.0
+    error: str = ""
+
+
 @dataclass(frozen=True)
 class CcdMachineSettings:
     """Machine-level CCD configuration persisted by `CcdMachineSettingsStore`."""
@@ -298,12 +372,14 @@ class CcdMachineSettings:
     connection: CameraConnectionSettings = field(default_factory=CameraConnectionSettings)
     meter_wheel: MeterWheelSettings = field(default_factory=MeterWheelSettings)
     save: SaveSettings = field(default_factory=SaveSettings)
+    sensor_relay: SensorRelaySettings = field(default_factory=SensorRelaySettings)
 
     def normalized(self) -> "CcdMachineSettings":
         return CcdMachineSettings(
             connection=self.connection.normalized(),
             meter_wheel=self.meter_wheel.normalized(),
             save=self.save.normalized(),
+            sensor_relay=self.sensor_relay.normalized(),
         )
 
 

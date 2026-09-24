@@ -31,6 +31,8 @@ from devices.ccd_models import (
     MeterWheelSnapshot,
     MultipleRate,
     SaveSettings,
+    SensorRelaySettings,
+    SensorRelayStats,
     TriggerMode,
     TriggerSettings,
 )
@@ -46,6 +48,7 @@ from devices.sapera_api import (
     SaperaVersions,
     translate_exception,
 )
+from devices.sensor_relay import MODE_FORWARD, MODE_LABELS, MODE_SNAP, SensorRelay, relay_mode
 from devices.trigger_automation import (
     SOFTWARE_TRIGGER_POLL_SEC,
     AutoSaveRequests,
@@ -71,6 +74,7 @@ PREVIEW_MAX_DIMENSION = 2048
 # Capture-watch findings that the external-trigger diagnosis announces instead (with ranked causes).
 DIAGNOSED_WATCH_CODES = frozenset({"no_trigger", "no_frame", "reverse"})
 METER_WHEEL_POLL_MS = 200
+SENSOR_RELAY_REFRESH_MS = 250
 DEFAULT_SNAPSHOT_DIR = Path("outputs") / "ccd_snapshots"
 # S7 waits at most 5 s for a frame, so 15 s covers a full run from a run-to-completion join.
 DIAGNOSE_SHUTDOWN_TIMEOUT_MS = 15_000
@@ -210,6 +214,9 @@ class CcdController(QObject, LogMixin):
     preview_image_ready = Signal(QImage, int, int)
     save_stats_changed = Signal(object)
     software_trigger_monitor_changed = Signal(bool)
+    #: `SensorRelayStats` whenever the PCIe-1730 Sensor relay starts, stops or counts something.
+    sensor_relay_changed = Signal(object)
+    sensor_relay_settings_changed = Signal(object)
     sapera_versions_changed = Signal(object)
     #: `TriggerDiagnosis` while an external-trigger watch runs, None when it ends.
     trigger_diagnosis_changed = Signal(object)
@@ -225,6 +232,8 @@ class CcdController(QObject, LogMixin):
     _external_trigger_arrived = Signal(object)
     _software_capture_requested = Signal(int, int)
     _software_monitor_failed = Signal(str)
+    _sensor_capture_requested = Signal()
+    _sensor_relay_failed = Signal(str)
     _auto_save_rejected = Signal()
     _auto_save_fallback_used = Signal()
     _camera_lifecycle_done = Signal(object)
@@ -254,6 +263,10 @@ class CcdController(QObject, LogMixin):
         self._closed = False
         self._auto_save_requests = AutoSaveRequests()
         self._software_monitor: SoftwareTriggerMonitor | None = None
+        # PCIe-1730 Sensor relay (DI -> DO pulse, or DI -> Software Trigger Snap) and its last stats.
+        self._sensor_relay: SensorRelay | None = None
+        self._last_relay_stats = SensorRelayStats()
+        self._sensor_skipped_busy = 0
         # External-trigger capture watch (GUI thread) and whether the grabber reported trigger events.
         self._external_watch: ExternalCaptureWatch | None = None
         self._trigger_seen_since_connect = False
@@ -261,6 +274,7 @@ class CcdController(QObject, LogMixin):
         # External-trigger diagnosis: grabber event counts when the watch began, the latest result,
         # and which problem codes were already announced for this watch.
         self._watch_event_baseline: dict[str, int] = {}
+        self._watch_relay_baseline = (0, 0)
         self._trigger_diagnosis: TriggerDiagnosis | None = None
         self._diagnosis_noticed: set[str] = set()
         self._auto_save_fallback_noted = False
@@ -292,6 +306,8 @@ class CcdController(QObject, LogMixin):
         self._external_trigger_arrived.connect(self._apply_external_trigger_meter_wheel_actions, queued)
         self._software_capture_requested.connect(self._execute_software_trigger_capture, queued)
         self._software_monitor_failed.connect(self._on_software_monitor_failed, queued)
+        self._sensor_capture_requested.connect(self._execute_sensor_capture, queued)
+        self._sensor_relay_failed.connect(self._on_sensor_relay_failed, queued)
         self._auto_save_rejected.connect(self._on_auto_save_rejected, queued)
         self._auto_save_fallback_used.connect(self._on_auto_save_fallback_used, queued)
         self._camera_lifecycle_done.connect(self._finish_camera_lifecycle, queued)
@@ -301,6 +317,9 @@ class CcdController(QObject, LogMixin):
         self._meter_wheel_timer = QTimer(self)
         self._meter_wheel_timer.setInterval(METER_WHEEL_POLL_MS)
         self._meter_wheel_timer.timeout.connect(self.poll_meter_wheel)
+        self._sensor_relay_timer = QTimer(self)
+        self._sensor_relay_timer.setInterval(SENSOR_RELAY_REFRESH_MS)
+        self._sensor_relay_timer.timeout.connect(self._publish_sensor_relay_stats)
 
     # ------------------------------------------------------------------
     # binding and state
@@ -338,6 +357,9 @@ class CcdController(QObject, LogMixin):
         screen.sapera_diagnose_requested.connect(self.start_camera_diagnose)
         screen.sapera_diagnostics_export_requested.connect(self.export_camera_diagnostics)
         screen.meter_wheel_dll_requested.connect(self.request_meter_wheel_dll)
+        screen.sensor_relay_settings_applied.connect(self.apply_sensor_relay_settings)
+        screen.sensor_input_read_requested.connect(self.read_sensor_input)
+        screen.sensor_output_pulse_requested.connect(self.pulse_sensor_output)
 
         self.camera_status_changed.connect(screen.set_camera_status)
         self.camera_busy_changed.connect(screen.set_camera_busy)
@@ -351,10 +373,14 @@ class CcdController(QObject, LogMixin):
         self.sapera_diagnose_running_changed.connect(screen.set_sapera_diagnose_running)
         self.diagnose_report_ready.connect(screen.set_sapera_diagnose_report)
         self.trigger_diagnosis_changed.connect(screen.set_trigger_diagnosis)
+        self.sensor_relay_changed.connect(screen.set_sensor_relay_stats)
+        self.sensor_relay_settings_changed.connect(screen.set_sensor_relay_settings)
 
         self._publish_availability()
         screen.set_camera_settings(self.camera_settings_view())
         screen.set_meter_wheel_settings(self._machine.meter_wheel)
+        screen.set_sensor_relay_settings(self._machine.sensor_relay)
+        screen.set_sensor_relay_stats(self._last_relay_stats)
         screen.set_camera_status(self.camera_status())
         screen.set_meter_wheel_snapshot(self._last_meter_snapshot)
         screen.set_save_stats(self._save_queue.stats())
@@ -364,6 +390,7 @@ class CcdController(QObject, LogMixin):
         screen = self._screen
         if screen is not None:
             screen.set_availability(*self.availability())
+            screen.set_sensor_relay_availability(self.devices.digital_io.availability())
 
     def refresh_availability(self) -> None:
         """Republish camera/meter-wheel availability after a DLL or location change."""
@@ -425,7 +452,10 @@ class CcdController(QObject, LogMixin):
     @property
     def software_trigger_monitor_running(self) -> bool:
         monitor = self._software_monitor
-        return monitor is not None and monitor.is_running
+        if monitor is not None and monitor.is_running:
+            return True
+        relay = self._sensor_relay
+        return relay is not None and relay.mode == MODE_SNAP and relay.is_running
 
     @property
     def pending_auto_saves(self) -> int:
@@ -520,6 +550,7 @@ class CcdController(QObject, LogMixin):
             return
         resume_preview = self.camera_status().previewing or self.software_trigger_monitor_running
         self.stop_software_trigger_monitor()
+        self._stop_sensor_relay()
         self._end_external_watch()
         settings = self._hardware_settings()
         camera = self.devices.camera
@@ -558,6 +589,7 @@ class CcdController(QObject, LogMixin):
             self.notice.emit(f"相機{self._camera_busy_text}請稍候。", "warning")
             return
         self.stop_software_trigger_monitor()
+        self._stop_sensor_relay()
         self._end_external_watch()
 
         def finish(_result, error) -> None:
@@ -640,10 +672,13 @@ class CcdController(QObject, LogMixin):
             return
         self._warn_unapplied_trigger()
         if self._run_camera_command(self.devices.camera.start_preview, "無法開始預覽"):
+            # The relay starts first so the watch's relay baseline belongs to this run.
+            self._start_forward_relay()
             self._begin_external_watch()
 
     def stop_preview(self) -> None:
         self.stop_software_trigger_monitor()
+        self._stop_sensor_relay()
         self._end_external_watch()
         self._run_camera_command(self.devices.camera.stop_preview, "無法停止取像")
 
@@ -653,6 +688,7 @@ class CcdController(QObject, LogMixin):
             return
         self._warn_unapplied_trigger()
         if self._run_camera_command(self.devices.camera.capture_frame, "無法擷取影像"):
+            self._start_forward_relay()
             self._begin_external_watch()
 
     def apply_save_settings(self, save: SaveSettings) -> None:
@@ -830,6 +866,7 @@ class CcdController(QObject, LogMixin):
         self._trigger_seen_since_frame = False
         self._external_watch = ExternalCaptureWatch(length_lines, increment, waits, encoder_value)
         self._watch_event_baseline = self.devices.camera.acquisition_event_counts()
+        self._watch_relay_baseline = self._relay_counts()
         self._diagnosis_noticed = set()
         text = "外部觸發偵測已啟動："
         if armed is not None:
@@ -865,6 +902,7 @@ class CcdController(QObject, LogMixin):
             frames=watch.frames,
             trigger_events_missing=watch.trigger_events_missing,
             trigger_input=camera.frame_trigger_input(),
+            **self._relay_evidence(),
         )
         diagnosis = diagnose_external_trigger(evidence)
         if diagnosis != self._trigger_diagnosis:
@@ -875,6 +913,28 @@ class CcdController(QObject, LogMixin):
             self.notice.emit(diagnosis.notice_text(), diagnosis.severity)
             self.logger.warning("External trigger diagnosis %s:\n%s", diagnosis.code, diagnosis.text())
         return diagnosis
+
+    def _relay_counts(self) -> tuple[int, int]:
+        relay = self._sensor_relay
+        if relay is None or relay.mode != MODE_FORWARD:
+            return (0, 0)
+        stats = relay.stats()
+        return (stats.edges, stats.pulses)
+
+    def _relay_evidence(self) -> dict:
+        relay = self._sensor_relay
+        if relay is None or relay.mode != MODE_FORWARD:
+            return {}
+        stats = relay.stats()
+        edges0, pulses0 = self._watch_relay_baseline
+        return {
+            "relay_forwarding": True,
+            "relay_edges": max(0, stats.edges - edges0),
+            "relay_pulses": max(0, stats.pulses - pulses0),
+            "relay_di_active": stats.di_active,
+            "relay_di_label": relay.settings.di_label,
+            "relay_do_label": relay.settings.do_label,
+        }
 
     def _observe_external_watch(self, snapshot: MeterWheelSnapshot) -> None:
         watch = self._external_watch
@@ -904,6 +964,8 @@ class CcdController(QObject, LogMixin):
         if self._closed or hardware is None or hardware.mode != TriggerMode.EXTERNAL:
             return
         trigger_seen, self._trigger_seen_since_frame = self._trigger_seen_since_frame, False
+        if not self.camera_status().previewing and not self.camera_status().capture_in_progress:
+            self._stop_sensor_relay()  # A single capture no longer needs the Sensor.
         if not self._product.auto_save_external_one_frame and not self._auto_save_hint_shown:
             self._auto_save_hint_shown = True
             self.status_message.emit("已收到外部觸發影像；未勾選「外部觸發單張完成後自動存圖」，所以不會自動存圖。")
@@ -923,6 +985,7 @@ class CcdController(QObject, LogMixin):
         watch.on_frame(encoder_value, trigger_seen)
         # A new wait phase: ignored triggers are judged, and problems announced, for this phase only.
         self._watch_event_baseline = self.devices.camera.acquisition_event_counts()
+        self._watch_relay_baseline = self._relay_counts()
         self._diagnosis_noticed = set()
         self._update_trigger_diagnosis(encoder_value)
         waiting = watch.waits_for_trigger and not watch.trigger_events_missing
@@ -966,6 +1029,18 @@ class CcdController(QObject, LogMixin):
             self.notice.emit(f"軟體觸發監控未啟動：{reason}", "warning")
             self.refresh_camera_status()
             return False
+        if relay_mode(self._machine.sensor_relay, hardware) == MODE_SNAP:
+            # The Sensor (through the PCIe-1730 DI) starts each frame instead of the meter-wheel compare.
+            if self._machine.meter_wheel.compare_increment <= 0:
+                self.apply_compare_increment(1)
+                self.notice.emit("米輪「自動遞增」為 0，只會出一個脈衝；已自動設為 1（每格一行）。", "warning")
+            with self._software_capture_lock:
+                self._software_capture_queued = False
+            if not self._start_sensor_relay(MODE_SNAP):
+                return False
+            self.software_trigger_monitor_changed.emit(True)
+            self.refresh_camera_status()
+            return True
         monitor = SoftwareTriggerMonitor(
             self.devices.meter_wheel,
             self._machine.meter_wheel.compare_value,
@@ -983,6 +1058,13 @@ class CcdController(QObject, LogMixin):
         return True
 
     def stop_software_trigger_monitor(self) -> None:
+        relay = self._sensor_relay
+        if relay is not None and relay.mode == MODE_SNAP:
+            self._stop_sensor_relay()
+            with self._software_capture_lock:
+                self._software_capture_queued = False
+            self.software_trigger_monitor_changed.emit(False)
+            self.status_message.emit("Sensor 軟體觸發已停止；擷取中的影像會繼續收完。")
         monitor, self._software_monitor = self._software_monitor, None
         if monitor is None:
             return
@@ -1023,6 +1105,198 @@ class CcdController(QObject, LogMixin):
         self.notice.emit(f"軟體觸發監控失敗，已停止：{message}", "error")
 
     # ------------------------------------------------------------------
+    # Sensor relay (PCIe-1730 DI -> DO pulse or Software Trigger Snap)
+    # ------------------------------------------------------------------
+    @property
+    def sensor_relay_running(self) -> bool:
+        relay = self._sensor_relay
+        return relay is not None and relay.is_running
+
+    @property
+    def sensor_relay_stats(self) -> SensorRelayStats:
+        relay = self._sensor_relay
+        return relay.stats() if relay is not None else self._last_relay_stats
+
+    def apply_sensor_relay_settings(self, settings: SensorRelaySettings) -> bool:
+        if self._sensor_relay is not None:
+            self.notice.emit("Sensor 中繼執行中，請先停止預覽／擷取再修改設定。", "warning")
+            return False
+        settings = settings.normalized()
+        previous = self._machine.sensor_relay
+        if not self._save_machine(replace(self._machine, sensor_relay=settings)):
+            return False
+        self.sensor_relay_settings_changed.emit(self._machine.sensor_relay)
+        if settings.assembly_path != previous.assembly_path:
+            self._publish_availability()
+        text = "Sensor 中繼設定已保存。"
+        if settings.enabled:
+            text += "外部觸發單張會由程式把 Sensor 轉成 DO 脈衝，軟體觸發改由 Sensor 起拍；請確認原機台程式已關閉。"
+        self.notice.emit(text, "success")
+        return True
+
+    def _start_forward_relay(self) -> None:
+        if relay_mode(self._machine.sensor_relay, self.hardware_trigger()) == MODE_FORWARD:
+            self._start_sensor_relay(MODE_FORWARD)
+
+    def _start_sensor_relay(self, mode: str) -> bool:
+        if self._closed:
+            return False
+        relay = self._sensor_relay
+        if relay is not None and relay.mode == mode and relay.is_running:
+            return True
+        self._stop_sensor_relay()
+        settings = self._machine.sensor_relay
+        relay = SensorRelay(
+            self.devices.digital_io,
+            settings,
+            mode,
+            on_edge=self._request_sensor_capture if mode == MODE_SNAP else (lambda: None),
+            on_error=lambda error: self._sensor_relay_failed.emit(str(error)),
+        )
+        try:
+            relay.start()
+        except DeviceError as exc:
+            self.notice.emit(f"Sensor 中繼無法啟動（{MODE_LABELS[mode]}）：{exc}", "error")
+            self.logger.warning("Sensor relay start failed: %s", exc)
+            return False
+        self._sensor_relay = relay
+        self._sensor_skipped_busy = 0
+        self._sensor_relay_timer.start()
+        self._publish_sensor_relay_stats()
+        if mode == MODE_FORWARD:
+            text = (
+                f"Sensor 中繼已啟動：{settings.di_label} 變為有效時，由 {settings.do_label} "
+                f"送 {settings.pulse_ms:g} ms 脈衝給擷取卡。"
+            )
+        else:
+            text = f"Sensor 軟體觸發已啟動：{settings.di_label} 變為有效時開始擷取一張。"
+        self.status_message.emit(text)
+        return True
+
+    def _stop_sensor_relay(self) -> None:
+        relay, self._sensor_relay = self._sensor_relay, None
+        if relay is None:
+            return
+        relay.stop()
+        self._sensor_relay_timer.stop()
+        self._last_relay_stats = relay.stats()
+        self.sensor_relay_changed.emit(self._last_relay_stats)
+        # Release the card between runs so it is never held while VisionFlow is idle.
+        self.devices.digital_io.disconnect()
+
+    def _publish_sensor_relay_stats(self) -> None:
+        relay = self._sensor_relay
+        if relay is None:
+            self._sensor_relay_timer.stop()
+            return
+        stats = relay.stats()
+        if stats != self._last_relay_stats:
+            self._last_relay_stats = stats
+            self.sensor_relay_changed.emit(stats)
+
+    def _on_sensor_relay_failed(self, message: str) -> None:
+        relay = self._sensor_relay
+        if relay is not None and relay.mode == MODE_SNAP:
+            self.stop_software_trigger_monitor()
+        else:
+            self._stop_sensor_relay()
+        self.notice.emit(f"Sensor 中繼失敗，已停止：{message}", "error")
+
+    def _request_sensor_capture(self) -> None:
+        # Relay thread: drop edges while one is still waiting for the GUI thread.
+        with self._software_capture_lock:
+            if self._software_capture_queued:
+                return
+            self._software_capture_queued = True
+        self._sensor_capture_requested.emit()
+
+    def _execute_sensor_capture(self) -> None:
+        try:
+            hardware = self.hardware_trigger()
+            relay = self._sensor_relay
+            if (
+                self._closed
+                or relay is None
+                or relay.mode != MODE_SNAP
+                or hardware is None
+                or hardware.mode != TriggerMode.SOFTWARE
+            ):
+                return
+            if self.camera_status().capture_in_progress:
+                self._sensor_skipped_busy += 1
+                self.status_message.emit(
+                    f"Sensor 觸發時上一張仍在擷取，這次略過（累計 {self._sensor_skipped_busy} 次）。"
+                )
+                return
+            self._arm_compare_for_sensor_capture()
+            try:
+                self.devices.camera.capture_frame()
+            except DeviceError as exc:
+                self.status_message.emit(f"Sensor 觸發無法開始擷取：{exc}")
+            else:
+                self.status_message.emit("Sensor 觸發：開始擷取一張。")
+        finally:
+            with self._software_capture_lock:
+                self._software_capture_queued = False
+            self.refresh_camera_status()
+
+    def _arm_compare_for_sensor_capture(self) -> None:
+        """Keep the compare ahead of the encoder so CMP_OUT supplies the frame's line pulses."""
+        meter_wheel = self.devices.meter_wheel
+        if not meter_wheel.is_connected:
+            self.status_message.emit("米輪未連線：影像收不到線觸發脈衝，不會完成。")
+            return
+        try:
+            encoder_value = meter_wheel.read_encoder()
+            armed = compare_arm_value(
+                encoder_value, meter_wheel.read_compare(), self._machine.meter_wheel.compare_increment
+            )
+            if armed is not None:
+                meter_wheel.set_compare(armed)
+        except DeviceError as exc:
+            self.notice.emit(f"Sensor 觸發前無法讀寫米輪：{exc}", "error")
+
+    def _with_sensor_card(self, action: Callable[[SensorRelay], object], failure_prefix: str):
+        """Run a manual I/O test on the GUI thread; the card is released afterwards."""
+        if self._sensor_relay is not None:
+            self.notice.emit("Sensor 中繼執行中，I/O 測試請先停止預覽／擷取；即時 DI 狀態見 Sensor 中繼面板。", "warning")
+            return None
+        probe = SensorRelay(self.devices.digital_io, self._machine.sensor_relay, MODE_FORWARD)
+        try:
+            self.devices.digital_io.connect(probe.settings)
+            return action(probe)
+        except DeviceError as exc:
+            self.notice.emit(f"{failure_prefix}：{exc}", "error")
+            return None
+        finally:
+            self.devices.digital_io.disconnect()
+
+    def read_sensor_input(self) -> bool | None:
+        """Read the Sensor DI once; returns whether it is active, or None on failure."""
+        settings = self._machine.sensor_relay
+        result = self._with_sensor_card(lambda probe: probe.read_input(), "讀取 Sensor DI 失敗")
+        if result is None:
+            return None
+        active, raw = result
+        state = "有效（Sensor 動作中）" if active else "無效（Sensor 未動作）"
+        self.notice.emit(
+            f"{settings.di_label} 目前{state}，原始電位 {1 if raw else 0}。遮擋 Sensor 再讀一次，狀態應改變。", "info"
+        )
+        return active
+
+    def pulse_sensor_output(self) -> bool:
+        """Send one test pulse on the grabber DO, as the relay would for a Sensor edge."""
+        settings = self._machine.sensor_relay
+        if self._with_sensor_card(lambda probe: probe.pulse_once() or True, "DO 測試脈衝失敗") is None:
+            return False
+        self.notice.emit(
+            f"已由 {settings.do_label} 送出 {settings.pulse_ms:g} ms 測試脈衝。若相機正以外部觸發單張等待，"
+            "應開始取像，外部觸發診斷的「Sensor 觸發」次數也會增加；沒有反應請查 DO 到擷取卡的接線與 CCF 觸發輸入。",
+            "info",
+        )
+        return True
+
+    # ------------------------------------------------------------------
     # meter wheel
     # ------------------------------------------------------------------
     def connect_meter_wheel(self, card_id: int | None = None, quiet: bool = False) -> bool:
@@ -1054,6 +1328,7 @@ class CcdController(QObject, LogMixin):
 
     def disconnect_meter_wheel(self) -> None:
         self.stop_software_trigger_monitor()
+        self._stop_sensor_relay()
         self._end_external_watch()
         self._meter_wheel_timer.stop()
         self.devices.meter_wheel.disconnect()
@@ -1539,6 +1814,7 @@ class CcdController(QObject, LogMixin):
         self._closed = True
         self.detach_inspection_queue()
         self.stop_software_trigger_monitor()
+        self._stop_sensor_relay()
         self._end_external_watch()
         self._stop_diagnose()
         self._meter_wheel_timer.stop()

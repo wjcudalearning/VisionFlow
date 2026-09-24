@@ -43,7 +43,7 @@ The normal development machine may not have `nvcc`, CMake, or an NVIDIA GPU. Nev
 - `core/`: pipeline, recipe loading/building, tiling, aggregation, reporting, profiling, batch/monitor processing, result schemas/compaction, GPU sessions/bridge, preprocessing plans and executors.
 - `detectors/`: detector-specific feature extraction, geometry, filtering, and result metadata.
 - `gpu/`: CUDA C ABI, kernels, persistent contexts, build scripts, native smoke tests, and CPU/GPU validation.
-- `devices/`: optional acquisition hardware (CCD line-scan camera, LSI-8181 meter wheel): backend-neutral interfaces, typed settings, simulators, vendor bindings, machine-level settings store, and frame writing. No Qt imports.
+- `devices/`: optional acquisition hardware (CCD line-scan camera, LSI-8181 meter wheel, PCIe-1730 Sensor relay I/O): backend-neutral interfaces, typed settings, simulators, vendor bindings, machine-level settings store, and frame writing. No Qt imports.
 - `gui/`: PySide6 screens, widgets, workers, status, and preview behavior; `gui/ccd_controller.py` owns the long-lived CCD sessions.
 - `recipes/`: YAML configuration and production defaults.
 - `tests/`: automated correctness, fallback, routing, and regression tests.
@@ -103,7 +103,7 @@ Put behavior in the narrowest appropriate module. Do not duplicate pipeline or f
 
 ## CCD camera and meter wheel contract
 
-- Camera and meter wheel support is an optional capability like the CUDA DLL. Missing Sapera LT, pythonnet, `LSI8181_64.dll`, drivers, or hardware must never block GUI, CLI, batch, or monitor startup; the CCD screen shows the reason.
+- Camera and meter wheel support is an optional capability like the CUDA DLL. Missing Sapera LT, pythonnet, `LSI8181_64.dll`, DAQNavi (`Automation.BDaq4.dll`), drivers, or hardware must never block GUI, CLI, batch, or monitor startup; the CCD screen shows the reason.
 - `xx_ccd/` (the C# `CameraCaptureApp`) is an untracked behavior reference only. Port its confirmed behavior into `devices/`; never import, embed, or launch it at runtime.
 - Camera settings are written to hardware only on connect. An operator apply from the CCD screen while connected reconnects automatically and resumes preview; while a frame is capturing or camera monitoring runs it only marks a pending reconnect, and Recipe loads never reconnect. Keep only the hardware write paths confirmed in `xx_ccd/PROJECT_HANDOFF.md` and do not reintroduce feature probing.
 - `MainWindow` owns one `CcdController`; screens never own or disconnect devices. A backend whose connect/disconnect blocks (`lifecycle_blocks`, e.g. Sapera) runs them on one background lifecycle thread started by the GUI thread; every other camera command is refused until it finishes. Driver callbacks only hand off frames; preview conversion, saving, and status refresh run elsewhere, and older preview frames may be dropped.
@@ -112,7 +112,8 @@ Put behavior in the narrowest appropriate module. Do not duplicate pipeline or f
 - CCD controls are fail-closed through `AccessGate`: only controls explicitly registered for engineers are available in Engineer mode, OP cannot open the screen, and programmatic loads never write hardware or settings.
 - Trigger automation (external-trigger meter-wheel writes, the software-trigger monitor, auto-save) follows the trigger settings actually written to the camera at connect, never unapplied edits. Driver and monitor threads only hand work to the GUI thread, which owns camera and meter-wheel commands; Stop ends monitoring but never aborts a frame that is still capturing.
 - Camera-direct monitoring inspects only frames from trigger-mode connections, hands them off through the bounded `CameraFrameQueue`, and reports every frame that could not be queued as an ERROR item. `AOIPipeline.run_frame` must stay pixel-identical to inspecting the same frame saved as an 8-bit BMP, keep the file-path entry point and its result schema unchanged, and in GPU mode treat the frame as a decoded image uploaded once.
-- Do not mark CCD or meter wheel items hardware-validated until they run on the camera machine.
+- On the camera machine the Sensor reaches the grabber only through a PCIe-1730 DI -> program -> DO path. The optional Sensor relay (`devices/sensor_relay.py`) is machine-level, off by default, and must never run alongside the machine's original I/O program. It follows the trigger written at connect: External Trigger One Frame pulses the DO from the relay thread itself; Software Trigger hands each DI edge to the GUI thread for one `Snap()`. The relay owns the card only while it runs and releases it when it stops.
+- Do not mark CCD, meter wheel, or Sensor relay items hardware-validated until they run on the camera machine.
 
 ## Detector parameter access contract
 

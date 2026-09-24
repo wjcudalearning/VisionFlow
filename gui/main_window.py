@@ -270,7 +270,8 @@ class MainWindow(QMainWindow, LogMixin):
         self.ccd_controller = CcdController(
             ccd_devices
             or create_ccd_devices(
-                meter_wheel_dll_path=lambda: machine_settings_store.load().meter_wheel.dll_path
+                meter_wheel_dll_path=lambda: machine_settings_store.load().meter_wheel.dll_path,
+                dio_assembly_path=lambda: machine_settings_store.load().sensor_relay.assembly_path,
             ),
             machine_settings_store,
             parent=self,

@@ -14,6 +14,7 @@ from devices.ccd_models import (
     FrameTriggerInput,
     MeterWheelSettings,
     MultipleRate,
+    SensorRelaySettings,
     TriggerSettings,
 )
 
@@ -80,6 +81,35 @@ class LineScanCamera(ABC):
     def acquisition_event_counts(self) -> dict[str, int]:
         """Grabber events counted since connect, keyed by `ACQUISITION_EVENT_*` names."""
         return {}
+
+
+class DigitalIo(ABC):
+    """Backend-neutral digital I/O card (Advantech PCIe-1730) used to relay the Sensor.
+
+    Implementations serialize their own calls; the Sensor relay thread owns the card while it runs.
+    """
+
+    @abstractmethod
+    def availability(self) -> DeviceAvailability: ...
+
+    @property
+    @abstractmethod
+    def is_connected(self) -> bool: ...
+
+    @abstractmethod
+    def connect(self, settings: SensorRelaySettings) -> None: ...
+
+    @abstractmethod
+    def disconnect(self) -> None: ...
+
+    @abstractmethod
+    def read_bit(self, port: int, bit: int) -> bool: ...
+
+    @abstractmethod
+    def write_bit(self, port: int, bit: int, value: bool) -> None: ...
+
+    @abstractmethod
+    def close(self) -> None: ...
 
 
 class MeterWheel(ABC):

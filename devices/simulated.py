@@ -19,9 +19,10 @@ from devices.ccd_models import (
     FrameTriggerInput,
     MeterWheelSettings,
     MultipleRate,
+    SensorRelaySettings,
     TriggerSettings,
 )
-from devices.interfaces import FrameListener, LineScanCamera, MeterWheel, TriggerListener
+from devices.interfaces import DigitalIo, FrameListener, LineScanCamera, MeterWheel, TriggerListener
 
 
 class SimulatedLineScanCamera(LineScanCamera):
@@ -346,3 +347,61 @@ class SimulatedMeterWheel(MeterWheel):
     def _require_connected(self) -> None:
         if not self._connected:
             raise DeviceError("米輪未連線。")
+
+
+class SimulatedDigitalIo(DigitalIo):
+    """Hardware-free PCIe-1730 stand-in: tests set DI bits and read the DO write history."""
+
+    def __init__(self, available: bool = True, reason: str = ""):
+        self._available = bool(available)
+        self._reason = reason or "模擬 I/O 卡不可用"
+        self._lock = threading.Lock()
+        self._connected = False
+        self.device = ""
+        self.inputs: dict[tuple[int, int], bool] = {}
+        self.outputs: dict[tuple[int, int], bool] = {}
+        self.writes: list[tuple[int, int, bool]] = []
+        self.connect_count = 0
+        self.fail_reads = False
+
+    def availability(self) -> DeviceAvailability:
+        return DeviceAvailability(self._available, "" if self._available else self._reason)
+
+    @property
+    def is_connected(self) -> bool:
+        with self._lock:
+            return self._connected
+
+    def connect(self, settings: SensorRelaySettings) -> None:
+        if not self._available:
+            raise DeviceError(self._reason)
+        with self._lock:
+            self._connected = True
+            self.device = settings.normalized().device
+            self.connect_count += 1
+
+    def disconnect(self) -> None:
+        with self._lock:
+            self._connected = False
+
+    def set_input(self, port: int, bit: int, value: bool) -> None:
+        with self._lock:
+            self.inputs[(int(port), int(bit))] = bool(value)
+
+    def read_bit(self, port: int, bit: int) -> bool:
+        with self._lock:
+            if not self._connected:
+                raise DeviceError("I/O 卡未連線。")
+            if self.fail_reads:
+                raise DeviceError("模擬 DI 讀取失敗")
+            return self.inputs.get((int(port), int(bit)), False)
+
+    def write_bit(self, port: int, bit: int, value: bool) -> None:
+        with self._lock:
+            if not self._connected:
+                raise DeviceError("I/O 卡未連線。")
+            self.outputs[(int(port), int(bit))] = bool(value)
+            self.writes.append((int(port), int(bit), bool(value)))
+
+    def close(self) -> None:
+        self.disconnect()

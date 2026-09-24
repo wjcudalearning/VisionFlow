@@ -13,6 +13,7 @@ from devices.ccd_models import (
     MeterWheelSettings,
     MultipleRate,
     SaveSettings,
+    SensorRelaySettings,
 )
 
 SCHEMA = "visionflow-ccd-machine/v1"
@@ -58,6 +59,7 @@ def settings_to_dict(settings: CcdMachineSettings) -> dict:
         "connection": asdict(settings.connection),
         "meter_wheel": meter_wheel,
         "save": save,
+        "sensor_relay": asdict(settings.sensor_relay),
     }
 
 
@@ -93,7 +95,11 @@ def settings_from_dict(payload: dict) -> CcdMachineSettings:
         save_values["image_format"] = ImageSaveFormat(save_section["image_format"])
     save = SaveSettings(**save_values)
 
-    return CcdMachineSettings(connection, meter_wheel, save).normalized()
+    sensor_relay = SensorRelaySettings(
+        **_typed_fields(payload.get("sensor_relay"), SensorRelaySettings(), "sensor_relay")
+    )
+
+    return CcdMachineSettings(connection, meter_wheel, save, sensor_relay).normalized()
 
 
 class CcdMachineSettingsStore:

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
+from devices.advantech_dio import AdvantechDigitalIo
 from devices.ccd_models import (
     AcquisitionSettings,
     CameraConnectionSettings,
@@ -15,9 +16,10 @@ from devices.ccd_models import (
     ExtensionCompareChannel,
     MeterWheelSettings,
     MultipleRate,
+    SensorRelaySettings,
     TriggerSettings,
 )
-from devices.interfaces import FrameListener, LineScanCamera, MeterWheel, TriggerListener
+from devices.interfaces import DigitalIo, FrameListener, LineScanCamera, MeterWheel, TriggerListener
 from devices.lsi8181 import Lsi8181Library, Lsi8181MeterWheel
 from devices.sapera_api import (
     ASSEMBLY_FILE_NAME,
@@ -28,7 +30,7 @@ from devices.sapera_api import (
     locate_assembly,
 )
 from devices.sapera_camera import SaperaLineScanCamera
-from devices.simulated import SimulatedLineScanCamera, SimulatedMeterWheel
+from devices.simulated import SimulatedDigitalIo, SimulatedLineScanCamera, SimulatedMeterWheel
 
 SIMULATOR_ENV = "VISIONFLOW_CCD_SIMULATOR"
 
@@ -147,16 +149,48 @@ class UnavailableMeterWheel(MeterWheel):
         return None
 
 
+class UnavailableDigitalIo(DigitalIo):
+    def __init__(self, reason: str = "此機台未設定 I/O 卡。"):
+        self._reason = reason
+
+    def availability(self) -> DeviceAvailability:
+        return DeviceAvailability(False, self._reason)
+
+    @property
+    def is_connected(self) -> bool:
+        return False
+
+    def connect(self, settings: SensorRelaySettings) -> None:
+        raise DeviceError(self._reason)
+
+    def disconnect(self) -> None:
+        return None
+
+    def read_bit(self, port: int, bit: int) -> bool:
+        raise DeviceError(self._reason)
+
+    def write_bit(self, port: int, bit: int, value: bool) -> None:
+        raise DeviceError(self._reason)
+
+    def close(self) -> None:
+        return None
+
+
 @dataclass(frozen=True)
 class CcdDevices:
     camera: LineScanCamera
     meter_wheel: MeterWheel
+    # Optional PCIe-1730 that relays the Sensor to the grabber (see devices/sensor_relay.py).
+    digital_io: DigitalIo = field(default_factory=UnavailableDigitalIo)
 
     def close(self) -> None:
         try:
             self.camera.close()
         finally:
-            self.meter_wheel.close()
+            try:
+                self.meter_wheel.close()
+            finally:
+                self.digital_io.close()
 
 
 def create_line_scan_camera(environ: Mapping[str, str] | None = None) -> LineScanCamera:
@@ -176,10 +210,11 @@ def create_ccd_devices(
     environ: Mapping[str, str] | None = None,
     *,
     meter_wheel_dll_path: str | Callable[[], str] | None = None,
+    dio_assembly_path: str | Callable[[], str] | None = None,
 ) -> CcdDevices:
     env = os.environ if environ is None else environ
     if str(env.get(SIMULATOR_ENV, "")).strip().lower() in {"1", "true", "yes", "on"}:
-        return CcdDevices(SimulatedLineScanCamera(), SimulatedMeterWheel(auto_advance_per_read=25))
+        return CcdDevices(SimulatedLineScanCamera(), SimulatedMeterWheel(auto_advance_per_read=25), SimulatedDigitalIo())
     # The LSI-8181 DLL is loaded lazily; a missing driver only makes the meter wheel unavailable.
     # `meter_wheel_dll_path` may be a callable so the machine settings store stays the single source
     # of truth: the path is read when the DLL is actually loaded, not when the application starts.
@@ -188,6 +223,7 @@ def create_ccd_devices(
         Lsi8181MeterWheel(
             loader=lambda: Lsi8181Library.load(dll_path=_stored_dll_path(meter_wheel_dll_path), environ=env)
         ),
+        AdvantechDigitalIo(lambda: _stored_dll_path(dio_assembly_path) or "", environ=env),
     )
 
 

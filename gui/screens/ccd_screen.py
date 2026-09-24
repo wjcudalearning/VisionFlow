@@ -24,6 +24,8 @@ from devices.ccd_models import (
     CAMERA_STATE_LABELS,
     CARD_ID_RANGE,
     COUNTER_RANGE,
+    DIO_BIT_RANGE,
+    DIO_PORT_RANGE,
     EXPOSURE_RANGE,
     EXTENSION_CHANNEL_COUNT,
     GAIN_RANGE,
@@ -32,6 +34,9 @@ from devices.ccd_models import (
     LENGTH_LINES_RANGE,
     LINE_RATE_HZ_RANGE,
     MULTIPLE_RATE_LABELS,
+    SENSOR_MIN_INTERVAL_MS_RANGE,
+    SENSOR_POLL_MS_RANGE,
+    SENSOR_PULSE_MS_RANGE,
     TRIGGER_MODE_LABELS,
     UINT16_RANGE,
     AcquisitionSettings,
@@ -46,10 +51,13 @@ from devices.ccd_models import (
     MeterWheelSnapshot,
     MultipleRate,
     SaveSettings,
+    SensorRelaySettings,
+    SensorRelayStats,
     TriggerMode,
     TriggerSettings,
 )
 from devices.frame_writer import SaveQueueStats
+from devices.sensor_relay import MODE_LABELS as SENSOR_RELAY_MODE_LABELS
 from devices.trigger_diagnosis import SEVERITY_LABELS as TRIGGER_DIAGNOSIS_SEVERITY_LABELS
 from gui import icons
 from gui.theme import COLORS
@@ -222,6 +230,9 @@ class CcdScreen(QWidget):
     sapera_diagnose_requested = Signal()
     sapera_diagnostics_export_requested = Signal()
     meter_wheel_dll_requested = Signal()
+    sensor_relay_settings_applied = Signal(object)
+    sensor_input_read_requested = Signal()
+    sensor_output_pulse_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -264,6 +275,7 @@ class CcdScreen(QWidget):
         controls_layout.addWidget(self._build_sapera_diagnostics_panel())
         controls_layout.addWidget(self._build_save_panel())
         controls_layout.addWidget(self._build_meter_wheel_panel())
+        controls_layout.addWidget(self._build_sensor_relay_panel())
         self.extension_panel = self._build_extension_panel()
         controls_layout.addWidget(self.extension_panel)
         controls_layout.addStretch(1)
@@ -583,6 +595,122 @@ class CcdScreen(QWidget):
         self.multiple_rate_combo.currentIndexChanged.connect(self._on_multiple_rate_changed)
         self.reverse_direction_check.toggled.connect(self._on_reverse_direction_changed)
         return panel
+
+    def _build_sensor_relay_panel(self) -> Panel:
+        """PCIe-1730 relay: the Sensor reaches the grabber only through this card's DI -> DO."""
+
+        panel = Panel(title="Sensor 中繼（PCIe-1730）")
+        self.sensor_relay_availability_label = _hint(color=COLORS["warn"])
+        self.sensor_relay_availability_label.setVisible(False)
+        panel.add_widget(self.sensor_relay_availability_label)
+        panel.add_widget(
+            _hint(
+                "Sensor 接在 I/O 卡的 DI、I/O 卡的 DO 接到擷取卡時使用。啟用後：外部觸發單張由程式把 DI 變有效轉成 DO 脈衝；"
+                "軟體觸發改由 Sensor 起拍一張。原機台程式也會控制這張卡，兩者不可同時開啟。設定屬於本機，不存進 Recipe。"
+            )
+        )
+        self.sensor_relay_enabled_check = self.gate.register(QCheckBox("啟用 Sensor 中繼"))
+        panel.add_widget(self.sensor_relay_enabled_check)
+        form = _form()
+        self.sensor_device_edit = self.gate.register(QLineEdit())
+        self.sensor_device_edit.setProperty("mono", "true")
+        self.sensor_device_edit.setToolTip("研華 Navigator 顯示的裝置名稱，例如 PCIe-1730,BID#0。")
+        form.addRow("I/O 卡裝置", self.sensor_device_edit)
+        self.sensor_di_port_input = self.gate.register(_fixed_width(NumStepper(0, *DIO_PORT_RANGE), 90))
+        self.sensor_di_bit_input = self.gate.register(_fixed_width(NumStepper(0, *DIO_BIT_RANGE), 90))
+        self.sensor_di_low_check = self.gate.register(QCheckBox("低電位有效"))
+        form.addRow(
+            "Sensor DI",
+            _row(QLabel("port"), self.sensor_di_port_input, QLabel("bit"), self.sensor_di_bit_input, self.sensor_di_low_check),
+        )
+        self.sensor_do_port_input = self.gate.register(_fixed_width(NumStepper(0, *DIO_PORT_RANGE), 90))
+        self.sensor_do_bit_input = self.gate.register(_fixed_width(NumStepper(0, *DIO_BIT_RANGE), 90))
+        self.sensor_do_low_check = self.gate.register(QCheckBox("低電位有效"))
+        form.addRow(
+            "擷取卡 DO",
+            _row(QLabel("port"), self.sensor_do_port_input, QLabel("bit"), self.sensor_do_bit_input, self.sensor_do_low_check),
+        )
+        self.sensor_pulse_input = self.gate.register(NumStepper(1.0, *SENSOR_PULSE_MS_RANGE, step=0.5, decimals=1))
+        form.addRow("DO 脈寬（ms）", self.sensor_pulse_input)
+        self.sensor_interval_input = self.gate.register(NumStepper(50, *SENSOR_MIN_INTERVAL_MS_RANGE, step=10))
+        self.sensor_interval_input.setToolTip("兩次 Sensor 觸發的最短間隔；間隔內的跳動視為抖動並略過。")
+        form.addRow("最短觸發間隔（ms）", self.sensor_interval_input)
+        self.sensor_poll_input = self.gate.register(NumStepper(1.0, *SENSOR_POLL_MS_RANGE, step=0.5, decimals=1))
+        self.sensor_poll_input.setToolTip("讀取 DI 的間隔，決定程式轉送的延遲上限；0 表示不休息連續讀取（佔用一個 CPU 核心）。")
+        form.addRow("DI 讀取間隔（ms）", self.sensor_poll_input)
+        self.sensor_assembly_edit = self.gate.register(QLineEdit())
+        self.sensor_assembly_edit.setProperty("mono", "true")
+        self.sensor_assembly_edit.setPlaceholderText("預設：DAQNavi 安裝位置（Automation.BDaq4.dll）")
+        form.addRow("DAQNavi DLL", self.sensor_assembly_edit)
+        panel.add_layout(form)
+
+        self.sensor_apply_button = self.gate.register(_button("套用 Sensor 中繼設定", "primary", "check"))
+        self.sensor_read_button = self.gate.register(_button("讀取 DI"))
+        self.sensor_pulse_button = self.gate.register(_button("送出 DO 測試脈衝"))
+        self.sensor_apply_button.clicked.connect(lambda: self.sensor_relay_settings_applied.emit(self.sensor_relay_settings()))
+        self.sensor_read_button.clicked.connect(self.sensor_input_read_requested.emit)
+        self.sensor_pulse_button.clicked.connect(self.sensor_output_pulse_requested.emit)
+        panel.add_widget(_row(self.sensor_apply_button, self.sensor_read_button, self.sensor_pulse_button))
+        panel.add_widget(
+            _hint("「讀取 DI」「送出 DO 測試脈衝」只用已套用的設定，且中繼執行中不能使用。程式轉送的延遲約為 DI 讀取間隔加上系統排程。")
+        )
+        self.sensor_relay_stats_label = _hint(color=COLORS["text_2"])
+        self.sensor_relay_stats_label.setProperty("mono", "true")
+        self.sensor_relay_stats_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        panel.add_widget(self.sensor_relay_stats_label)
+        self._sensor_relay_settings = SensorRelaySettings()
+        return panel
+
+    def set_sensor_relay_availability(self, availability: DeviceAvailability) -> None:
+        self.sensor_relay_availability_label.setText(f"I/O 卡不可用：{availability.reason}")
+        self.sensor_relay_availability_label.setVisible(not availability.available)
+
+    def set_sensor_relay_settings(self, settings: SensorRelaySettings) -> None:
+        self._sensor_relay_settings = settings
+        self.sensor_relay_enabled_check.setChecked(settings.enabled)
+        self.sensor_device_edit.setText(settings.device)
+        self.sensor_di_port_input.setValue(settings.di_port)
+        self.sensor_di_bit_input.setValue(settings.di_bit)
+        self.sensor_di_low_check.setChecked(settings.di_active_low)
+        self.sensor_do_port_input.setValue(settings.do_port)
+        self.sensor_do_bit_input.setValue(settings.do_bit)
+        self.sensor_do_low_check.setChecked(settings.do_active_low)
+        self.sensor_pulse_input.setValue(settings.pulse_ms)
+        self.sensor_interval_input.setValue(settings.min_interval_ms)
+        self.sensor_poll_input.setValue(settings.poll_interval_ms)
+        self.sensor_assembly_edit.setText(settings.assembly_path)
+
+    def sensor_relay_settings(self) -> SensorRelaySettings:
+        return SensorRelaySettings(
+            enabled=self.sensor_relay_enabled_check.isChecked(),
+            device=self.sensor_device_edit.text(),
+            di_port=int(self.sensor_di_port_input.value()),
+            di_bit=int(self.sensor_di_bit_input.value()),
+            di_active_low=self.sensor_di_low_check.isChecked(),
+            do_port=int(self.sensor_do_port_input.value()),
+            do_bit=int(self.sensor_do_bit_input.value()),
+            do_active_low=self.sensor_do_low_check.isChecked(),
+            pulse_ms=float(self.sensor_pulse_input.value()),
+            min_interval_ms=int(self.sensor_interval_input.value()),
+            poll_interval_ms=float(self.sensor_poll_input.value()),
+            assembly_path=self.sensor_assembly_edit.text(),
+        ).normalized()
+
+    def set_sensor_relay_stats(self, stats: SensorRelayStats) -> None:
+        self.sensor_relay_stats = stats
+        if not stats.mode:
+            self.sensor_relay_stats_label.setText("中繼狀態：未執行")
+            return
+        state = "執行中" if stats.running else "已停止"
+        di = {True: "有效", False: "無效", None: "—"}[stats.di_active]
+        text = (
+            f"中繼狀態：{state}（{SENSOR_RELAY_MODE_LABELS.get(stats.mode, stats.mode)}）\n"
+            f"DI 目前 {di}・變有效 {stats.edges} 次・抖動略過 {stats.ignored_edges} 次・DO 脈衝 {stats.pulses} 次\n"
+            f"讀取 {stats.polls} 次・最長讀取間隔 {stats.max_poll_gap_ms:.1f} ms"
+        )
+        if stats.error:
+            text += f"\n錯誤：{stats.error}"
+        self.sensor_relay_stats_label.setText(text)
 
     def _build_extension_panel(self) -> Panel:
         panel = Panel(title="Extension Compare（CMP0–CMP7）")

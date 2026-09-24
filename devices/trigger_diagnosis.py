@@ -140,6 +140,13 @@ class TriggerEvidence:
     line_trigger_too_fast: int = 0
     trigger_events_missing: bool = False
     trigger_input: FrameTriggerInput | None = None
+    # PCIe-1730 Sensor relay (DI -> program -> DO -> grabber), counted for the current phase.
+    relay_forwarding: bool = False
+    relay_edges: int = 0
+    relay_pulses: int = 0
+    relay_di_active: bool | None = None
+    relay_di_label: str = ""
+    relay_do_label: str = ""
 
     @classmethod
     def from_events(cls, events: Mapping[str, int], **values) -> "TriggerEvidence":
@@ -214,6 +221,12 @@ def _facts(e: TriggerEvidence) -> tuple[str, ...]:
             facts.append("擷取卡不回報 Sensor 觸發事件，改以影像是否完成來判斷")
         else:
             facts.append(f"擷取卡回報：Sensor 觸發 {e.trigger_events} 次、被忽略 {e.ignored_events} 次")
+    if e.relay_forwarding:
+        state = {True: "有效", False: "無效", None: "未知"}[e.relay_di_active]
+        facts.append(
+            f"Sensor 中繼（PCIe-1730）：{e.relay_di_label} 變有效 {e.relay_edges} 次、"
+            f"{e.relay_do_label} 已送脈衝 {e.relay_pulses} 次，DI 目前{state}"
+        )
     facts.append(f"已完成影像：{e.frames} 張")
     facts.append(f"CCF 的 Sensor 輸入：{describe_frame_trigger_input(e.trigger_input)}")
     return tuple(facts)
@@ -319,6 +332,80 @@ def _timing_causes(e: TriggerEvidence) -> list[DiagnosisCause]:
     return causes
 
 
+RELAY_ISOLATION_TEST = (
+    "分辨測試：停止預覽，在「Sensor 中繼」面板一邊遮擋 Sensor 一邊按「讀取 DI」：顯示有效 → Sensor 到 I/O 卡正常。"
+    "接著暫時取消「啟用 Sensor 中繼」並套用，以外部觸發開始預覽，再按「送出 DO 測試脈衝」（或用研華 Navigator 手動切 DO）："
+    "擷取卡開始取像 → DO 到擷取卡正常。測完記得勾回來。"
+)
+
+
+def _relay_no_edge_causes(e: TriggerEvidence) -> list[DiagnosisCause]:
+    causes: list[DiagnosisCause] = []
+    if e.relay_di_active:
+        causes.append(
+            DiagnosisCause(
+                LIKELIHOOD_HIGH,
+                "DI 一直是有效狀態，看不到「變有效」的瞬間",
+                f"{e.relay_di_label} 從頭到尾都讀到有效；中繼只在由無效變有效時觸發。",
+                "若 Sensor 沒被遮擋也顯示有效，請在 Sensor 中繼設定切換「DI 低電位有效」後再試；"
+                "若 Sensor 真的一直被遮擋，先移開物體。",
+            )
+        )
+    causes.append(
+        DiagnosisCause(
+            LIKELIHOOD_HIGH,
+            "Sensor 接的 DI 通道和設定不同",
+            f"程式讀的是 {e.relay_di_label}；PCIe-1730 有多組 DI，接到另一個點就讀不到。",
+            "遮擋 Sensor 並用「讀取 DI」或研華 Navigator 找出實際會跳變的 port／bit，填回 Sensor 中繼設定。",
+        )
+    )
+    if not e.relay_di_active:
+        causes.append(
+            DiagnosisCause(
+                LIKELIHOOD_MEDIUM,
+                "DI 有效電位設反",
+                "設反時 Sensor 被遮擋反而讀成無效，變有效的瞬間會落在物體離開時，或完全看不到。",
+                "用「讀取 DI」比對遮擋前後；遮擋時顯示無效就切換「DI 低電位有效」。",
+            )
+        )
+    causes.append(
+        DiagnosisCause(
+            LIKELIHOOD_MEDIUM,
+            "Sensor 本身沒動作，或到 I/O 卡的接線不完整",
+            "Sensor 沒電、沒被遮擋到，或 PNP／NPN 型式和 I/O 卡隔離輸入的接法不符時，DI 不會變化。",
+            "遮擋 Sensor 看指示燈；燈有變化但 DI 不變，查 I/O 卡 DI 的 COM／共地接線與 Sensor 型式。",
+        )
+    )
+    return causes
+
+
+def _relay_pulse_causes(e: TriggerEvidence) -> list[DiagnosisCause]:
+    info = e.trigger_input
+    return [
+        DiagnosisCause(
+            LIKELIHOOD_HIGH,
+            "擷取卡的觸發線接在另一個 DO，或接到擷取卡另一路觸發輸入",
+            f"程式已從 {e.relay_do_label} 送出 {e.relay_pulses} 次脈衝，擷取卡一次都沒收到。"
+            + ("" if info is None or info.source is None else f"CCF 指定觸發輸入 {source_text(info)}。"),
+            "對照接線確認哪個 DO 接到擷取卡，填回 Sensor 中繼設定；並用 CamExpert 確認 External Frame Trigger Source。",
+        ),
+        DiagnosisCause(
+            LIKELIHOOD_HIGH,
+            "DO 輸出電壓和擷取卡輸入設定不符",
+            "PCIe-1730 的隔離 DO 是集極開路輸出，需要外部電源與上拉才有電壓；"
+            f"CCF 目前設定觸發輸入為 {level_text(info)}。",
+            "用電表量 DO 到擷取卡那條線在測試脈衝時的高／低電位，再用 CamExpert 把 External Frame Trigger Level 設成相符。",
+        ),
+        DiagnosisCause(
+            LIKELIHOOD_MEDIUM,
+            "DO 有效電位設反或脈衝太短",
+            "電位設反時擷取卡看到的是脈衝結束的邊緣；脈衝太短時擷取卡可能濾掉。",
+            "在 Sensor 中繼設定切換「DO 低電位有效」，或把脈衝寬度加長到 5–10 ms 再試。",
+        ),
+        _detection_cause(info),
+    ]
+
+
 def _no_line_causes(e: TriggerEvidence) -> list[DiagnosisCause]:
     return [
         DiagnosisCause(
@@ -392,6 +479,24 @@ def diagnose_external_trigger(e: TriggerEvidence) -> TriggerDiagnosis:
                     "ok", "ok", f"外部觸發正常：已完成 {e.frames} 張，等待下一次 Sensor 觸發。", facts
                 )
             return TriggerDiagnosis("waiting", "info", "等待 Sensor 觸發；物體通過 Sensor 後會開始取像。", facts)
+        if e.relay_forwarding and not e.relay_pulses:
+            return TriggerDiagnosis(
+                "no_relay_input",
+                "error",
+                f"米輪已走約 {e.lengths_travelled:.1f} 張的長度，I/O 卡的 Sensor DI 沒有變有效，程式沒有送出觸發。",
+                facts,
+                tuple(_relay_no_edge_causes(e) + timing),
+                RELAY_ISOLATION_TEST,
+            )
+        if e.relay_forwarding:
+            return TriggerDiagnosis(
+                "relay_not_received",
+                "error",
+                f"程式已把 Sensor 轉成 {e.relay_pulses} 次 DO 脈衝，擷取卡仍未收到觸發。",
+                facts,
+                tuple(_relay_pulse_causes(e) + timing),
+                RELAY_ISOLATION_TEST,
+            )
         causes = [_source_cause(info), _level_cause(info), SENSOR_CAUSE, _detection_cause(info), *timing]
         order = {LIKELIHOOD_HIGH: 0, LIKELIHOOD_MEDIUM: 1, LIKELIHOOD_LOW: 2}
         causes.sort(key=lambda cause: order.get(cause.likelihood, 3))  # stable: ties keep listed order
