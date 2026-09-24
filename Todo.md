@@ -1041,6 +1041,24 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 - [x] **依賴來源一致性**：`requirements.txt` 無 CI／build／測試消費者，build 腳本只要求 `env\Scripts\python.exe` 存在、不檢查是否符合 lock。新增 requirements／lock 一致性測試，build 前驗證 venv 與 lock 相符（或明確移除 `requirements.txt` 並更新 README）。
 - [x] **`.gitignore` 補漏**：`outputs/csv/` 等報表輸出未被忽略（只擋 `outputs/logs/`、`outputs/ccd_snapshots/`），`node_modules/`、`*.pdb`／`*.ilk`／`*.obj` 亦未忽略；全域 `*.zip` 會連測試 fixture zip 一併忽略。補規則並對需追蹤的 fixture 加例外，先確認不影響現有 tracked 檔案。
 
+## P15：2026-09-24 外部效能建議核對後新增待辦
+
+本節依外部效能建議逐條對照原始碼後收錄。已排除經核對不成立或收益可忽略者：熱點路徑 `ThreadPoolExecutor`（`BmpReader`、`NgTileExporter`、`_iter_cropped_tiles` 皆為每張圖一次，且 BMP 只在超過 `PARALLEL_MIN_BYTES` 才開 pool；共用 pool 反有巢狀提交 deadlock 風險）、batch 一次提交全部 Future（未開始者由 `_process_image_if_active` 立即回傳 CANCELLED，摘要本需每張一列）、NG tile 重複 `mkdir(exist_ok=True)`（相對 PNG 編碼可忽略）、Sapera `_copy_frame` 雙重拷貝（16384 寬 pitch 通常等於 width，numpy 緩衝由引用計數釋放而非 GC，ping-pong buffer 與佇列持有 frame 的生命週期衝突）。效能項目須先量測；不得改變 PASS/NG、defect 數、bbox、area、confidence、metadata 與排序。
+
+### GUI 回應性
+
+- [ ] **Results 缺陷表改 model/view**：`gui/screens/results_screen.py` `_populate_table()` 每列以 `setCellWidget` 建立類型標籤與「檢視」按鈕（外包 `QWidget`＋`QHBoxLayout`），列數無上限，最後同步 `resizeColumnsToContents()`；數千筆缺陷即產生上萬個 widget，切換 detector filter 時整表重建。比照 `batch_dashboard` 改為 `QAbstractTableModel`＋proxy filter，類型與檢視以 delegate 繪製（或點選／Enter 觸發定位），欄寬改固定 resize mode。保持 `view_requested`、選取同步、filter 與鍵盤操作行為，補鍵盤路徑測試，並以 1000／5000 筆缺陷量測切換與填表延遲。
+
+### Core／報表每張圖成本
+
+- [ ] **`PatternMatcher._nms` CPU reference 向量化**（先量測）：`core/tiler.py` `_nms()` 為純 Python 貪婪 NMS，每個候選對所有已選框呼叫 `_iou()`，`max_candidates` 預設 20000，密集重複陣列最壞達上億次呼叫。先以密集合成圖量測占比，再改為對已選框 NumPy 陣列一次計算 IoU；必須保留逐一貪婪順序、`<= nms_threshold` 邊界、`max_count` 截斷與浮點結果，補與現行實作逐筆相同（座標、score、順序）的隨機與平手測試。此為 CPU correctness reference，GPU 路徑等價測試須同步通過。
+- [ ] **Overlay 超過 `overlay_max_dim` 時先縮圖再繪製**：`OverlayReportWriter` 目前先由 `OverlayRenderer.make_overlay()` 對整張原圖 `image.copy()`（16384×13000 BGR 約 639 MB）並繪製，再由 `maybe_downscale_overlay()` 以 `INTER_AREA` 縮小，字型 0.55 縮到約 1/8 後無法辨識。設定 `overlay_max_dim` 時改為先縮圖、按比例換算 bbox／polygon／tile 框座標後繪製，線寬至少 1 px、文字以輸出尺寸決定大小。此為 overlay 輸出像素變更（目前 tracked Recipe 皆未設定 `overlay_max_dim`，預設路徑不受影響），須定義並測試座標換算、細小 defect 可見性、status tile 模式與未設定時輸出逐像素不變；量測峰值記憶體與耗時。
+
+### 灰階直通（跨模組，依附 P11 大 frame 量測）
+
+- [ ] **單通道輸入灰階直通評估**：相機 `frame_to_bgr()` 將單通道 frame 擴成三通道（刻意維持與 8-bit BMP 讀回逐像素相同），檔案路徑亦以 `IMREAD_COLOR` 解碼；多數 Detector／`PreprocessPlan` 第一步再轉回灰階，16K 級影像記憶體與頻寬為 3 倍。與 P11「相機直連大 frame 的記憶體與耗時量測」合併評估：盤點所有 Detector、plan cache key、GPU 上傳、overlay 與報表對通道數的假設，設計可選的灰階路徑；須證明對同一影像灰階路徑與 BGR 路徑的 PASS/NG、defect、bbox、area、confidence、metadata 完全相同，且 CPU fallback 與 strict CUDA 語意不變。
+- [ ] **預覽金字塔支援 `Format_Grayscale8`**（依附上一項）：`gui/image_pyramid.py` 固定使用 `Format_RGB888`；灰階直通落地後，灰階來源的預覽與各層級改以單通道建立，節省約 2/3 記憶體，並評估 overview 階段 Level 0 延遲載入（需重新讀檔，與 2026-09-18 完成的大圖 LOD 設計一併檢討）。overlay 顏色、座標與游標像素值不變。
+
 ## RTX 3090 編譯與實機驗收
 
 ### 環境與編譯
