@@ -10,7 +10,14 @@ from pathlib import Path
 
 import numpy as np
 
-from devices.ccd_models import DeviceError
+from devices.ccd_models import (
+    ACQUISITION_EVENT_FRAME_TRIGGER_TOO_SLOW,
+    ACQUISITION_EVENT_LINE_TRIGGER_TOO_FAST,
+    ACQUISITION_EVENT_LINE_TRIGGER_TOO_SLOW,
+    ACQUISITION_EVENT_TRIGGER,
+    ACQUISITION_EVENT_TRIGGER_IGNORED,
+    DeviceError,
+)
 
 # ============================================================
 # Teledyne DALSA Sapera LT access through pythonnet.
@@ -201,6 +208,36 @@ TRIGGER_TIMING_EVENTS = (
     "LineTriggerTooFast",
 )
 ACQ_EVENTS = EXTERNAL_TRIGGER_EVENTS + TRIGGER_TIMING_EVENTS
+# Sapera event name -> backend-neutral `ACQUISITION_EVENT_*` kind counted for the trigger diagnosis.
+ACQ_EVENT_KINDS = {
+    "ExternalTrigger": ACQUISITION_EVENT_TRIGGER,
+    "ExternalTrigger2": ACQUISITION_EVENT_TRIGGER,
+    "ExternalTriggerIgnored": ACQUISITION_EVENT_TRIGGER_IGNORED,
+    "ExternalTriggerTooSlow": ACQUISITION_EVENT_FRAME_TRIGGER_TOO_SLOW,
+    "ExtLineTriggerTooSlow": ACQUISITION_EVENT_LINE_TRIGGER_TOO_SLOW,
+    "LineTriggerTooFast": ACQUISITION_EVENT_LINE_TRIGGER_TOO_FAST,
+}
+# The CCF decides which input, edge and voltage the board uses for the Sensor frame trigger; the
+# binding never writes them. They are read back for the trigger diagnosis only, so they are probed
+# (like the trash buffer) instead of asserted by the manifest: a build missing one of them must not
+# make the camera unusable through E-0301.
+FRAME_TRIGGER_SOURCE_PARAMETER = "EXT_FRAME_TRIGGER_SOURCE"
+FRAME_TRIGGER_DETECTION_PARAMETER = "EXT_FRAME_TRIGGER_DETECTION"
+FRAME_TRIGGER_LEVEL_PARAMETER = "EXT_FRAME_TRIGGER_LEVEL"
+FRAME_TRIGGER_INPUT_PARAMETERS = (
+    FRAME_TRIGGER_SOURCE_PARAMETER,
+    FRAME_TRIGGER_DETECTION_PARAMETER,
+    FRAME_TRIGGER_LEVEL_PARAMETER,
+)
+FRAME_TRIGGER_DETECTION_VALUES = (
+    "RISING_EDGE",
+    "FALLING_EDGE",
+    "ACTIVE_HIGH",
+    "ACTIVE_LOW",
+    "DOUBLE_PULSE_RISING_EDGE",
+    "DOUBLE_PULSE_FALLING_EDGE",
+)
+FRAME_TRIGGER_LEVEL_VALUES = ("LEVEL_TTL", "LEVEL_422", "LEVEL_24VOLTS", "LEVEL_12VOLTS", "LEVEL_LVDS")
 
 # Attached-camera features written through SapAcqDevice.SetFeatureValue. These are runtime camera
 # features, so .NET reflection cannot verify them; they live here with the manifest so that no
@@ -919,6 +956,11 @@ class PythonnetSaperaInterop:
     def acq_capability(self, acquisition, name: str) -> int | None:
         ok, value = acquisition.GetCapability.Overloads[self._sig_acq_cap](getattr(self._cap, name), 0)
         return int(value) if ok else None
+
+    def acq_value(self, value_name: str) -> int | None:
+        """Numeric value of `SapAcquisition.Val.<value_name>`, or None when this build lacks it."""
+        member = getattr(self._val, value_name, None)
+        return None if member is None else int(member)
 
     def acq_set_cc1(self, acquisition, value_name: str) -> bool:
         controls = acquisition.CamIoControl

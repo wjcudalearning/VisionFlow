@@ -57,6 +57,7 @@ from devices.trigger_automation import (
     external_trigger_actions,
     software_frame_requests_auto_save,
 )
+from devices.trigger_diagnosis import TriggerDiagnosis, TriggerEvidence, diagnose_external_trigger, event_delta
 from gui.sapera_diagnostics import (
     SaperaDiagnoseWorker,
     SaperaDiagnosticsReport,
@@ -67,6 +68,8 @@ from gui.sapera_location_dialog import SaperaLocationCatalog
 from gui.workflow_controllers import SaperaDiagnoseWorkflowController
 
 PREVIEW_MAX_DIMENSION = 2048
+# Capture-watch findings that the external-trigger diagnosis announces instead (with ranked causes).
+DIAGNOSED_WATCH_CODES = frozenset({"no_trigger", "no_frame", "reverse"})
 METER_WHEEL_POLL_MS = 200
 DEFAULT_SNAPSHOT_DIR = Path("outputs") / "ccd_snapshots"
 # S7 waits at most 5 s for a frame, so 15 s covers a full run from a run-to-completion join.
@@ -208,6 +211,8 @@ class CcdController(QObject, LogMixin):
     save_stats_changed = Signal(object)
     software_trigger_monitor_changed = Signal(bool)
     sapera_versions_changed = Signal(object)
+    #: `TriggerDiagnosis` while an external-trigger watch runs, None when it ends.
+    trigger_diagnosis_changed = Signal(object)
     #: True while a diagnose run is in flight. Emitted when the controller's own running flag
     #: changes, so the screen's disable/enable state never depends on signal delivery order.
     sapera_diagnose_running_changed = Signal(bool)
@@ -253,6 +258,11 @@ class CcdController(QObject, LogMixin):
         self._external_watch: ExternalCaptureWatch | None = None
         self._trigger_seen_since_connect = False
         self._trigger_seen_since_frame = False
+        # External-trigger diagnosis: grabber event counts when the watch began, the latest result,
+        # and which problem codes were already announced for this watch.
+        self._watch_event_baseline: dict[str, int] = {}
+        self._trigger_diagnosis: TriggerDiagnosis | None = None
+        self._diagnosis_noticed: set[str] = set()
         self._auto_save_fallback_noted = False
         self._auto_save_hint_shown = False
         self._camera_busy_text = ""
@@ -340,6 +350,7 @@ class CcdController(QObject, LogMixin):
         self.sapera_versions_changed.connect(screen.set_sapera_versions)
         self.sapera_diagnose_running_changed.connect(screen.set_sapera_diagnose_running)
         self.diagnose_report_ready.connect(screen.set_sapera_diagnose_report)
+        self.trigger_diagnosis_changed.connect(screen.set_trigger_diagnosis)
 
         self._publish_availability()
         screen.set_camera_settings(self.camera_settings_view())
@@ -509,7 +520,7 @@ class CcdController(QObject, LogMixin):
             return
         resume_preview = self.camera_status().previewing or self.software_trigger_monitor_running
         self.stop_software_trigger_monitor()
-        self._external_watch = None
+        self._end_external_watch()
         settings = self._hardware_settings()
         camera = self.devices.camera
 
@@ -547,7 +558,7 @@ class CcdController(QObject, LogMixin):
             self.notice.emit(f"相機{self._camera_busy_text}請稍候。", "warning")
             return
         self.stop_software_trigger_monitor()
-        self._external_watch = None
+        self._end_external_watch()
 
         def finish(_result, error) -> None:
             if error is not None:
@@ -633,7 +644,7 @@ class CcdController(QObject, LogMixin):
 
     def stop_preview(self) -> None:
         self.stop_software_trigger_monitor()
-        self._external_watch = None
+        self._end_external_watch()
         self._run_camera_command(self.devices.camera.stop_preview, "無法停止取像")
 
     def capture_frame(self) -> None:
@@ -743,7 +754,9 @@ class CcdController(QObject, LogMixin):
         meter_wheel = self.devices.meter_wheel
         if watch is not None and meter_wheel.is_connected:
             try:
-                watch.on_trigger(meter_wheel.read_encoder())
+                encoder_value = meter_wheel.read_encoder()
+                watch.on_trigger(encoder_value)
+                self._update_trigger_diagnosis(encoder_value)
             except DeviceError:
                 pass  # The next poll reports the meter-wheel failure.
             self.status_message.emit(
@@ -794,7 +807,7 @@ class CcdController(QObject, LogMixin):
             return
         meter_wheel = self.devices.meter_wheel
         if not meter_wheel.is_connected:
-            self._external_watch = None
+            self._end_external_watch()
             self.notice.emit("米輪未連線：擷取卡收不到米輪的線觸發脈衝，影像不會完成，也無法偵測長度。", "warning")
             return
         if self._machine.meter_wheel.compare_increment <= 0:
@@ -810,12 +823,14 @@ class CcdController(QObject, LogMixin):
             if armed is not None:
                 meter_wheel.set_compare(armed)
         except DeviceError as exc:
-            self._external_watch = None
+            self._end_external_watch()
             self.notice.emit(f"外部觸發偵測無法讀寫米輪：{exc}", "error")
             return
         waits = hardware.external_frame_one_frame
         self._trigger_seen_since_frame = False
         self._external_watch = ExternalCaptureWatch(length_lines, increment, waits, encoder_value)
+        self._watch_event_baseline = self.devices.camera.acquisition_event_counts()
+        self._diagnosis_noticed = set()
         text = "外部觸發偵測已啟動："
         if armed is not None:
             text += f"Compare {compare_value} 不在 Encoder {encoder_value} 前方，已改寫為 {armed}；"
@@ -823,12 +838,51 @@ class CcdController(QObject, LogMixin):
         self.status_message.emit(text)
         self.poll_meter_wheel()
 
+    def _end_external_watch(self) -> None:
+        self._external_watch = None
+        self._watch_event_baseline = {}
+        if self._trigger_diagnosis is not None:
+            self._trigger_diagnosis = None
+            self.trigger_diagnosis_changed.emit(None)
+
+    @property
+    def trigger_diagnosis(self) -> TriggerDiagnosis | None:
+        return self._trigger_diagnosis
+
+    def _update_trigger_diagnosis(self, encoder_value: int) -> TriggerDiagnosis | None:
+        """Re-diagnose the running external-trigger watch; announce each problem once per watch."""
+        watch = self._external_watch
+        if watch is None:
+            return None
+        camera = self.devices.camera
+        evidence = TriggerEvidence.from_events(
+            event_delta(camera.acquisition_event_counts(), self._watch_event_baseline),
+            waits_for_trigger=watch.waits_for_trigger,
+            triggered=watch.triggered,
+            encoder_delta=int(encoder_value) - watch.phase_start,
+            length_lines=watch.length_lines,
+            compare_increment=watch.step,
+            frames=watch.frames,
+            trigger_events_missing=watch.trigger_events_missing,
+            trigger_input=camera.frame_trigger_input(),
+        )
+        diagnosis = diagnose_external_trigger(evidence)
+        if diagnosis != self._trigger_diagnosis:
+            self._trigger_diagnosis = diagnosis
+            self.trigger_diagnosis_changed.emit(diagnosis)
+        if diagnosis.is_problem and diagnosis.code not in self._diagnosis_noticed:
+            self._diagnosis_noticed.add(diagnosis.code)
+            self.notice.emit(diagnosis.notice_text(), diagnosis.severity)
+            self.logger.warning("External trigger diagnosis %s:\n%s", diagnosis.code, diagnosis.text())
+        return diagnosis
+
     def _observe_external_watch(self, snapshot: MeterWheelSnapshot) -> None:
         watch = self._external_watch
         if watch is None or not snapshot.connected:
             return
         for finding in watch.observe(snapshot.encoder_value, snapshot.compare_value):
             self._handle_watch_finding(finding)
+        self._update_trigger_diagnosis(snapshot.encoder_value)
 
     def _handle_watch_finding(self, finding: CaptureWatchFinding) -> None:
         if finding.rearm_compare is not None:
@@ -837,6 +891,8 @@ class CcdController(QObject, LogMixin):
             except DeviceError as exc:
                 self.notice.emit(f"自動改寫 Compare 失敗：{exc}", "error")
                 return
+        if finding.code in DIAGNOSED_WATCH_CODES:
+            return  # The trigger diagnosis announces these with ranked causes.
         if finding.level == "info":
             self.status_message.emit(finding.message)
         elif finding.level in {"warning", "error"}:
@@ -855,7 +911,7 @@ class CcdController(QObject, LogMixin):
         if watch is None:
             return
         if not self.camera_status().previewing:
-            self._external_watch = None  # A single capture ends with its frame.
+            self._end_external_watch()  # A single capture ends with its frame.
             self.status_message.emit("外部觸發影像已完成。")
             return
         encoder_value = self._last_meter_snapshot.encoder_value
@@ -865,6 +921,10 @@ class CcdController(QObject, LogMixin):
             except DeviceError:
                 pass  # The next poll reports the meter-wheel failure.
         watch.on_frame(encoder_value, trigger_seen)
+        # A new wait phase: ignored triggers are judged, and problems announced, for this phase only.
+        self._watch_event_baseline = self.devices.camera.acquisition_event_counts()
+        self._diagnosis_noticed = set()
+        self._update_trigger_diagnosis(encoder_value)
         waiting = watch.waits_for_trigger and not watch.trigger_events_missing
         self.status_message.emit(
             f"外部觸發影像已完成（第 {watch.frames} 張）；" + ("等待下一次 Sensor 觸發。" if waiting else "繼續擷取。")
@@ -994,7 +1054,7 @@ class CcdController(QObject, LogMixin):
 
     def disconnect_meter_wheel(self) -> None:
         self.stop_software_trigger_monitor()
-        self._external_watch = None
+        self._end_external_watch()
         self._meter_wheel_timer.stop()
         self.devices.meter_wheel.disconnect()
         self._publish_meter_snapshot(MeterWheelSnapshot())
@@ -1018,7 +1078,7 @@ class CcdController(QObject, LogMixin):
             meter_wheel.disconnect()
             self.notice.emit(f"米輪讀值失敗，已中斷連線：{exc}", "error")
             snapshot = MeterWheelSnapshot()
-            self._external_watch = None
+            self._end_external_watch()
         self._publish_meter_snapshot(snapshot)
         self._observe_external_watch(snapshot)
 
@@ -1479,7 +1539,7 @@ class CcdController(QObject, LogMixin):
         self._closed = True
         self.detach_inspection_queue()
         self.stop_software_trigger_monitor()
-        self._external_watch = None
+        self._end_external_watch()
         self._stop_diagnose()
         self._meter_wheel_timer.stop()
         self.devices.camera.set_frame_listener(None)

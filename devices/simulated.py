@@ -7,6 +7,7 @@ from dataclasses import replace
 import numpy as np
 
 from devices.ccd_models import (
+    ACQUISITION_EVENT_TRIGGER,
     EXTENSION_CHANNEL_COUNT,
     AcquisitionSettings,
     CameraConnectionSettings,
@@ -15,6 +16,7 @@ from devices.ccd_models import (
     DeviceAvailability,
     DeviceError,
     ExtensionCompareChannel,
+    FrameTriggerInput,
     MeterWheelSettings,
     MultipleRate,
     TriggerSettings,
@@ -56,6 +58,9 @@ class SimulatedLineScanCamera(LineScanCamera):
         self._frame_index = 0
         self._stop_event = threading.Event()
         self._threads: list[threading.Thread] = []
+        self._event_counts: dict[str, int] = {}
+        #: What `frame_trigger_input()` reports while connected; tests set it to model a CCF.
+        self.simulated_frame_trigger_input: FrameTriggerInput | None = None
 
     # ---- LineScanCamera ------------------------------------------------
     def availability(self) -> DeviceAvailability:
@@ -93,6 +98,7 @@ class SimulatedLineScanCamera(LineScanCamera):
             self._acquisition = acquisition.normalized()
             self._trigger = trigger.normalized()
             self._scanned_lines = 0
+            self._event_counts = {}
             self._state = CameraState.IDLE
         return self.status()
 
@@ -150,8 +156,26 @@ class SimulatedLineScanCamera(LineScanCamera):
         with self._lock:
             self._require_connected()
             listener = self._trigger_listener
+            self._count_event(ACQUISITION_EVENT_TRIGGER)
         if listener is not None:
             listener()
+
+    def emit_acquisition_event(self, kind: str) -> None:
+        """Count a grabber event such as `ACQUISITION_EVENT_TRIGGER_IGNORED` without a trigger callback."""
+        with self._lock:
+            self._require_connected()
+            self._count_event(kind)
+
+    def _count_event(self, kind: str) -> None:
+        self._event_counts[kind] = self._event_counts.get(kind, 0) + 1
+
+    def frame_trigger_input(self) -> FrameTriggerInput | None:
+        with self._lock:
+            return self.simulated_frame_trigger_input if self._state != CameraState.OFFLINE else None
+
+    def acquisition_event_counts(self) -> dict[str, int]:
+        with self._lock:
+            return dict(self._event_counts)
 
     def complete_capture(self) -> np.ndarray | None:
         with self._lock:

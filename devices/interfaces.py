@@ -11,6 +11,7 @@ from devices.ccd_models import (
     CameraStatus,
     DeviceAvailability,
     ExtensionCompareChannel,
+    FrameTriggerInput,
     MeterWheelSettings,
     MultipleRate,
     TriggerSettings,
@@ -71,6 +72,14 @@ class LineScanCamera(ABC):
 
     @abstractmethod
     def close(self) -> None: ...
+
+    def frame_trigger_input(self) -> FrameTriggerInput | None:
+        """External frame-trigger input read back at connect; None when the backend cannot tell."""
+        return None
+
+    def acquisition_event_counts(self) -> dict[str, int]:
+        """Grabber events counted since connect, keyed by `ACQUISITION_EVENT_*` names."""
+        return {}
 
 
 class MeterWheel(ABC):

@@ -874,6 +874,8 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 - [x] Software Trigger 監控（2026-09-17）：「開始預覽」在軟體觸發連線時改為啟動監控（按鈕顯示「開始軟體觸發」）；背景 thread 每 50 ms 讀 encoder，低於 compare 時寫 compare 並請 GUI thread 擷取一張，須回到 compare 以上才重新 arm；等待 GUI 執行中的擷取請求會去重；相機非待機、米輪未連線或相機不是以軟體觸發連線時拒絕啟動並提示；Stop／斷線／關窗停止監控但不中止擷取中的 frame；米輪讀值失敗自動停止並提示（C# 版失敗後按鈕狀態仍停在監控中）。以逐步 encoder 序列與模擬器端到端測試。
 - [x] 外部觸發智能偵測（2026-09-23 使用者需求：現場相機與米輪已連線、米輪有動，但外部觸發沒出圖也沒存圖）：依 xx_ccd 設計推定「Sensor 觸發 frame、LSI-8181 CMP_OUT 自動遞增出每行脈衝」。外部觸發開始預覽／擷取時，若「自動遞增」為 0 自動設為 1，並在 Compare 不在 Encoder 前方時改寫硬體 Compare（已存值不變）；外部觸發寫入已存 Compare 時同樣自動前移；取像中依米輪讀值顯示長度進度，並指出方向相反、Compare 停止遞增（自動重設）、Sensor 未觸發、線脈衝未到板卡等狀況；擷取卡從不回報觸發事件時改以影像完成為準自動存圖。
 - [ ] 【實物】外部觸發智能偵測在相機機台驗證：確認實際接線（Sensor 接擷取卡 frame trigger、CMP_OUT 接線觸發）與上述推定一致，並確認各項提示與自動修正符合現場。
+- [x] 外部觸發診斷面板（2026-09-24 使用者回報：外部觸發跳出「米輪已走約 2 張、擷取卡仍未收到 Sensor 觸發」且沒有出圖，希望診斷更智慧、讓不熟觸發的人也能處理）：連線時唯讀 CCF 的 Sensor Frame Trigger 輸入（`EXT_FRAME_TRIGGER_SOURCE／DETECTION／LEVEL`，以探測方式讀取、不列入 API manifest，讀回列加 `FTS／FTD／FTL`）；擷取卡事件依種類計數（接受、被忽略、行觸發太快／太慢、Frame 時序）；新增 `devices/trigger_diagnosis.py`，把米輪行程、事件、出圖數與 CCF 輸入判讀為「等待／未收到 Sensor／收到但被忽略／行觸發不足／時序異常／方向相反／正常」，並列出依可能性排序的原因、理由與處理步驟及「分辨測試」；CCD 畫面新增「外部觸發診斷」面板，每個問題每階段只提示一次。
+- [ ] 【實物】外部觸發診斷在相機機台驗證：確認 Xtium-CL MX4／Sapera 8.60 讀得到 `EXT_FRAME_TRIGGER_SOURCE／DETECTION／LEVEL`且數值能對應 `SapAcquisition.Val` 名稱、`ExternalTriggerIgnored` 等事件實際會回報，並依面板步驟排除 2026-09-24 回報的 Sensor 未觸發問題。
 - [x] 相機套用設定自動重連與背景連線（2026-09-23 使用者需求：改設定要手動斷線重連、按連線時 GUI 會卡住）：已連線時按套用自動斷線重連寫入並恢復預覽（擷取中、相機直連監控中維持「待重新連線寫入」，Recipe 載入不重連）；Sapera 連線／斷線改在單一背景執行緒執行，期間顯示「連線中…」並鎖住相機操作。
 - [ ] 【實物】在相機機台確認背景連線不再卡住 GUI、自動重連後設定讀回正確且預覽恢復。
 
@@ -1178,6 +1180,7 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 
 ## 完成紀錄
 
+- [x] 2026-09-24：新增 CCD 外部觸發診斷（P11）。`SaperaLineScanCamera` 連線時唯讀 CCF 的 Sensor Frame Trigger 來源／觸發方式／電壓，以 `SapAcquisition.Val` 名稱解碼（讀不到時保留原始數字或省略，不影響連線與 E-0301），擷取卡事件改依種類計數；`devices/trigger_diagnosis.py` 以純邏輯規則依米輪行程、觸發／忽略事件、出圖數與 CCF 輸入產生排序原因與處理步驟（觸發方向設反只會讓時間點偏移，排最後）；`CcdController` 在米輪輪詢、收到觸發與出圖時更新診斷，並取代原本 no_trigger／no_frame／reverse 的單行提示；CCD 畫面新增「外部觸發診斷」面板；`docs/sapera-diagnose.md` 補 `FTS／FTD／FTL` 與面板說明。驗證：新增 `tests.test_ccd_trigger_diagnosis`（20 項）與 Sapera 讀值／事件計數、控制器與面板整合測試；完整 unittest 1045 項中 1044 通過，唯一失敗 `test_detector_999_flow_test` 的 batch 摘要 `cancelled` 欄位來自工作區既有未提交的 batch 修改、與本變更無關；compileall、CUDA preflight、`git diff --check`、GUI offscreen smoke 通過。未在相機機台執行。
 - [x] 2026-09-24：逐條核對外部全模組審查建議與目前原始碼，新增 P14 候選待辦（參數治理／可追溯性 6 項、Core／Detector 每圖成本 8 項、GUI 資源 4 項、CUDA／native binding 4 項、CI／打包／倉庫衛生 6 項），並把 `_pattern_template_size()` 的第二條 template 解碼路徑併入 P13 既有 template 快取條目。經核對不成立而未登錄：Detector params 未知鍵（`RecipeManager` 已嚴格拒絕）、並行 tile 路徑遺失 CUDA fallback 原因（並行僅在無 `gpu_active` Detector 時啟用）、`.hypothesis/` 與 `build/` 未忽略；`LogMixin.logger` 鎖成本可忽略不登錄。本次只新增規畫，未改執行程式。
 
 - [x] 2026-09-23：核對外部程式審查建議與目前原始碼，新增 P13 候選待辦：4 項 correctness/diagnostic 缺陷，以及 template/cache、monitor 掃描、YOLOX、CCD 與條件式 CUDA profile 工作；本次只新增規畫，未改執行程式。確認 `CameraMonitorProcessor` 正常停止時已關閉 `CameraFrameQueue`、YOLOX 座標還原使用實際 resize 寬高、persistent plan 已快取 INTER_AREA 表，因此不把這幾項誤列為待辦；`xx_ccd` 保持另一 repository 的行為參考。

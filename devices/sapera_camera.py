@@ -16,11 +16,13 @@ from devices.ccd_models import (
     CameraStatus,
     DeviceAvailability,
     DeviceError,
+    FrameTriggerInput,
     TriggerMode,
     TriggerSettings,
 )
 from devices.interfaces import FrameListener, LineScanCamera, TriggerListener
 from devices.sapera_api import (
+    ACQ_EVENT_KINDS,
     DEVICE_WIDTH_FEATURES,
     BUFFER_WITH_TRASH_CLASS,
     CONTINUOUS_TRIGGER_SELECTORS,
@@ -37,12 +39,18 @@ from devices.sapera_api import (
     EXTERNAL_LINE_SELECTORS,
     EXTERNAL_LINE_SOURCES,
     EXTERNAL_TRIGGER_EVENTS,
+    FRAME_TRIGGER_DETECTION_PARAMETER,
+    FRAME_TRIGGER_DETECTION_VALUES,
+    FRAME_TRIGGER_LEVEL_PARAMETER,
+    FRAME_TRIGGER_LEVEL_VALUES,
+    FRAME_TRIGGER_SOURCE_PARAMETER,
     BufferFormat,
     SaperaError,
     SaperaRuntime,
     dotnet_exception_name,
     translate_exception,
 )
+from devices.trigger_diagnosis import describe_frame_trigger_input, frame_trigger_readbacks
 
 # ============================================================
 # Sapera LT line-scan camera.
@@ -79,7 +87,8 @@ class ApplyNote:
 
 # Keys of pply_readbacks(), in the order the diagnosis prints them: camera TriggerMode, camera line
 # rate and its reported range, board INT_LINE_TRIGGER_FREQ, exposure, gain, buffer width/height.
-READBACK_KEYS = ("TM", "LR", "LRMIN", "LRMAX", "BLR", "EXP", "GAIN", "CAMW", "CCF", "W", "H", "CROP")
+# FTS/FTD/FTL: the CCF's Sensor frame-trigger input (source, detection, voltage level).
+READBACK_KEYS = ("TM", "LR", "LRMIN", "LRMAX", "BLR", "EXP", "GAIN", "CAMW", "CCF", "W", "H", "CROP", "FTS", "FTD", "FTL")
 
 
 class _ApplyLog:
@@ -91,6 +100,7 @@ class _ApplyLog:
         # width; the board line trigger and the CCF check below use them.
         self.applied_line_rate: int | None = None
         self.camera_width: int | None = None
+        self.frame_trigger_input: FrameTriggerInput | None = None
 
     def ok(self, item: str, detail: str) -> None:
         self.notes.append(ApplyNote(item, detail))
@@ -157,6 +167,9 @@ class SaperaLineScanCamera(LineScanCamera):
         self._transfer = None
         self._apply_notes: tuple[ApplyNote, ...] = ()
         self._apply_readbacks: dict[str, str] = {}
+        self._frame_trigger_input: FrameTriggerInput | None = None
+        # Grabber events since connect, keyed by ACQUISITION_EVENT_* kind (trigger diagnosis).
+        self._acq_event_counts: dict[str, int] = {}
         self._memory_type = ""
 
     # ---- runtime --------------------------------------------------------------------------
@@ -202,6 +215,14 @@ class SaperaLineScanCamera(LineScanCamera):
 
         with self._state_lock:
             return dict(self._apply_readbacks)
+
+    def frame_trigger_input(self) -> FrameTriggerInput | None:
+        with self._state_lock:
+            return self._frame_trigger_input
+
+    def acquisition_event_counts(self) -> dict[str, int]:
+        with self._state_lock:
+            return dict(self._acq_event_counts)
 
     def _require_interop(self):
         availability = self.availability()
@@ -263,6 +284,7 @@ class SaperaLineScanCamera(LineScanCamera):
                 with self._state_lock:
                     self._apply_notes = tuple(log.notes)
                     self._apply_readbacks = dict(log.readbacks)
+                    self._frame_trigger_input = None
                     self._message = str(error)
                 raise error from exc
 
@@ -276,6 +298,8 @@ class SaperaLineScanCamera(LineScanCamera):
             self._last_stop_time = None
             self._apply_notes = tuple(log.notes)
             self._apply_readbacks = dict(log.readbacks)
+            self._frame_trigger_input = log.frame_trigger_input
+            self._acq_event_counts = {}
             self._message = "相機已連線。" if not failures else f"相機已連線，但部分參數寫入失敗：{'、'.join(failures)}"
         for note in log.notes:
             (LOGGER.warning if note.code else LOGGER.info)("Sapera apply %s", note.line())
@@ -292,6 +316,7 @@ class SaperaLineScanCamera(LineScanCamera):
             self._state = CameraState.OFFLINE
             self._has_signal = False
             self._format = None
+            self._frame_trigger_input = None
             self._stop_requested_during_capture = False
             self._last_stop_time = None
             self._message = "相機已斷線。" if not failures else f"相機已斷線；E-0801 清理失敗：{'、'.join(failures)}"
@@ -414,6 +439,10 @@ class SaperaLineScanCamera(LineScanCamera):
         return frame
 
     def _on_acq_event(self, name: str) -> None:
+        kind = ACQ_EVENT_KINDS.get(name)
+        if kind is not None:
+            with self._state_lock:
+                self._acq_event_counts[kind] = self._acq_event_counts.get(kind, 0) + 1
         if name in EXTERNAL_TRIGGER_EVENTS:
             with self._state_lock:
                 listener = self._trigger_listener
@@ -779,6 +808,7 @@ class SaperaLineScanCamera(LineScanCamera):
             log.ok("One Frame", f"EXT_FRAME_TRIGGER_ENABLE={one_frame} 讀回 {_fmt(self._get_int(interop, acq, 'EXT_FRAME_TRIGGER_ENABLE'))}")
         else:
             log.fail("E-0606", "One Frame", f"EXT_FRAME_TRIGGER_ENABLE={one_frame} 寫入失敗")
+        self._read_frame_trigger_input(interop, acq, trigger, log)
 
         self._buffers, self._memory_type = interop.new_buffers(acq, location, BUFFER_COUNT)
         if not getattr(interop, "buffer_with_trash", True):
@@ -893,6 +923,29 @@ class SaperaLineScanCamera(LineScanCamera):
             log.ok("外部觸發（板卡）", detail)
         else:
             log.fail("E-0605", "外部觸發（板卡）", detail)
+
+    def _read_frame_trigger_input(self, interop, acq, trigger: TriggerSettings, log: _ApplyLog) -> None:
+        """Read (never write) the CCF's Sensor input: which input, which edge, which voltage."""
+
+        def value_name(raw: int | None, names: tuple[str, ...]) -> str:
+            if raw is None:
+                return ""
+            return next((name for name in names if self._quiet(lambda n=name: interop.acq_value(n), None) == raw), "")
+
+        detection = self._get_int(interop, acq, FRAME_TRIGGER_DETECTION_PARAMETER)
+        level = self._get_int(interop, acq, FRAME_TRIGGER_LEVEL_PARAMETER)
+        info = FrameTriggerInput(
+            enabled=self._get_int(interop, acq, "EXT_FRAME_TRIGGER_ENABLE"),
+            source=self._get_int(interop, acq, FRAME_TRIGGER_SOURCE_PARAMETER),
+            detection_raw=detection,
+            detection=value_name(detection, FRAME_TRIGGER_DETECTION_VALUES),
+            level_raw=level,
+            level=value_name(level, FRAME_TRIGGER_LEVEL_VALUES),
+        )
+        log.frame_trigger_input = info
+        log.readbacks.update(frame_trigger_readbacks(info))
+        if trigger.mode == TriggerMode.EXTERNAL and trigger.external_frame_one_frame:
+            log.ok("Sensor 觸發輸入（CCF）", describe_frame_trigger_input(info))
 
     def _require_external_trigger_armed(self, interop, trigger: TriggerSettings) -> None:
         with self._lifecycle_lock:

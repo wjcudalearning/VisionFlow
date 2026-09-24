@@ -50,6 +50,7 @@ from devices.ccd_models import (
     TriggerSettings,
 )
 from devices.frame_writer import SaveQueueStats
+from devices.trigger_diagnosis import SEVERITY_LABELS as TRIGGER_DIAGNOSIS_SEVERITY_LABELS
 from gui import icons
 from gui.theme import COLORS
 from gui.widgets.common import NumStepper
@@ -281,6 +282,7 @@ class CcdScreen(QWidget):
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(12)
         right_layout.addWidget(self._build_status_panel())
+        right_layout.addWidget(self._build_trigger_diagnosis_panel())
         right_layout.addWidget(self._build_preview_panel(), 1)
         layout.addWidget(right, 1)
 
@@ -643,6 +645,75 @@ class CcdScreen(QWidget):
             self.status_values[key] = value
         panel.add_widget(grid_widget)
         return panel
+
+    def _build_trigger_diagnosis_panel(self) -> Panel:
+        """Live external-trigger diagnosis: what was observed, ranked causes, one action each.
+
+        Status text only (no controls), shown while an external-trigger preview or capture runs.
+        The severity is spelled out in the headline so it does not rely on color alone.
+        """
+
+        panel = Panel(title="外部觸發診斷")
+        self.trigger_diagnosis_headline = QLabel()
+        self.trigger_diagnosis_headline.setWordWrap(True)
+        self.trigger_diagnosis_facts = _hint(color=COLORS["text_2"])
+        self.trigger_diagnosis_causes = QLabel()
+        self.trigger_diagnosis_causes.setWordWrap(True)
+        self.trigger_diagnosis_causes.setStyleSheet(f"color: {COLORS['text']}; font-size: 12px;")
+        self.trigger_diagnosis_next = _hint(color=COLORS["info"])
+        for label in (
+            self.trigger_diagnosis_headline,
+            self.trigger_diagnosis_facts,
+            self.trigger_diagnosis_causes,
+            self.trigger_diagnosis_next,
+        ):
+            label.setTextFormat(Qt.TextFormat.PlainText)
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        causes_scroll = QScrollArea()
+        causes_scroll.setWidgetResizable(True)
+        causes_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        causes_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        causes_scroll.setWidget(self.trigger_diagnosis_causes)
+        causes_scroll.setMaximumHeight(240)
+        self.trigger_diagnosis_causes_scroll = causes_scroll
+        panel.add_widget(self.trigger_diagnosis_headline)
+        panel.add_widget(self.trigger_diagnosis_facts)
+        panel.add_widget(causes_scroll)
+        panel.add_widget(self.trigger_diagnosis_next)
+        self.trigger_diagnosis_panel = panel
+        self.trigger_diagnosis = None
+        panel.setVisible(False)
+        return panel
+
+    def set_trigger_diagnosis(self, diagnosis) -> None:
+        """Show a `TriggerDiagnosis`, or hide the panel when no external-trigger watch runs."""
+
+        self.trigger_diagnosis = diagnosis
+        if diagnosis is None:
+            self.trigger_diagnosis_panel.setVisible(False)
+            return
+        color = {
+            "ok": COLORS["pass"],
+            "info": COLORS["info"],
+            "warning": COLORS["warn"],
+            "error": COLORS["ng"],
+        }.get(diagnosis.severity, COLORS["text"])
+        label = TRIGGER_DIAGNOSIS_SEVERITY_LABELS.get(diagnosis.severity, diagnosis.severity)
+        self.trigger_diagnosis_headline.setStyleSheet(f"color: {color}; font-size: 13px; font-weight: 600;")
+        self.trigger_diagnosis_headline.setText(f"【{label}】{diagnosis.headline}")
+        self.trigger_diagnosis_facts.setText("\n".join(f"・{fact}" for fact in diagnosis.facts))
+        cause_lines: list[str] = []
+        for index, cause in enumerate(diagnosis.causes, 1):
+            if cause_lines:
+                cause_lines.append("")
+            cause_lines.append(f"{index}. {cause.title}（可能性：{cause.likelihood}）")
+            cause_lines.append(f"　為什麼：{cause.why}")
+            cause_lines.append(f"　怎麼做：{cause.action}")
+        self.trigger_diagnosis_causes.setText("\n".join(cause_lines))
+        self.trigger_diagnosis_causes_scroll.setVisible(bool(cause_lines))
+        self.trigger_diagnosis_next.setText(diagnosis.next_step)
+        self.trigger_diagnosis_next.setVisible(bool(diagnosis.next_step))
+        self.trigger_diagnosis_panel.setVisible(True)
 
     def _build_preview_panel(self) -> Panel:
         self.fit_button = _button("符合視窗", icon_name="fit")

@@ -209,6 +209,11 @@ class ExternalCaptureWatch:
     def triggered(self) -> bool:
         return self._triggered
 
+    @property
+    def phase_start(self) -> int:
+        """Encoder value where the current phase (waiting for a trigger, or collecting lines) began."""
+        return self._start
+
     def _begin_phase(self, encoder_value: int, triggered: bool) -> None:
         self._start = int(encoder_value)
         self._triggered = bool(triggered)

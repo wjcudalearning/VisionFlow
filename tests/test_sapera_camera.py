@@ -9,6 +9,9 @@ from pathlib import Path
 import numpy as np
 
 from devices.ccd_models import (
+    ACQUISITION_EVENT_LINE_TRIGGER_TOO_FAST,
+    ACQUISITION_EVENT_TRIGGER,
+    ACQUISITION_EVENT_TRIGGER_IGNORED,
     AcquisitionSettings,
     CameraConnectionSettings,
     CameraState,
@@ -16,7 +19,15 @@ from devices.ccd_models import (
     TriggerMode,
     TriggerSettings,
 )
-from devices.sapera_api import ACQ_CAPABILITIES, ACQ_PARAMETERS, ACQ_VALUES, BufferFormat, SaperaError
+from devices.sapera_api import (
+    ACQ_CAPABILITIES,
+    ACQ_PARAMETERS,
+    ACQ_VALUES,
+    FRAME_TRIGGER_INPUT_PARAMETERS,
+    SAPERA_API_MANIFEST,
+    BufferFormat,
+    SaperaError,
+)
 from devices.sapera_camera import EXPOSURE_FEATURES, READBACK_KEYS, STOP_COOLDOWN_SEC, SaperaLineScanCamera
 
 SERVER = "Xtium-CL_MX4_1"
@@ -54,6 +65,8 @@ class FakeSaperaInterop:
         self.params = {name: 0 for name in ACQ_PARAMETERS}
         self.params.update(INT_LINE_TRIGGER_FREQ_MIN=100, INT_LINE_TRIGGER_FREQ_MAX=40000)
         self.missing_params = {"CAM_LINE_TRIGGER_FREQ_MIN", "CAM_LINE_TRIGGER_FREQ_MAX"}
+        # Stand-in SapAcquisition.Val numbers; the camera decodes readbacks through acq_value(), never literals.
+        self.values = {"RISING_EDGE": 0x04, "FALLING_EDGE": 0x08, "LEVEL_TTL": 0x01, "LEVEL_24VOLTS": 0x04}
         self.capability = 0b0110
         self.fail_create: set[str] = set()
         self.raise_on: dict[str, BaseException] = {}
@@ -180,6 +193,9 @@ class FakeSaperaInterop:
 
     def acq_capability(self, acquisition, name):
         return self.capability
+
+    def acq_value(self, value_name):
+        return self.values.get(value_name)
 
     def acq_set_cc1(self, acquisition, value_name):
         self._record("set_cc1", value_name)
@@ -902,6 +918,65 @@ class AcquisitionTests(SaperaCameraTestBase):
         self.assertEqual(seen, [CameraState.IDLE])
 
 
+class FrameTriggerDiagnosisTests(SaperaCameraTestBase):
+    def ccf_sensor_input(self, source=1, detection=0x04, level=0x01):
+        self.interop.params.update(
+            EXT_FRAME_TRIGGER_SOURCE=source, EXT_FRAME_TRIGGER_DETECTION=detection, EXT_FRAME_TRIGGER_LEVEL=level
+        )
+
+    def test_external_one_frame_connect_reads_the_ccf_sensor_input_without_writing_it(self):
+        self.ccf_sensor_input(source=2, detection=0x04, level=0x04)
+        self.connect(mode=TriggerMode.EXTERNAL, one_frame=True)
+
+        info = self.camera.frame_trigger_input()
+        self.assertEqual((info.enabled, info.source), (1, 2))
+        self.assertEqual((info.detection, info.level), ("RISING_EDGE", "LEVEL_24VOLTS"))
+        readbacks = self.camera.apply_readbacks()
+        self.assertEqual((readbacks["FTS"], readbacks["FTD"], readbacks["FTL"]), ("2", "RISE", "24V"))
+        note = next(note for note in self.camera.apply_notes() if note.item == "Sensor 觸發輸入（CCF）")
+        self.assertIsNone(note.code)
+        self.assertIn("24V", note.detail)
+        written = {name for name, _value in self.int_writes()}
+        self.assertFalse(written & set(FRAME_TRIGGER_INPUT_PARAMETERS), "the CCF owns the Sensor input")
+
+    def test_unknown_values_keep_their_numbers_and_missing_parameters_do_not_fail_connect(self):
+        self.ccf_sensor_input(source=0, detection=0x40, level=0x01)
+        self.interop.missing_params.add("EXT_FRAME_TRIGGER_LEVEL")
+        self.interop.values.pop("LEVEL_TTL")
+        status = self.connect(mode=TriggerMode.EXTERNAL, one_frame=True)
+
+        self.assertEqual(status.state, CameraState.IDLE)
+        info = self.camera.frame_trigger_input()
+        self.assertEqual((info.detection_raw, info.detection, info.level_raw), (0x40, "", None))
+        readbacks = self.camera.apply_readbacks()
+        self.assertEqual(readbacks["FTD"], "64")
+        self.assertNotIn("FTL", readbacks)
+        self.assertEqual([note.code for note in self.camera.apply_notes() if note.code], [])
+
+    def test_continuous_connect_keeps_the_readback_but_adds_no_sensor_note(self):
+        self.ccf_sensor_input()
+        self.connect()
+        self.assertEqual(self.camera.frame_trigger_input().level, "LEVEL_TTL")
+        self.assertNotIn("Sensor 觸發輸入（CCF）", [note.item for note in self.camera.apply_notes()])
+
+    def test_grabber_events_are_counted_by_kind_and_reset_on_reconnect(self):
+        self.connect(mode=TriggerMode.EXTERNAL, one_frame=True)
+        for name in ("ExternalTrigger", "ExternalTrigger2", "ExternalTriggerIgnored", "LineTriggerTooFast"):
+            self.interop.on_acq_event(name)
+        self.interop.on_acq_event("SomethingElse")
+
+        self.assertEqual(
+            self.camera.acquisition_event_counts(),
+            {ACQUISITION_EVENT_TRIGGER: 2, ACQUISITION_EVENT_TRIGGER_IGNORED: 1, ACQUISITION_EVENT_LINE_TRIGGER_TOO_FAST: 1},
+        )
+        self.assertEqual(len(self.triggers), 2, "only accepted triggers reach the trigger listener")
+
+        self.camera.disconnect()
+        self.assertIsNone(self.camera.frame_trigger_input())
+        self.connect(mode=TriggerMode.EXTERNAL, one_frame=True)
+        self.assertEqual(self.camera.acquisition_event_counts(), {})
+
+
 class CleanupTests(SaperaCameraTestBase):
     def test_disconnect_destroys_then_disposes_in_xx_ccd_order(self):
         self.connect()
@@ -966,6 +1041,11 @@ class RuntimeAvailabilityTests(unittest.TestCase):
         self.assertFalse(availability.available)
         self.assertIn("E-0301", availability.reason)
         self.assertIn("GetParameter", availability.reason)
+
+    def test_frame_trigger_readback_is_probed_not_required_by_the_manifest(self):
+        described = " ".join(member.describe() for member in SAPERA_API_MANIFEST)
+        for name in FRAME_TRIGGER_INPUT_PARAMETERS:
+            self.assertNotIn(name, described, "a build without it must not fail E-0301")
 
     def test_every_acquisition_name_used_by_the_camera_is_in_the_api_manifest(self):
         source = Path("devices/sapera_camera.py").read_text(encoding="utf-8")

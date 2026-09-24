@@ -12,10 +12,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from devices.ccd_models import (
+    ACQUISITION_EVENT_TRIGGER_IGNORED,
     CameraConnectionSettings,
     CameraRecipeSettings,
     CameraState,
     DeviceError,
+    FrameTriggerInput,
     ImageSaveFormat,
     MeterWheelSettings,
     SaveSettings,
@@ -434,6 +436,64 @@ class ControllerTriggerAutomationTests(unittest.TestCase):
 
         self.controller.stop_preview()
         self.assertIsNone(self.controller.external_capture_watch)
+
+    def test_missing_sensor_trigger_is_diagnosed_once_with_ranked_causes_on_screen(self):
+        self.camera.simulated_frame_trigger_input = FrameTriggerInput(
+            enabled=1, source=1, detection_raw=4, detection="RISING_EDGE", level_raw=1, level="LEVEL_TTL"
+        )
+        self._connect(TriggerSettings(TriggerMode.EXTERNAL, True))
+        self._connect_meter_wheel()
+        self.controller.apply_compare_increment(1)
+        self.controller.start_preview()
+
+        diagnosis = self.controller.trigger_diagnosis
+        self.assertEqual(diagnosis.code, "waiting")
+        self.assertTrue(self.screen.trigger_diagnosis_panel.isVisibleTo(self.screen))
+        self.assertIn("【進行中】", self.screen.trigger_diagnosis_headline.text())
+
+        self.meter_wheel.advance(2 * 720)
+        self.controller.poll_meter_wheel()
+        diagnosis = self.controller.trigger_diagnosis
+        self.assertEqual(diagnosis.code, "no_trigger")
+        errors = [message for message, kind in self.notices if kind == "error"]
+        self.assertEqual(len(errors), 1, "the watch's own no_trigger notice is replaced, not duplicated")
+        self.assertIn("最可能", errors[0])
+        self.assertIn("【異常】", self.screen.trigger_diagnosis_headline.text())
+        self.assertIn("TTL（5V）", self.screen.trigger_diagnosis_causes.text())
+        self.assertIn("分辨測試", self.screen.trigger_diagnosis_next.text())
+
+        self.meter_wheel.advance(720)
+        self.controller.poll_meter_wheel()
+        self.assertEqual(len([kind for _message, kind in self.notices if kind == "error"]), 1)
+
+        self.controller.stop_preview()
+        self.assertIsNone(self.controller.trigger_diagnosis)
+        self.assertFalse(self.screen.trigger_diagnosis_panel.isVisibleTo(self.screen))
+
+    def test_ignored_sensor_triggers_are_told_apart_from_missing_ones(self):
+        self._connect(TriggerSettings(TriggerMode.EXTERNAL, True))
+        self._connect_meter_wheel()
+        self.controller.start_preview()
+        self.camera.emit_acquisition_event(ACQUISITION_EVENT_TRIGGER_IGNORED)
+        self.meter_wheel.advance(10)
+        self.controller.poll_meter_wheel()
+
+        self.assertEqual(self.controller.trigger_diagnosis.code, "ignored")
+        self.assertTrue(any("被忽略" in message and kind == "error" for message, kind in self.notices))
+
+    def test_a_completed_frame_starts_a_fresh_diagnosis_phase(self):
+        self._connect(TriggerSettings(TriggerMode.EXTERNAL, True))
+        self._connect_meter_wheel()
+        self.controller.start_preview()
+        self.camera.emit_acquisition_event(ACQUISITION_EVENT_TRIGGER_IGNORED)
+        self.camera.emit_external_trigger()
+        self.assertTrue(_wait_until(lambda: self.controller.external_capture_watch.triggered))
+        self.assertEqual(self.controller.trigger_diagnosis.code, "running")
+
+        self.camera.emit_frame()
+        self.assertTrue(_wait_until(lambda: self.controller.external_capture_watch.frames == 1))
+        self.assertEqual(self.controller.trigger_diagnosis.code, "ok")
+        self.assertIn("【正常】", self.screen.trigger_diagnosis_headline.text())
 
     def test_external_trigger_moves_a_saved_compare_that_is_behind_the_encoder(self):
         self._connect(TriggerSettings(TriggerMode.EXTERNAL, True, True))

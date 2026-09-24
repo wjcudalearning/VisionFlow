@@ -177,6 +177,30 @@ class TriggerSettings:
         return TriggerSettings(mode, one_frame, compare_follow, set_encoder)
 
 
+# Backend-neutral grabber events counted by `LineScanCamera.acquisition_event_counts()`.
+ACQUISITION_EVENT_TRIGGER = "trigger"  # external frame trigger accepted
+ACQUISITION_EVENT_TRIGGER_IGNORED = "trigger_ignored"  # frame trigger arrived while the grabber was busy
+ACQUISITION_EVENT_FRAME_TRIGGER_TOO_SLOW = "frame_trigger_too_slow"
+ACQUISITION_EVENT_LINE_TRIGGER_TOO_SLOW = "line_trigger_too_slow"
+ACQUISITION_EVENT_LINE_TRIGGER_TOO_FAST = "line_trigger_too_fast"
+
+
+@dataclass(frozen=True)
+class FrameTriggerInput:
+    """External frame-trigger input as the grabber holds it after connect; the CCF decides it.
+
+    `detection`/`level` are backend value names (Sapera `SapAcquisition.Val`, e.g. `RISING_EDGE`,
+    `LEVEL_24VOLTS`) when the raw number matched one, else empty. Raw numbers stay for the report.
+    """
+
+    enabled: int | None = None
+    source: int | None = None
+    detection_raw: int | None = None
+    detection: str = ""
+    level_raw: int | None = None
+    level: str = ""
+
+
 @dataclass(frozen=True)
 class CameraRecipeSettings:
     """Product-level camera settings persisted in a Recipe's optional `camera` section."""
