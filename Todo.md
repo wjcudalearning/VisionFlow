@@ -1180,6 +1180,7 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 
 ## 完成紀錄
 
+- [x] 2026-09-24：準備 VisionFlow AOI `v1.8.7` CUDA-enabled Windows x64 發行原始碼，GUI Pipeline 版本、根目錄 README、文件索引與 release notes 同步為 1.8.7。發行內容為 CCD 外部觸發診斷（CCF Sensor 輸入讀回、擷取卡事件計數、排序原因與處理步驟面板）；只包含已提交變更，工作區進行中的 P14 修改不在本版。相機功能尚待相機機台實測。正式套件以本 release commit 的乾淨 worktree 建置，並以 CUDA 13.3／`sm_86` 重建並驗證 DLL；套件、smoke、tag 與 GitHub Release 結果另於發布後記錄。
 - [x] 2026-09-24：新增 CCD 外部觸發診斷（P11）。`SaperaLineScanCamera` 連線時唯讀 CCF 的 Sensor Frame Trigger 來源／觸發方式／電壓，以 `SapAcquisition.Val` 名稱解碼（讀不到時保留原始數字或省略，不影響連線與 E-0301），擷取卡事件改依種類計數；`devices/trigger_diagnosis.py` 以純邏輯規則依米輪行程、觸發／忽略事件、出圖數與 CCF 輸入產生排序原因與處理步驟（觸發方向設反只會讓時間點偏移，排最後）；`CcdController` 在米輪輪詢、收到觸發與出圖時更新診斷，並取代原本 no_trigger／no_frame／reverse 的單行提示；CCD 畫面新增「外部觸發診斷」面板；`docs/sapera-diagnose.md` 補 `FTS／FTD／FTL` 與面板說明。驗證：新增 `tests.test_ccd_trigger_diagnosis`（20 項）與 Sapera 讀值／事件計數、控制器與面板整合測試；完整 unittest 1045 項中 1044 通過，唯一失敗 `test_detector_999_flow_test` 的 batch 摘要 `cancelled` 欄位來自工作區既有未提交的 batch 修改、與本變更無關；compileall、CUDA preflight、`git diff --check`、GUI offscreen smoke 通過。未在相機機台執行。
 - [x] 2026-09-24：逐條核對外部全模組審查建議與目前原始碼，新增 P14 候選待辦（參數治理／可追溯性 6 項、Core／Detector 每圖成本 8 項、GUI 資源 4 項、CUDA／native binding 4 項、CI／打包／倉庫衛生 6 項），並把 `_pattern_template_size()` 的第二條 template 解碼路徑併入 P13 既有 template 快取條目。經核對不成立而未登錄：Detector params 未知鍵（`RecipeManager` 已嚴格拒絕）、並行 tile 路徑遺失 CUDA fallback 原因（並行僅在無 `gpu_active` Detector 時啟用）、`.hypothesis/` 與 `build/` 未忽略；`LogMixin.logger` 鎖成本可忽略不登錄。本次只新增規畫，未改執行程式。
 
