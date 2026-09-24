@@ -13,7 +13,7 @@
 ## 全模組審查修正（P14）
 
 - Detector：每輪重置 preprocessing capability 且 metadata 改輸出副本；401-CS-SN-1 偶數 block 自動調整會明示設定值與有效值；503-CS-SN-1 有自己的名稱與參數宣告；202／203／401-CS-SN-1／505／506 共用程式抽成 helper，並以既有等價測試固定行為。
-- 發行包不再包含只供測試用的 `999-FLOW-TEST` Detector 與 `FLOW_TEST` Recipe。
+- 只供流程測試用的 `999-FLOW-TEST` Detector 會在 Designer 標示「測試用」並顯示警告，避免誤用在正式 Recipe；`FLOW_TEST_AOI_01` 範例仍隨發行包提供。
 - 每張圖成本：並行 tile 路徑跨圖重用 worker 與 thread-local Detector；Batch／資料夾監控／相機監控跨圖重用 `AOIPipeline`，三者的收尾與 GC 節流一致；contour 迴圈與 CPU morphology 減少重複計算。
 - GUI：批量檢測可取消（進行中的圖片完成、未開始者標為「取消」，摘要會列出取消數）；背景工作結束會釋放執行緒；切圖預覽共用 GPU runtime 並降低記憶體；表格篩選與大量 overlay 更新更省資源。
 - CUDA binding：補齊 native export 的參數宣告。RTX 3090 量測後 3×3 形態學、Pattern SAT／NMS 與小型 kernel 合併都沒有可重現收益，因此保留原 kernel，分數精度路徑不變。
