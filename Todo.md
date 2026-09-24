@@ -973,7 +973,7 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 
 ### Core／Detector 每張圖成本
 
-- [ ] **跨影像重用 Recipe template 的灰階解碼**：Pattern Match／Template Anchor Grid 每張圖會重讀固定 template 並轉灰階。以 canonical path、mtime、size 做有界快取或在執行 session 內載入一次；檔案變更即失效，快取資料不可被 matcher 修改。量測 batch／monitor 的冷、暖成本。
+- [ ] **跨影像重用 Recipe template 的灰階解碼**：Pattern Match／Template Anchor Grid 每張圖會重讀固定 template 並轉灰階。以 canonical path、mtime、size 做有界快取或在執行 session 內載入一次；檔案變更即失效，快取資料不可被 matcher 修改。量測 batch／monitor 的冷、暖成本。（2026-09-24 補：`core/pipeline.py` `_pattern_template_size()` 為 VRAM 准入另外完整 `load_image(template_path)` 只取 `.shape`，是獨立於 tiler 的第二條每圖解碼路徑；一併改為讀檔頭或共用同一份 path＋mtime_ns＋size 快取）
 - [ ] **ContourTiler 在 subpixel 關閉時略過全圖灰階轉換**：目前即使不做 subpixel refinement 仍會把整張輸入轉灰階；關閉時應避免這項配置，開啟時再評估只準備 refine 需要的像素區域。以全尺寸圖量測記憶體／時間並確認 Tile metadata、座標與順序不變。
 - [ ] **避免每張影像重算 Recipe provenance**：`inspection_provenance()` 每次讀 Recipe 檔、計算 source SHA-256，並序列化有效 Recipe 計算 canonical SHA-256。讓 batch／monitor 共用同一份不可變 Recipe provenance，依 path＋mtime_ns＋size 失效；不得沿用僅針對 build commit 的既有 cache 來宣稱此項已完成。
 - [ ] **合併重複的 runtime tile 清理**：`AOIPipeline._without_runtime_images()` 與 JSON serializer 都複製 tile dict 並移除 `_tile_image`／`_debug_images`。改為共用一次已驗證的公開結果整理，避免每張圖重複配置；確認 Pipeline 回傳、JSON、debug 輸出仍各自符合公開 schema。
@@ -989,6 +989,53 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 - [ ] **量測米輪輪詢對 GUI 的阻塞**：200 ms `QTimer` 目前直接在 GUI thread 讀取 encoder、compare 與 extension status，DeviceError 亦立即斷線。以真實 driver latency／抖動量測 UI stall；若可重現阻塞，再改成有界序列化的背景讀取，並明確定義錯誤寬限與 stale 狀態，保持硬體命令不並行。
 - [ ] **量測 CUDA resident ROI 前置拷貝與 Gaussian 權重準備**：`vf_plan_execute_roi()` 目前先將 ROI D2D 複製至 scratch；plan 每次執行 Gaussian 也會重建／上傳固定 kernel weights。用 RTX event 與端到端 profile 判斷是否值得讓首個可相容 operator 直接讀 resident ROI，或按 context/plan 重用權重；須維持 pitch、ROI 邊界、plan 等價及舊 DLL fallback。
 - [ ] **盤點 one-shot CUDA primitive 的配置成本**：stateless exports 每次呼叫各自配置／釋放裝置 buffer，與 persistent native plan 的 grow-only buffer 路徑不同。先確認相容舊 DLL或其他實際執行路徑是否常走這些 exports，再量測呼叫占比；只有端到端有可重現收益才設計可重用 buffer，且須維持 ABI v1／thread safety。
+
+## P14：2026-09-24 全模組審查新增待辦
+
+本節依外部全模組審查逐條對照目前原始碼後新增。已排除：與 P13／既有條目重複者（template 解碼已併入 P13 對應條目）、經核對不成立者（Detector params 未知鍵：`RecipeManager` 經 `validate_parameter_mapping()` 已嚴格拒絕；並行 tile 路徑遺失 CUDA fallback 原因：`_tile_worker_count()` 只在沒有 `gpu_active` Detector 時才並行，執行期不會發生 CUDA fallback；`.hypothesis/` 與 `build/` 已被忽略）、以及每圖成本可忽略的 `LogMixin.logger` 鎖。效能項目須先量測；不得改變 PASS/NG、defect 數、bbox、area、confidence、metadata 與排序。
+
+### 正確性、參數治理與可追溯性
+
+- [ ] **`last_preprocess_capability` 每輪重置**：`BaseDetector.run()` 重置 `_detection_stage_durations`／`_run_preprocess_routes`，但未重置 `last_preprocess_capability`；沒有執行任何 plan 的一輪會把上一輪的 backend capability 寫進 `execution.preprocess_capability`。每輪重置並輸出副本，補「同一 Detector 連跑兩張圖，後一張不沿用前一張 capability」測試。
+- [ ] **統一 adaptive block size 的奇數規則**：`detector_401_cs_sn_1.py` `_effective_adaptive_block_size()` 執行期把偶數靜默 +1，PARAM_SPEC 只在標籤寫「偶數自動加一」而未設 `odd: True`；`detector_203_as_ap_1.py` 同一語意在驗證期拒絕偶數。Recipe 可存 156 但 plan／crossover key 實際使用 157。先掃描所有 tracked Recipe 的現值，再決定改為驗證期拒絕（須提供舊 Recipe 遷移或明確錯誤訊息）或保留自動修正但將有效值寫入 metadata。
+- [ ] **401／401-1 confidence 公式納入 schema 或文件化**：`detector_401.py:79`、`detector_401_1.py:97` 以 `min(1.0, area / image_area * 20.0)` 計 confidence，`20.0`／`1.0` 未在 PARAM_SPEC，且 `image_area` 是整張輸入面積。confidence 決定 detector `score`、CSV/JSON 與排序依據。依 AGENT.md Detector 參數契約，新增 admin-only `inner` 參數（預設 20.0／1.0，結果不變）或明確文件化為 Detector 身分固定常數。
+- [ ] **503-CS-SN-1 自有 `detector_name`／參數宣告**：`Detector503CsSn1` 繼承 506 未覆寫 `detector_name`，`definitions()` 對 503 顯示 `global_polygon_detector`；`default_params`／`PARAM_SPEC` 也完全沿用 506（門檻 200 為可調預設值）。確認 503 應有的名稱與參數邊界後明確宣告，補 registry definitions 測試；不得改變既有 Recipe 載入與結果。
+- [ ] **盤點 `Detector202` 未註冊的基底程式**：registry 只註冊 `202-CS-SN-1`（`Detector202_1` 繼承 `Detector202` 且只取 12 個 mask 鍵），`detector_202.py` 的 `detect()`／`_make_binary()`／`_passes_area_filter()` 與 `_LEGACY_IGNORED_SPECS` 對產線不可達，`tests/test_detector_202.py` 仍測這些路徑。確認 202-1 實際使用的方法後，把共用 mask 邏輯留在基底或抽出，移除或明確標示不可達部分，並讓測試改驗 202-CS-SN-1 的產線路徑。
+- [ ] **`999-FLOW-TEST` 與 `FLOW_TEST` Recipe 的發行隔離**：`core/detector_manager.py` 頂層 import 並註冊 `Detector999FlowTest`，`VisionFlow AOI.spec` 收整個 `recipes/`，發行包 GUI 可選到會把每個 Tile 強制 NG／拋錯的 Detector。評估比照 YOLOX `test_only` 標示並在 Designer／結果 `execution` 顯示警告，或由打包排除；須保留 CLI／GUI 流程測試能力。
+
+### Core／Detector 每張圖成本
+
+- [ ] **並行 tile 路徑跨圖重用 worker 與 thread-local Detector**：`core/pipeline.py` `_inspect_tiles_parallel()` 每張圖新建 `ThreadPoolExecutor` 與函式內 `threading.local()`，每個 worker 重建 Detector（連帶 `PreprocessPlanCache` 每圖作廢），而 `_run()` 前面 `create_enabled()` 建立的那套在並行路徑不執行檢測。評估把 executor／thread-local Detector 提到 pipeline／session 層，在 Recipe 參數不變時跨圖重用；保持輸入順序、thread-local 隔離與 GPU 單一序列化路徑，以 opt-in `tile_workers>1` 量測收益。
+- [ ] **Batch／Monitor／Camera Monitor 跨圖重用 `AOIPipeline`**：`batch_processor.py`、`monitor_processor.py`、`camera_monitor_processor.py` 每張圖（camera 每幀）新建 `AOIPipeline`（內含 RecipeManager／DetectorManager）。monitor／camera 為單執行緒迴圈且 recipe_path、output_dir、gpu_session 整段不變；先確認 `AOIPipeline.run()` 對所有 per-run 狀態都已重置，再移到迴圈外，batch 多 worker 用 thread-local 一份。補連跑多張結果與逐張新建完全相同的測試。
+- [ ] **統一三個 processor 的逐圖收尾與 GC 節流**：monitor／camera 每張圖在 `finally` 無條件 `gc.collect(0)`，batch 已有 `AOI_BATCH_GC_INTERVAL` 節流；三者的 summary 轉換、`compact_inspection_result`、`_discover_images()`、GPU warm-up 也重複。抽共用 helper 並統一 GC 策略，保留各模式既有 summary schema；以長時間 monitor 量測 RSS 與每張延遲。
+- [ ] **contour 家族迴圈內 hoist 固定參數與 base metadata**：`detector_202.py`、`detector_203_as_ap_1.py`、`detector_401_cs_sn_1.py`、`detector_505_as_sn_1.py` 在每個輪廓內重複 `params.get` 並重建固定欄位 metadata dict。迴圈外預解析門檻與組 `base_meta`，迴圈內 `dict(base_meta)` 後補輪廓欄位；每個 defect 仍須是獨立可寫 dict、欄位值與順序不變。以大量輪廓 ROI 量測。
+- [ ] **移除多餘 `astype(int)`**：`detector_401.py:95` 對已 `np.round().astype(int)` 的 box 再 `astype(int)`；`detector_202.py:222`、`detector_505_as_sn_1.py:158` 對 int32 contour 頂點再 `astype(int)`。改為直接 `.tolist()`，以 JSON 輸出比對確認型別與值不變。
+- [ ] **CPU morphology reference 快取 structuring element**：`core/preprocess_plan.py` `_morphology()` 每次呼叫重建 operations 對照表與 `cv2.getStructuringElement`。提到模組層並以 `(shape, kernel_size)` 快取，kernel 為唯讀；plan signature 與輸出逐像素不變。
+- [ ] **401-2 white-pixel 統計減少暫存**（隨 401-CS-AP-2 暫緩，恢復使用時再做）：`_contour_white_pixel_stats()` 每個輪廓 `contour.copy()`＋兩次座標減法＋新 mask＋`bitwise_and` 暫存；改用 `drawContours(..., offset=(-x, -y))` 與可重用 mask／dst buffer，`countNonZero` 結果須逐一相同。
+- [ ] **Detector 家族共用程式抽取**（可維護性）：202／203／401-CS-SN-1／505／506 之間有多段逐字相同的四邊內縮／exclusion mask、contour 語意、ROI、cached-plan 樣板與 PARAM_SPEC 片段；506→503 已證明繼承可行。先以既有 golden／等價測試固定輸出，再抽 `detectors/` 內共用 helper（mask、ROI、plan cache、spec factory），不得改 registry ID、參數分組與 Recipe 欄位。
+
+### GUI 資源與回應性
+
+- [ ] **`WorkerWorkflowController` 釋放 QThread**：`gui/workflow_controllers.py` 以 `QThread(self.parent)` 建立 thread，結束時只 `worker.deleteLater()`，`clear()` 不處理 thread；每次背景工作都在 `MainWindow` 留下一個 QThread 子物件。`thread.finished` 連接 `thread.deleteLater`，補「連跑 N 次後 QThread 子物件數不增加」測試。
+- [ ] **`TilePreviewWorker` 不再逐次建立 `GpuRuntime` 並降低記憶體**：`gui/workers.py` 每次切圖預覽直接 `GpuRuntime(...)`（載入 DLL／建 context），且在全解析度影像上繪製後才縮圖、再經 `cvtColor`／`ascontiguousarray`／`tobytes()` 多份緩衝。比照已完成的 `ImagePreviewWorker` 作法：改用共用 session 或 CPU（量測 GPU tiling 預覽是否真有收益），先縮圖再按比例繪製；需確認 strict CUDA 行為與預覽座標不變。
+- [ ] **批量檢測可取消**：`BatchInspectionWorker` 沒有 `stop()`（monitor 有），`main_window.py` 以多段模態框拒絕關窗。加入合作式取消（完成中的圖片寫完、未開始者標記取消），摘要與關窗流程一致，並補取消／關窗測試。
+- [ ] **表格 proxy 與 viewer overlay 更新成本**：`gui/table_models.py` `set_status()` 用 `invalidate()` 而非 `invalidateFilter()`，`filterAcceptsRow()` 每列呼叫 `row_dict()` 建 dict；`gui/image_viewer.py` `set_defects` 全量重建 overlay item、每項新建 QFont，`set_selected_defect` 逐項重設 pen。以 1000 筆結果與大量 defect 量測篩選／選取延遲後再改，行為與既有 repaint 契約不變。
+
+### CUDA／native binding（需 RTX 量測者維持未勾選）
+
+- [ ] **補齊缺少 `argtypes`／`restype` 的 native export**：`core/gpu_runtime.py` 對 `vf_preprocess_401_2_u8` 只探測存在未設原型，`_call_image` 派送的 legacy one-shot primitives 亦未宣告。目前參數皆為 int／float／pointer 故 ctypes 預設映射恰好正確，但未來若加入 `size_t`／`uint64_t` 參數會在 x64 靜默截斷。依 header 簽名補原型並以 fake DLL 測試參數數量／型別；不改 ABI v1。另評估無狀態 primitive 是否需要經過 `_queue_slots`／`_lock` 全域序列化。
+- [ ] **3×3 形態學走 shared-memory kernel**：`launch_morph_pass()` 只有 `radius == 2` 用 `morph_k5_shared_kernel`，其餘半徑走全域 O(k²) `morph_kernel`；`PRODUCT_A_AOI_01`、`PRODUCT_A_CIRCLE_401_1_AOI_01` 為 `morph_kernel: 3`。將 shared kernel 模板化 `template<int R>` 覆蓋 R=1，逐像素與 OpenCV 相同；先前 van Herk 原型「小半徑變慢」的結論針對不同演算法，本項仍須 RTX A/B 證明收益。
+- [ ] **Pattern SAT 欄方向與 NMS 單緒 kernel**：`pattern_sat_columns_kernel` 每欄一條執行緒逐列累加（2048 寬僅約 2048 緒）；`pattern_select_nms_kernel<<<1,1>>>` 以單緒 O(n²) 並在內迴圈重算 bucket。int64 加法可結合，SAT 可改 chunk-carry scan；NMS bucket 可預先計算。Template Anchor Grid 定位目前 median 約 3.29 ms，須先確認占比再投入。
+- [ ] **小型 launch／整數運算合併評估**：`cudaMemsetAsync`＋pad kernel、`ccl_init`＋`cand_ramp`、`match_publish`＋`match_unpack<<<1,1>>>` 可合併；k5 tile 載入等像素迴圈有 runtime 除數的 `/`、`%`。以 Nsight 量測 launch overhead 占比後再做。分數 kernel 的 fp64 除法／sqrt 屬等價紅線（分數量化 22 bits），未證明 fp32 誤差 < 0.5 LSB 並跑差分前不得改。
+
+### CI、打包與倉庫衛生
+
+- [ ] **GitHub Actions 加 `concurrency`**：4 支 workflow 皆無 `concurrency`，兩支 GPU workflow 可能同時占用同一台 self-hosted RTX，污染 P95 退化 gate。GPU job 以共用 group 序列化，一般 CI 以 branch 為 group 取消舊 run。
+- [ ] **RTX benchmark baseline 可更新**：`rtx3090-validation.yml` cache key 固定 `rtx3090-benchmark-baseline-v1`，且僅在 cache miss 時儲存，baseline 建立後永久凍結。改為帶版本／hash 的 key＋`restore-keys`，並以明確的 promote 輸入更新 baseline。
+- [ ] **CI 觸發範圍與 fork 保護**：`windows-ci.yml` 無 `paths-ignore`，只改文件也跑完整測試；`github.repository ==` 保護只在 1 支 workflow，heartbeat 查詢該 workflow 在 fork 上必失敗。補 docs-only 略過（須保留 required check 可通過的方式）與一致的 repository 保護。
+- [ ] **打包腳本一致性與可重現性**：`build_exe.ps1`、`build_ng_tile_area_tool.ps1`、`build_pattern_grid_tile_exporter.ps1`、`build_tile_defect_distribution_exporter.ps1` 未用 `-LiteralPath`（路徑含 `[`、`]` 時誤判）；所有 spec `upx=True` 使壓縮與否取決於建置機 PATH；只有 Traditional CV Tuning Tool spec 有 `version=`。統一 `-LiteralPath`、明確 `upx=False`（或固定 UPX 路徑）、為各 EXE 產生版本資源；抽共用 PyInstaller build helper 減少重複，維持 ASCII-only。
+- [ ] **依賴來源一致性**：`requirements.txt` 無 CI／build／測試消費者，build 腳本只要求 `env\Scripts\python.exe` 存在、不檢查是否符合 lock。新增 requirements／lock 一致性測試，build 前驗證 venv 與 lock 相符（或明確移除 `requirements.txt` 並更新 README）。
+- [ ] **`.gitignore` 補漏**：`outputs/csv/` 等報表輸出未被忽略（只擋 `outputs/logs/`、`outputs/ccd_snapshots/`），`node_modules/`、`*.pdb`／`*.ilk`／`*.obj` 亦未忽略；全域 `*.zip` 會連測試 fixture zip 一併忽略。補規則並對需追蹤的 fixture 加例外，先確認不影響現有 tracked 檔案。
 
 ## RTX 3090 編譯與實機驗收
 
@@ -1130,6 +1177,8 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 - [ ] 加速不得犧牲 GUI 回應、打包啟動、結果追溯、錯誤訊息或 CPU fallback。
 
 ## 完成紀錄
+
+- [x] 2026-09-24：逐條核對外部全模組審查建議與目前原始碼，新增 P14 候選待辦（參數治理／可追溯性 6 項、Core／Detector 每圖成本 8 項、GUI 資源 4 項、CUDA／native binding 4 項、CI／打包／倉庫衛生 6 項），並把 `_pattern_template_size()` 的第二條 template 解碼路徑併入 P13 既有 template 快取條目。經核對不成立而未登錄：Detector params 未知鍵（`RecipeManager` 已嚴格拒絕）、並行 tile 路徑遺失 CUDA fallback 原因（並行僅在無 `gpu_active` Detector 時啟用）、`.hypothesis/` 與 `build/` 未忽略；`LogMixin.logger` 鎖成本可忽略不登錄。本次只新增規畫，未改執行程式。
 
 - [x] 2026-09-23：核對外部程式審查建議與目前原始碼，新增 P13 候選待辦：4 項 correctness/diagnostic 缺陷，以及 template/cache、monitor 掃描、YOLOX、CCD 與條件式 CUDA profile 工作；本次只新增規畫，未改執行程式。確認 `CameraMonitorProcessor` 正常停止時已關閉 `CameraFrameQueue`、YOLOX 座標還原使用實際 resize 寬高、persistent plan 已快取 INTER_AREA 表，因此不把這幾項誤列為待辦；`xx_ccd` 保持另一 repository 的行為參考。
 
