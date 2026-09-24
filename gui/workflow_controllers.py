@@ -37,6 +37,7 @@ class WorkerWorkflowController:
         for signal in terminal_signals:
             signal.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
         thread.finished.connect(on_thread_finished)
         thread.start()
         return thread, worker
@@ -47,7 +48,9 @@ class WorkerWorkflowController:
 
 
 class BatchWorkflowController(WorkerWorkflowController):
-    pass
+    def stop(self) -> None:
+        if self.worker is not None:
+            self.worker.stop()
 
 
 class MonitorWorkflowController(WorkerWorkflowController):

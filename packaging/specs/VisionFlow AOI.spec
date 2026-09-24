@@ -6,6 +6,7 @@ from pathlib import Path
 
 SPEC_DIR = Path(SPECPATH).resolve()
 ROOT = SPEC_DIR.parent.parent
+VERSION_INFO = ROOT / 'build' / 'version_info' / 'VisionFlow AOI.txt'
 
 cuda_dll = ROOT / 'gpu' / 'visionflow_cuda.dll'
 cuda_binaries = [(str(cuda_dll), 'gpu')] if cuda_dll.exists() else []
@@ -55,20 +56,21 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    version=str(VERSION_INFO),
 )
 coll = COLLECT(
     exe,
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name='VisionFlow AOI',
 )

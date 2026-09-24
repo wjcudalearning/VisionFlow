@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import contextlib
 import datetime
-import gc
 import os
 import threading
 import time
@@ -15,10 +14,13 @@ import cv2
 
 from core.csv_summary import CsvSummaryExporter
 from core.gpu_session import GpuExecutionSession
-from core.image_loader import SUPPORTED_EXTENSIONS
 from core.logging_system import LogMixin
 from core.pipeline import AOIPipeline
-from core.result_compactor import compact_inspection_result
+from core.processor_common import (
+    GenerationZeroGcThrottle,
+    discover_supported_images,
+    summarize_pipeline_result,
+)
 
 
 _OPENCV_THREAD_BUDGET_LOCK = threading.Lock()
@@ -67,6 +69,7 @@ class BatchInspectionProcessor(LogMixin):
         progress_callback: BatchProgressCallback | None = None,
         max_workers: int | None = None,
         gpu_session: GpuExecutionSession | None = None,
+        cancel_event: threading.Event | None = None,
     ):
         self.input_dir = Path(input_dir)
         self.recipe_path = Path(recipe_path)
@@ -77,28 +80,58 @@ class BatchInspectionProcessor(LogMixin):
         self.max_workers = max_workers
         # A GUI-owned session outlives this batch so its context, buffers and warm-up are reused.
         self.gpu_session = gpu_session
-        self._gc_interval = self._resolve_gc_interval()
-        self._gc_lock = threading.Lock()
-        self._gc_counter = 0
+        self._stop_event = cancel_event if cancel_event is not None else threading.Event()
+        self._gc_throttle = GenerationZeroGcThrottle()
+        self._gc_interval = self._gc_throttle.interval
+        self._pipeline_local = threading.local()
+        self._pipeline_lock = threading.Lock()
+        self._worker_pipelines: list[AOIPipeline] = []
+
+    @contextlib.contextmanager
+    def _worker_pipeline_scope(self):
+        try:
+            yield
+        finally:
+            with self._pipeline_lock:
+                pipelines = self._worker_pipelines
+                self._worker_pipelines = []
+                self._pipeline_local = threading.local()
+            for pipeline in pipelines:
+                pipeline.close()
 
     @staticmethod
     def _resolve_gc_interval() -> int:
-        configured = os.getenv("AOI_BATCH_GC_INTERVAL")
-        if configured is not None:
-            try:
-                return max(0, int(configured))
-            except ValueError:
-                pass
-        return 8
+        return GenerationZeroGcThrottle().interval
 
     def _maybe_collect(self) -> None:
-        if self._gc_interval <= 0:
-            return
-        with self._gc_lock:
-            self._gc_counter += 1
-            due = self._gc_counter % self._gc_interval == 0
-        if due:
-            gc.collect(0)
+        self._gc_throttle.maybe_collect()
+
+    def stop(self) -> None:
+        """Request cooperative cancellation after any currently running image finishes."""
+        self._stop_event.set()
+
+    def _cancelled_result(self, image_path: Path) -> BatchImageResult:
+        return BatchImageResult(
+            image_path=image_path,
+            final_result="CANCELLED",
+            defect_count=0,
+            ng_count=0,
+            tile_count=0,
+            duration_sec=0.0,
+            outputs={},
+            detail={},
+            error="Cancelled before inspection started.",
+        )
+
+    def _process_image_if_active(
+        self,
+        image_path: Path,
+        batch_output_dir: Path,
+        gpu_session: GpuExecutionSession,
+    ) -> BatchImageResult:
+        if self._stop_event.is_set():
+            return self._cancelled_result(image_path)
+        return self._process_image(image_path, batch_output_dir, gpu_session)
 
     def run(self) -> dict:
         image_paths = self.discover_images()
@@ -126,21 +159,19 @@ class BatchInspectionProcessor(LogMixin):
         with self._opencv_thread_budget(worker_count), GpuExecutionSession.scoped(
             self.recipe_path, self.gpu_session
         ) as gpu_session:
-            # The DLL and CUDA context exist once the session is built, before any image is timed.
-            # No sample run: it would cost a full inspection to save a one-time allocation.
-            gpu_warmup = {
-                "session_ms": round((time.perf_counter() - session_started) * 1000.0, 1),
-                **gpu_session.warm_up_before_run(self.recipe_path),
-            }
+            # Batch records the shared context without paying for a sample inspection.
+            gpu_warmup = gpu_session.prepare_processor_run(
+                self.recipe_path, session_started
+            )
             self.logger.info("Batch GPU session ready: %s", gpu_warmup)
             self._progress(
                 0,
                 f"{GpuExecutionSession.warm_up_notice(gpu_warmup)}批量檢測執行中，使用 {worker_count} 個 worker",
             )
-            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            with self._worker_pipeline_scope(), ThreadPoolExecutor(max_workers=worker_count) as executor:
                 futures = {
                     executor.submit(
-                        self._process_image, image_path, batch_output_dir, gpu_session
+                        self._process_image_if_active, image_path, batch_output_dir, gpu_session
                     ): index
                     for index, image_path in enumerate(image_paths)
                 }
@@ -166,7 +197,11 @@ class BatchInspectionProcessor(LogMixin):
                     completed += 1
                     self._progress(
                         int(completed / total * 100),
-                        f"批量 {completed}/{total}：已完成 {image_path.name}",
+                        (
+                            f"批量取消中 {completed}/{total}：{image_path.name} 已結束"
+                            if self._stop_event.is_set()
+                            else f"批量 {completed}/{total}：已完成 {image_path.name}"
+                        ),
                     )
 
         results = [results_by_index[index] for index in range(total)]
@@ -187,31 +222,35 @@ class BatchInspectionProcessor(LogMixin):
         self.logger.info("Batch image started: image=%s", image_path)
         result: dict | None = None
         try:
-            pipeline = AOIPipeline(
-                recipe_path=self.recipe_path,
-                output_dir=batch_output_dir,
-                output_overrides=self.output_overrides,
-                gpu_session=gpu_session,
-            )
+            pipeline = getattr(self._pipeline_local, "pipeline", None)
+            if pipeline is None:
+                pipeline = AOIPipeline(
+                    recipe_path=self.recipe_path,
+                    output_dir=batch_output_dir,
+                    output_overrides=self.output_overrides,
+                    gpu_session=gpu_session,
+                )
+                self._pipeline_local.pipeline = pipeline
+                with self._pipeline_lock:
+                    self._worker_pipelines.append(pipeline)
             result = pipeline.run(image_path)
-            summary = result.get("summary", {})
-            compact_detail = compact_inspection_result(result)
+            fields = summarize_pipeline_result(result)
             self.logger.info(
                 "Batch image completed: image=%s final=%s defects=%s duration=%s",
                 image_path.name,
-                result.get("final_result", "-"),
-                summary.get("defect_count", 0),
-                result.get("duration_sec", 0),
+                fields["final_result"],
+                fields["defect_count"],
+                fields["duration_sec"],
             )
             return BatchImageResult(
                 image_path=image_path,
-                final_result=str(result.get("final_result", "-")),
-                defect_count=int(summary.get("defect_count", 0)),
-                ng_count=int(summary.get("ng_count", 0)),
-                tile_count=int(summary.get("tile_count", 0)),
-                duration_sec=float(result.get("duration_sec", 0) or 0),
-                outputs=result.get("outputs", {}),
-                detail=compact_detail,
+                final_result=fields["final_result"],
+                defect_count=fields["defect_count"],
+                ng_count=fields["ng_count"],
+                tile_count=fields["tile_count"],
+                duration_sec=fields["duration_sec"],
+                outputs=fields["outputs"],
+                detail=fields["detail"],
             )
         finally:
             result = None
@@ -223,12 +262,7 @@ class BatchInspectionProcessor(LogMixin):
         if not self.input_dir.is_dir():
             raise NotADirectoryError(f"Batch input is not a folder: {self.input_dir}")
 
-        iterator = self.input_dir.rglob("*") if self.recursive else self.input_dir.iterdir()
-        return sorted(
-            path
-            for path in iterator
-            if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS
-        )
+        return discover_supported_images(self.input_dir, recursive=self.recursive)
 
     def _progress_for_image(self, image_index: int, total_images: int, image_percent: int, message: str) -> None:
         if self.progress_callback is None:
@@ -280,6 +314,7 @@ class BatchInspectionProcessor(LogMixin):
         pass_count = sum(1 for row in rows if row["final_result"] == "PASS")
         ng_count = sum(1 for row in rows if row["final_result"] == "NG")
         error_count = sum(1 for row in rows if row["final_result"] == "ERROR")
+        cancelled_count = sum(1 for row in rows if row["final_result"] == "CANCELLED")
         return {
             "started_at": started_at.isoformat(timespec="seconds"),
             "finished_at": finished_at.isoformat(timespec="seconds"),
@@ -290,6 +325,7 @@ class BatchInspectionProcessor(LogMixin):
                 "pass": pass_count,
                 "ng": ng_count,
                 "error": error_count,
+                "cancelled": cancelled_count,
                 "defects": sum(int(row.get("defect_count", 0)) for row in rows),
                 "tiles": sum(int(row.get("tile_count", 0)) for row in rows),
                 "ng_tiles": sum(int(row.get("ng_count", 0)) for row in rows),

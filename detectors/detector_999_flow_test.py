@@ -27,6 +27,7 @@ class Detector999FlowTest(BaseDetector):
     detector_name = "flow_test_detector"
     display_name = "999-FLOW-TEST flow validation detector"
     defect_type = "999_flow_test_ng"
+    test_only = True
     MODES = ("pass", "ng", "error")
 
     default_params = {

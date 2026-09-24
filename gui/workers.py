@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
+import threading
 
 from PySide6.QtCore import QObject, Signal, Slot
 from PySide6.QtGui import QImage
@@ -13,7 +14,7 @@ from core.backend_comparison import BackendComparison
 from core.batch_processor import BatchInspectionProcessor
 from core.camera_monitor_processor import CameraFrameQueue, CameraMonitorProcessor, RawFrameSaver
 from core.csv_summary import CsvSummaryExporter
-from core.gpu_runtime import GpuRuntime, GpuRuntimeError
+from core.gpu_runtime import GpuRuntimeError
 from core.gpu_session import GpuExecutionSessionCache
 from core.image_loader import ImageLoader
 from core.logging_system import LogMixin
@@ -131,14 +132,14 @@ class InspectionWorker(QObject, LogMixin):
         try:
             self.logger.info("GUI inspection worker started: image=%s recipe=%s", self.image_path, self.recipe_path)
             with _shared_session(self.gpu_session_cache, self.recipe_path) as gpu_session:
-                pipeline = AOIPipeline(
+                with AOIPipeline(
                     recipe_path=self.recipe_path,
                     output_dir=self.output_dir,
                     progress_callback=self.progress.emit,
                     output_overrides=self.output_overrides,
                     gpu_session=gpu_session,
-                )
-                result = pipeline.run(self.image_path)
+                ) as pipeline:
+                    result = pipeline.run(self.image_path)
             CsvSummaryExporter.finalize_result(self.output_dir, result)
         except Exception as exc:
             self.logger.exception("GUI inspection worker failed: image=%s recipe=%s", self.image_path, self.recipe_path)
@@ -242,6 +243,10 @@ class BatchInspectionWorker(QObject, LogMixin):
         self.output_overrides = output_overrides
         self.recursive = recursive
         self.gpu_session_cache = gpu_session_cache
+        self._stop_event = threading.Event()
+
+    def stop(self) -> None:
+        self._stop_event.set()
 
     @Slot()
     def run(self) -> None:
@@ -256,6 +261,7 @@ class BatchInspectionWorker(QObject, LogMixin):
                     recursive=self.recursive,
                     progress_callback=self.progress.emit,
                     gpu_session=gpu_session,
+                    cancel_event=self._stop_event,
                 )
                 result = processor.run()
         except Exception as exc:
@@ -386,11 +392,18 @@ class TilePreviewWorker(QObject, LogMixin):
     progress = Signal(int, str)
     MAX_PREVIEW_SIDE = 2200
 
-    def __init__(self, image_path: Path, tile_config: dict, gpu_config: dict | None = None):
+    def __init__(
+        self,
+        image_path: Path,
+        tile_config: dict,
+        gpu_config: dict | None = None,
+        gpu_session_cache: GpuExecutionSessionCache | None = None,
+    ):
         super().__init__()
         self.image_path = Path(image_path)
         self.tile_config = dict(tile_config)
         self.gpu_config = dict(gpu_config or {})
+        self.gpu_session_cache = gpu_session_cache
         self.image_loader = ImageLoader()
 
     @Slot()
@@ -401,21 +414,17 @@ class TilePreviewWorker(QObject, LogMixin):
             image = self.image_loader.load_bgr(self.image_path)
             self.progress.emit(20, "正在建立切圖器")
             requested = RecipeManager().gpu_feature_requested(self.gpu_config, "tiling")
-            runtime = GpuRuntime(
-                self.gpu_config.get("dll_path", GpuRuntime.DEFAULT_DLL),
-                fallback_to_cpu=RecipeManager().gpu_fallback_enabled(self.gpu_config),
-                enabled=requested,
-            )
-            if requested and not runtime.available and not runtime.fallback_to_cpu:
-                raise GpuRuntimeError(runtime.unavailable_reason)
-            tiler = create_tiler(self.tile_config, gpu_runtime=runtime if requested else None)
-            tiles = list(tiler.iter_tiles(image))
+            tiles, gpu_backend = self._create_tiles(image, requested)
             self.progress.emit(60, f"正在繪製 {len(tiles)} 個預覽切圖")
-            preview = self._draw_tiles(image, tiles)
-            preview = self._resize_preview(preview)
+            image_height, image_width = image.shape[:2]
+            preview = self._resize_preview(image)
+            scale_x = preview.shape[1] / image_width
+            scale_y = preview.shape[0] / image_height
+            preview = self._draw_tiles(preview, tiles, scale_x, scale_y)
             rgb = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
             self.progress.emit(80, "正在轉換切圖預覽")
-            rgb = np.ascontiguousarray(rgb)
+            if not rgb.flags.c_contiguous:
+                rgb = np.ascontiguousarray(rgb)
             height, width, channels = rgb.shape
             image_bytes = rgb.tobytes()
             bytes_per_line = channels * width
@@ -430,7 +439,7 @@ class TilePreviewWorker(QObject, LogMixin):
                     score = float(metadata["score"])
                     best_score = score if best_score is None else max(best_score, score)
             shape_counts["best_score"] = best_score
-            shape_counts["gpu_backend"] = runtime.status(requested)
+            shape_counts["gpu_backend"] = gpu_backend
         except Exception as exc:
             self.logger.exception("Tile preview failed: image=%s", self.image_path)
             self.failed.emit(str(exc))
@@ -440,9 +449,66 @@ class TilePreviewWorker(QObject, LogMixin):
         self.logger.info("Tile preview completed: image=%s tiles=%s", self.image_path, len(tiles))
         self.finished.emit(image_bytes, width, height, bytes_per_line, len(tiles), shape_counts)
 
+    def _create_tiles(self, image, requested: bool) -> tuple[list, dict]:
+        if not requested:
+            tiler = create_tiler(self.tile_config)
+            return list(tiler.iter_tiles(image)), {
+                "requested": False,
+                "active": False,
+                "backend": "cpu",
+            }
+
+        if self.gpu_session_cache is None:
+            if not RecipeManager().gpu_fallback_enabled(self.gpu_config):
+                raise GpuRuntimeError(
+                    "Strict CUDA tile preview requires the shared GPU session cache"
+                )
+            tiler = create_tiler(self.tile_config)
+            return list(tiler.iter_tiles(image)), {
+                "requested": True,
+                "active": False,
+                "backend": "cpu",
+                "preview_route": "cpu_crop",
+                "fallback_reason": "shared GPU session is not configured",
+            }
+
+        with self.gpu_session_cache.use_recipe({"gpu": self.gpu_config}) as session:
+            runtime = session.runtime_for(self.gpu_config, requested=True)
+            if not runtime.available and not runtime.fallback_to_cpu:
+                raise GpuRuntimeError(runtime.unavailable_reason)
+            use_cuda_tiling = not runtime.fallback_to_cpu
+            with session.execution_scope():
+                tiler = create_tiler(
+                    self.tile_config,
+                    gpu_runtime=runtime if use_cuda_tiling else None,
+                )
+                tiles = list(tiler.iter_tiles(image))
+            return tiles, self._preview_gpu_status(runtime, use_cuda_tiling)
+
     @staticmethod
-    def _draw_tiles(image, tiles):
+    def _preview_gpu_status(runtime, used_for_tiling: bool) -> dict:
+        status = runtime.status(True)
+        if not used_for_tiling:
+            # Matches AOIPipeline: per-tile CUDA crop uploads the whole decoded image on every tile;
+            # with CPU fallback allowed the measured faster route is a CPU crop.
+            status.update(
+                active=False,
+                backend="cpu",
+                preview_route="cpu_crop",
+                fallback_reason="CPU crop avoids re-uploading the full image for each tile",
+            )
+        else:
+            status["preview_route"] = "cuda_tiling"
+        return status
+
+    @staticmethod
+    def _draw_tiles(image, tiles, scale_x: float = 1.0, scale_y: float = 1.0):
         preview = image.copy()
+        scale = min(scale_x, scale_y)
+        line_width = max(1, int(round(4 * scale)))
+        guide_width = max(1, int(round(3 * scale)))
+        font_scale = max(0.3, 0.55 * scale)
+        font_width = max(1, int(round(2 * scale)))
         colors = {
             "rectangle": (0, 180, 0),
             "circle": (255, 120, 0),
@@ -456,31 +522,55 @@ class TilePreviewWorker(QObject, LogMixin):
             metadata = tile.metadata or {}
             shape = metadata.get("shape", metadata.get("mode", "unknown"))
             color = colors.get(shape, colors["unknown"])
-            cv2.rectangle(preview, (tile.x, tile.y), (tile.x + tile.width, tile.y + tile.height), color, 4)
+            x1 = int(round(tile.x * scale_x))
+            y1 = int(round(tile.y * scale_y))
+            x2 = int(round((tile.x + tile.width) * scale_x))
+            y2 = int(round((tile.y + tile.height) * scale_y))
+            cv2.rectangle(preview, (x1, y1), (x2, y2), color, line_width)
             score = metadata.get("score")
             label = f"{tile.tile_id}" if score is None else f"{tile.tile_id}:{score:.3f}"
-            cv2.putText(preview, label, (tile.x, max(0, tile.y - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+            cv2.putText(
+                preview,
+                label,
+                (x1, max(0, y1 - int(round(6 * scale_y)))),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                font_scale,
+                color,
+                font_width,
+            )
 
             match_bbox = metadata.get("match_bbox")
             if match_bbox:
                 x, y, width, height = match_bbox
-                cv2.rectangle(preview, (x, y), (x + width, y + height), (0, 255, 255), 3)
+                sx, sy = int(round(x * scale_x)), int(round(y * scale_y))
+                ex = int(round((x + width) * scale_x))
+                ey = int(round((y + height) * scale_y))
+                cv2.rectangle(preview, (sx, sy), (ex, ey), (0, 255, 255), guide_width)
 
             if not drawn_grid_guides and metadata.get("grid_anchor") == "template_match":
                 search_roi = metadata.get("search_roi") or []
                 if len(search_roi) == 4:
                     x, y, width, height = [int(value) for value in search_roi]
-                    cv2.rectangle(preview, (x, y), (x + width, y + height), (255, 180, 0), 3)
+                    sx, sy = int(round(x * scale_x)), int(round(y * scale_y))
+                    ex = int(round((x + width) * scale_x))
+                    ey = int(round((y + height) * scale_y))
+                    cv2.rectangle(preview, (sx, sy), (ex, ey), (255, 180, 0), guide_width)
                 base_roi = metadata.get("base_roi") or []
                 if len(base_roi) == 4:
                     x, y, width, height = [int(value) for value in base_roi]
-                    cv2.rectangle(preview, (x, y), (x + width, y + height), (255, 255, 255), 3)
+                    sx, sy = int(round(x * scale_x)), int(round(y * scale_y))
+                    ex = int(round((x + width) * scale_x))
+                    ey = int(round((y + height) * scale_y))
+                    cv2.rectangle(preview, (sx, sy), (ex, ey), (255, 255, 255), guide_width)
                 drawn_grid_guides = True
 
             vertices = metadata.get("vertices") or []
             if vertices:
-                points = np.array(vertices, dtype=np.int32).reshape(-1, 1, 2)
-                cv2.polylines(preview, [points], True, color, 3)
+                points = np.asarray(vertices, dtype=np.float64).reshape(-1, 2)
+                points[:, 0] *= scale_x
+                points[:, 1] *= scale_y
+                points = np.round(points).astype(np.int32).reshape(-1, 1, 2)
+                cv2.polylines(preview, [points], True, color, guide_width)
         return preview
 
     @classmethod

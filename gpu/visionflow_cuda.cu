@@ -1504,7 +1504,8 @@ __global__ void morph_kernel(const uint8_t* src, uint8_t* dst, int width, int he
 }
 
 // A rectangular min/max filter is separable. Keep both directions in one
-// block so a 5x5 pass needs only one launch and no device scratch image.
+// block so a 5x5 pass needs one launch and no device scratch image. The 3x3
+// A/B was neutral-to-slower on RTX 3090, so it remains on the global kernel.
 __global__ void morph_k5_shared_kernel(
     const uint8_t* src, uint8_t* dst, int width, int height, int channels, int dilate) {
     constexpr int radius = 2;

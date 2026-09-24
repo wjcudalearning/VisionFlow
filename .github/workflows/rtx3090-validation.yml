@@ -11,8 +11,18 @@ on:
         description: Optional labeled YOLOX acceptance manifest path available on the runner
         required: false
         type: string
+      promote_benchmark_baseline:
+        description: Promote this successful benchmark run as the accepted RTX 3090 baseline
+        required: false
+        default: false
+        type: boolean
   schedule:
     - cron: "0 18 * * *"
+
+# All RTX 3090 validation runs share the same self-hosted GPU.
+concurrency:
+  group: visionflow-rtx3090
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -59,7 +69,10 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: outputs_validation/baseline
-          key: rtx3090-benchmark-baseline-v1
+          key: rtx3090-benchmark-baseline-v2-${{ hashFiles('gpu/validate_cuda_dll.py', 'gpu/benchmark_gate.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            rtx3090-benchmark-baseline-v2-${{ hashFiles('gpu/validate_cuda_dll.py', 'gpu/benchmark_gate.py') }}-
+            rtx3090-benchmark-baseline-v2-
       - name: Equivalence and benchmark
         shell: pwsh
         run: |
@@ -109,25 +122,32 @@ jobs:
             --output outputs_validation\yolox_acceptance_cuda.json
           if ($LASTEXITCODE -ne 0) { throw "YOLOX CUDA production acceptance failed with exit code $LASTEXITCODE" }
       - name: Gate benchmark P95 regression
+        if: inputs.promote_benchmark_baseline != true
         shell: pwsh
         run: |
           $baseline = "outputs_validation\baseline\rtx3090_benchmark.json"
           if (-not (Test-Path $baseline)) {
-            New-Item -ItemType Directory -Force (Split-Path $baseline) | Out-Null
-            Copy-Item outputs_validation\rtx3090_benchmark.json $baseline
-            "Baseline initialized from this successful validation run."
-            exit 0
+            throw "No accepted RTX benchmark baseline was restored. Run workflow_dispatch with promote_benchmark_baseline=true to establish one."
           }
           .\env\Scripts\python.exe gpu\benchmark_gate.py `
             --current outputs_validation\rtx3090_benchmark.json `
             --baseline $baseline --max-regression 0.15
           if ($LASTEXITCODE -ne 0) { throw "RTX benchmark P95 regression exceeded 15%" }
-      - name: Save initial RTX benchmark baseline
-        if: steps.baseline.outputs.cache-hit != 'true'
+
+      - name: Promote accepted RTX benchmark baseline
+        if: inputs.promote_benchmark_baseline == true
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force outputs_validation\baseline | Out-Null
+          Copy-Item -LiteralPath outputs_validation\rtx3090_benchmark.json `
+            -Destination outputs_validation\baseline\rtx3090_benchmark.json -Force
+
+      - name: Save promoted RTX benchmark baseline
+        if: inputs.promote_benchmark_baseline == true
         uses: actions/cache/save@v6
         with:
           path: outputs_validation/baseline
-          key: rtx3090-benchmark-baseline-v1
+          key: rtx3090-benchmark-baseline-v2-${{ hashFiles('gpu/validate_cuda_dll.py', 'gpu/benchmark_gate.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Capture Nsight Systems smoke profile
         shell: pwsh
         run: |

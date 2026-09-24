@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from collections.abc import Callable, Hashable
 from dataclasses import dataclass, field
+from functools import lru_cache
 import math
 from typing import TypeAlias
 
@@ -16,6 +17,23 @@ class UnsupportedPreprocessPlan(RuntimeError):
 
 class InvalidPreprocessPlan(ValueError):
     """Raised when a plan or its input violates the shared preprocessing contract."""
+
+
+_CPU_MORPHOLOGY_OPERATIONS = {
+    "open": cv2.MORPH_OPEN,
+    "close": cv2.MORPH_CLOSE,
+    "dilate": cv2.MORPH_DILATE,
+    "erode": cv2.MORPH_ERODE,
+}
+
+
+@lru_cache(maxsize=64)
+def _cpu_morphology_kernel(shape: int, kernel_size: int) -> np.ndarray:
+    kernel = cv2.getStructuringElement(
+        int(shape), (int(kernel_size), int(kernel_size))
+    )
+    kernel.setflags(write=False)
+    return kernel
 
 
 @dataclass(frozen=True, slots=True)
@@ -378,16 +396,10 @@ class CpuPreprocessExecutor:
         operation = operator.operation.lower()
         if operation in {"", "none"} or operator.iterations <= 0 or operator.kernel_size <= 1:
             return image.copy()
-        operations = {
-            "open": cv2.MORPH_OPEN,
-            "close": cv2.MORPH_CLOSE,
-            "dilate": cv2.MORPH_DILATE,
-            "erode": cv2.MORPH_ERODE,
-        }
-        cv_operation = operations.get(operation)
+        cv_operation = _CPU_MORPHOLOGY_OPERATIONS.get(operation)
         if cv_operation is None:
             raise UnsupportedPreprocessPlan(f"Unsupported CPU morphology operation: {operator.operation}")
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (operator.kernel_size, operator.kernel_size))
+        kernel = _cpu_morphology_kernel(cv2.MORPH_RECT, operator.kernel_size)
         if cv_operation == cv2.MORPH_DILATE:
             return cv2.dilate(image, kernel, iterations=operator.iterations)
         if cv_operation == cv2.MORPH_ERODE:

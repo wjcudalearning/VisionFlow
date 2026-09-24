@@ -6,6 +6,7 @@ from core.parameter_schema import (
     specs_from_defaults,
 )
 from detectors.detector_505_as_sn_1 import Detector505AsSn1
+from detectors.contour_helpers import center_mask_bbox, edge_mask_parameter_overrides
 
 
 class Detector506CsSn1(Detector505AsSn1):
@@ -42,6 +43,7 @@ class Detector506CsSn1(Detector505AsSn1):
     PARAM_SPEC = specs_from_defaults(
         default_params,
         {
+            **edge_mask_parameter_overrides(),
             "center_mask_enabled": {
                 "parameter_group": PARAMETER_GROUP_INNER,
                 "label": "啟用中心屏蔽",
@@ -69,35 +71,6 @@ class Detector506CsSn1(Detector505AsSn1):
                 "minimum": 0,
                 "parameter_group": PARAMETER_GROUP_OUTER,
                 "label": "中心屏蔽半高 Y",
-            },
-            "edge_mask_enabled": {
-                "parameter_group": PARAMETER_GROUP_INNER,
-                "label": "啟用四邊屏蔽",
-            },
-            "edge_inset_all": {
-                "minimum": 0,
-                "parameter_group": PARAMETER_GROUP_OUTER,
-                "label": "共同內縮",
-            },
-            "edge_inset_left": {
-                "minimum": 0,
-                "parameter_group": PARAMETER_GROUP_OUTER,
-                "label": "左側內縮",
-            },
-            "edge_inset_right": {
-                "minimum": 0,
-                "parameter_group": PARAMETER_GROUP_OUTER,
-                "label": "右側內縮",
-            },
-            "edge_inset_top": {
-                "minimum": 0,
-                "parameter_group": PARAMETER_GROUP_OUTER,
-                "label": "上側內縮",
-            },
-            "edge_inset_bottom": {
-                "minimum": 0,
-                "parameter_group": PARAMETER_GROUP_OUTER,
-                "label": "下側內縮",
             },
             "threshold_value": {
                 "minimum": 0,
@@ -190,17 +163,11 @@ class Detector506CsSn1(Detector505AsSn1):
 
         half_width = max(0, int(self.params.get("center_mask_width", 0)))
         half_height = max(0, int(self.params.get("center_mask_height", 0)))
-        x_start = min(width, max(0, center_x - half_width))
-        x_stop = min(width, max(0, center_x + half_width))
-        y_start = min(height, max(0, center_y - half_height))
-        y_stop = min(height, max(0, center_y + half_height))
+        bbox = center_mask_bbox(
+            width, height, center_x, center_y, half_width, half_height
+        )
         return {
             "center": [center_x, center_y],
             "half_extents": [half_width, half_height],
-            "bbox": [
-                x_start,
-                y_start,
-                max(0, x_stop - x_start),
-                max(0, y_stop - y_start),
-            ],
+            "bbox": bbox,
         }

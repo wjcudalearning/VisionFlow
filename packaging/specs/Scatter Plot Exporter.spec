@@ -7,6 +7,7 @@ from pathlib import Path
 SPEC_DIR = Path(SPECPATH).resolve()
 ROOT = SPEC_DIR.parent.parent
 ENTRY_POINT = 'tools/export_scatter_plots.py'
+VERSION_INFO = ROOT / 'build' / 'version_info' / 'Scatter Plot Exporter.txt'
 
 a = Analysis(
     [str(ROOT / ENTRY_POINT)],
@@ -33,7 +34,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
@@ -42,4 +43,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    version=str(VERSION_INFO),
 )

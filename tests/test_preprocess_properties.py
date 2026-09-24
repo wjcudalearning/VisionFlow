@@ -3,11 +3,12 @@ from __future__ import annotations
 import cv2
 import numpy as np
 import unittest
+from unittest.mock import patch
 from hypothesis import given, settings, strategies as st
 
 from core.preprocess_plan import (
     AdaptiveMean, CpuPreprocessExecutor, Gaussian, Gray, Morphology,
-    PreprocessPlan, Resize, Threshold,
+    PreprocessPlan, Resize, Threshold, _cpu_morphology_kernel,
 )
 
 
@@ -89,3 +90,30 @@ class PreprocessPropertyTests(unittest.TestCase):
         actual = CpuPreprocessExecutor().execute(image, plan)
         expected = direct_opencv(image, plan)
         np.testing.assert_array_equal(actual, expected, err_msg=f"plan={plan.signature}")
+
+
+class MorphologyKernelCacheTests(unittest.TestCase):
+    def setUp(self):
+        _cpu_morphology_kernel.cache_clear()
+
+    def tearDown(self):
+        _cpu_morphology_kernel.cache_clear()
+
+    def test_kernel_cache_is_keyed_by_shape_and_size_and_read_only(self):
+        with patch(
+            "core.preprocess_plan.cv2.getStructuringElement",
+            wraps=cv2.getStructuringElement,
+        ) as create_kernel:
+            rect3 = _cpu_morphology_kernel(cv2.MORPH_RECT, 3)
+            self.assertIs(rect3, _cpu_morphology_kernel(cv2.MORPH_RECT, 3))
+            cross3 = _cpu_morphology_kernel(cv2.MORPH_CROSS, 3)
+            rect5 = _cpu_morphology_kernel(cv2.MORPH_RECT, 5)
+
+        self.assertEqual(create_kernel.call_count, 3)
+        self.assertFalse(rect3.flags.writeable)
+        self.assertEqual(rect3.shape, (3, 3))
+        self.assertEqual(cross3.shape, (3, 3))
+        self.assertEqual(rect5.shape, (5, 5))
+        self.assertFalse(np.array_equal(rect3, cross3))
+        with self.assertRaises(ValueError):
+            rect3[0, 0] = 0

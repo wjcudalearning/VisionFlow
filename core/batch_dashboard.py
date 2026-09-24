@@ -56,6 +56,7 @@ class BatchDashboardBuilder:
         pass_count = int(summary.get("pass", self._count_result(rows, "PASS")) or 0)
         ng_count = int(summary.get("ng", self._count_result(rows, "NG")) or 0)
         error_count = int(summary.get("error", self._count_result(rows, "ERROR")) or 0)
+        cancelled_count = int(summary.get("cancelled", self._count_result(rows, "CANCELLED")) or 0)
         defect_count = int(summary.get("defects", sum(int(row.get("defect_count", 0) or 0) for row in rows)) or 0)
         tile_count = int(summary.get("tiles", sum(int(row.get("tile_count", 0) or 0) for row in rows)) or 0)
         ng_tile_count = int(summary.get("ng_tiles", sum(int(row.get("ng_count", 0) or 0) for row in rows)) or 0)
@@ -84,6 +85,7 @@ class BatchDashboardBuilder:
                 ("PASS", pass_count),
                 ("NG", ng_count),
                 ("ERROR", error_count),
+                ("CANCELLED", cancelled_count),
             ],
             top_defect_images=self._top_defect_images(dashboard_rows),
             rows=dashboard_rows,

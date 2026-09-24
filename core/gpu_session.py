@@ -182,16 +182,16 @@ class GpuExecutionSession(LogMixin):
 
         report(20, "正在以目前影像試跑（不輸出檔案）")
         with tempfile.TemporaryDirectory(prefix="visionflow_gpu_warmup_") as temporary:
-            pipeline = AOIPipeline(
+            with AOIPipeline(
                 Path(recipe_path),
                 Path(temporary),
                 progress_callback=lambda percent, _message: report(20 + int(percent) * 3 // 4, "GPU 預熱試跑中"),
                 output_overrides=dict(self.WARM_UP_OUTPUT_OVERRIDES),
                 gpu_session=self,
-            )
-            started = time.perf_counter()
-            result = pipeline.run(Path(image_path))
-            summary["pipeline_ms"] = round((time.perf_counter() - started) * 1000.0, 1)
+            ) as pipeline:
+                started = time.perf_counter()
+                result = pipeline.run(Path(image_path))
+                summary["pipeline_ms"] = round((time.perf_counter() - started) * 1000.0, 1)
         gpu = (result.get("execution", {}) or {}).get("gpu", {}) or {}
         detectors = gpu.get("detectors", {}) or {}
         fallback_reasons = [
@@ -237,6 +237,23 @@ class GpuExecutionSession(LogMixin):
         if strict and summary.get("status") == "unavailable":
             raise GpuRuntimeError(f"嚴格 CUDA 模式無法開始檢測：{summary.get('reason', '')}")
         return summary
+
+    def prepare_processor_run(
+        self,
+        recipe_path: Path,
+        session_started_at: float,
+        image_path: Path | None = None,
+        progress_callback=None,
+    ) -> dict:
+        """Return the shared warm-up and session timing record used by run processors."""
+        return {
+            "session_ms": round(
+                max(0.0, time.perf_counter() - session_started_at) * 1000.0, 1
+            ),
+            **self.warm_up_before_run(
+                recipe_path, image_path, progress_callback=progress_callback
+            ),
+        }
 
     @staticmethod
     def warm_up_notice(summary: dict) -> str:
@@ -310,8 +327,15 @@ class GpuExecutionSessionCache:
 
     @contextmanager
     def use(self, recipe_path: Path):
+        recipe = self._recipe_manager.load(Path(recipe_path))
+        with self.use_recipe(recipe) as session:
+            yield session
+
+    @contextmanager
+    def use_recipe(self, recipe: dict):
+        """Hold the cached session for an in-memory Recipe, including unsaved GUI previews."""
         with self._lock:
-            session = self._session_for_locked(Path(recipe_path))
+            session = self._session_for_recipe_locked(recipe)
             self._users[id(session)] = self._users.get(id(session), 0) + 1
         try:
             yield session
@@ -328,6 +352,9 @@ class GpuExecutionSessionCache:
 
     def _session_for_locked(self, recipe_path: Path) -> GpuExecutionSession:
         recipe = self._recipe_manager.load(recipe_path)
+        return self._session_for_recipe_locked(recipe)
+
+    def _session_for_recipe_locked(self, recipe: dict) -> GpuExecutionSession:
         key = GpuExecutionSession.identity(recipe, self.workload)
         if self._session is not None and self._key == key:
             return self._session

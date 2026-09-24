@@ -7,7 +7,7 @@ from pathlib import Path
 SPEC_DIR = Path(SPECPATH).resolve()
 ROOT = SPEC_DIR.parent.parent
 ENTRY_POINT = 'contour_preprocess_tool/launcher.py'
-VERSION_INFO = 'contour_preprocess_tool/version_info.txt'
+VERSION_INFO = ROOT / 'build' / 'version_info' / 'Traditional CV Tuning Tool.txt'
 
 a = Analysis(
     [str(ROOT / ENTRY_POINT)],
@@ -51,7 +51,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
@@ -60,5 +60,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    version=str(ROOT / VERSION_INFO),
+    version=str(VERSION_INFO),
 )

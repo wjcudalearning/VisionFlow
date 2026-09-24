@@ -413,6 +413,12 @@ class Detector505AsSn1ResultTests(unittest.TestCase):
         )
         self.assertEqual(result["defects"][1]["metadata"]["vertex_count"], 3)
         self.assertEqual(result["defects"][0]["confidence"], 1.0)
+        first, second = result["defects"]
+        self.assertIsNot(first["metadata"], second["metadata"])
+        self.assertIsNot(
+            first["metadata"]["effective_edge_insets"],
+            second["metadata"]["effective_edge_insets"],
+        )
 
     def test_area_boundaries_are_inclusive(self):
         area_100 = np.array(

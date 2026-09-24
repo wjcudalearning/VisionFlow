@@ -224,7 +224,14 @@ class BatchDashboardScreen(QWidget):
         self.data_splitter.setChildrenCollapsible(False)
 
         self.filter_segmented = Segmented(
-            [("all", "全部"), ("pass", "PASS"), ("ng", "NG"), ("error", "ERROR")], value="all"
+            [
+                ("all", "全部"),
+                ("pass", "PASS"),
+                ("ng", "NG"),
+                ("error", "ERROR"),
+                ("cancelled", "取消"),
+            ],
+            value="all",
         )
         table_panel = Panel(title="批量影像資料", actions=self.filter_segmented, flush=True)
         self.table_model = RowTableModel(

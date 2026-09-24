@@ -55,7 +55,7 @@ py -3.13 -m venv env
 .\env\Scripts\python.exe -m pip install -r requirements.lock.txt
 ```
 
-`requirements.txt` 是直接相依套件；可重現的完整 Windows dependency lock 位於 `requirements.lock.txt`。若環境已建立，只需重新執行安裝指令。
+`requirements.txt` 是直接相依套件；可重現的完整 Windows dependency lock 位於 `requirements.lock.txt`。測試會核對兩者的直接相依版本，PyInstaller 建置也會先確認目前是 Python 3.13 且所有 lock 套件版本相符。若檢查未通過，請用上述指令重建或更新 `env` 後再建置。
 
 ### 2. 啟動 GUI
 

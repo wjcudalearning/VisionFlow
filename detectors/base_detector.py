@@ -281,6 +281,7 @@ class BaseDetector:
     def run(self, image, device_roi=None, preprocess_cache=None) -> dict:
         self._detection_stage_durations = {}
         self._run_preprocess_routes = {}
+        self.last_preprocess_capability = {}
         if self.export_debug_images:
             self.debug_images = {}
         previous_device_roi = self._active_device_roi
@@ -305,7 +306,7 @@ class BaseDetector:
             self._active_preprocess_cache = previous_preprocess_cache
         max_confidence = max((defect.get("confidence", 0.0) for defect in defects), default=0.0)
         cuda_used = self.gpu_active and not self._crossover_cpu_only(self._run_preprocess_routes)
-        return {
+        result = {
             "detector_id": self.detector_id,
             "detector_name": self.detector_name,
             "display_name": self.display_name,
@@ -318,7 +319,7 @@ class BaseDetector:
                 "backend": "cuda_dll" if cuda_used else "cpu",
                 "fallback_reason": self.gpu_fallback_reason,
                 "preprocess_routes": dict(self._run_preprocess_routes),
-                "preprocess_capability": self.last_preprocess_capability,
+                "preprocess_capability": deepcopy(self.last_preprocess_capability),
                 "performance": {
                     "measurement_scope": "host_wall_clock",
                     "stages_sec": {
@@ -328,3 +329,9 @@ class BaseDetector:
                 },
             },
         }
+        if bool(getattr(self, "test_only", False)):
+            result["execution"].update(
+                test_only=True,
+                warning="此 Detector 僅供流程驗證，不可用於量產判定。",
+            )
+        return result

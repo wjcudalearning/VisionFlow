@@ -11,12 +11,17 @@ from core.parameter_schema import (
     specs_from_defaults,
 )
 from detectors.base_detector import BaseDetector
+from detectors.contour_helpers import execute_cached_preprocess_plan, inset_roi_image
 
 
 class Detector401(BaseDetector):
+    """401 negative detector with fixed confidence formula `min(1, area / image_area * 20)`."""
+
     detector_id = "401-AS-SN-1"
     detector_name = "401_negative"
     display_name = "401-AS-SN-1 negative detector"
+    CONFIDENCE_AREA_SCALE = 20.0
+    CONFIDENCE_CAP = 1.0
     default_params = {
         "roi_inset_px": 100,
         "blur_size": 15,
@@ -76,7 +81,10 @@ class Detector401(BaseDetector):
             y += offset_y
             box[:, 0] += offset_x
             box[:, 1] += offset_y
-            confidence = min(1.0, rect_area / image_area * 20.0)
+            confidence = min(
+                self.CONFIDENCE_CAP,
+                rect_area / image_area * self.CONFIDENCE_AREA_SCALE,
+            )
 
             defects.append(
                 {
@@ -92,7 +100,7 @@ class Detector401(BaseDetector):
                         ],
                         "size": [float(np.round(width, 3)), float(np.round(height, 3))],
                         "angle": float(np.round(angle, 3)),
-                        "box_points_local": box.astype(int).tolist(),
+                        "box_points_local": box.tolist(),
                         "roi_inset_px": int(self.params.get("roi_inset_px", 100)),
                         "roi_offset_local": [int(offset_x), int(offset_y)],
                         "blur_size": int(self.params.get("blur_size", 15)),
@@ -115,15 +123,7 @@ class Detector401(BaseDetector):
         return defects
 
     def _roi_image(self, image):
-        inset = max(0, int(self.params.get("roi_inset_px", 100)))
-        if inset <= 0:
-            return image, 0, 0
-
-        height, width = image.shape[:2]
-        if width <= inset * 2 or height <= inset * 2:
-            return image, 0, 0
-
-        return image[inset : height - inset, inset : width - inset], inset, inset
+        return inset_roi_image(image, self.params.get("roi_inset_px", 100))
 
     def _make_binary(self, image, offset_x: int = 0, offset_y: int = 0):
         blur_size = self._odd_at_least(int(self.params.get("blur_size", 15)), 3)
@@ -146,7 +146,8 @@ class Detector401(BaseDetector):
             max_value,
             invert,
         )
-        plan = self.cached_preprocess_plan(
+        return execute_cached_preprocess_plan(
+            self,
             image,
             signature,
             lambda: PreprocessPlan(
@@ -158,8 +159,8 @@ class Detector401(BaseDetector):
                     AdaptiveMean(block_size, adaptive_c, max_value, invert),
                 ),
             ),
+            (offset_x, offset_y),
         )
-        return self.execute_preprocess_plan(image, plan, (offset_x, offset_y))
 
     def _passes_area_filter(self, area: float) -> bool:
         min_area = float(self.params.get("min_area", 25))

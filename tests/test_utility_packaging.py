@@ -41,7 +41,7 @@ class UtilityPackagingContractTests(unittest.TestCase):
                 self.assertIn("str(ROOT / ENTRY_POINT)", spec)
                 self.assertIn("exe = EXE(", spec)
                 self.assertIn("console=False", spec)
-                self.assertIn("-m PyInstaller", build)
+                self.assertIn("Invoke-PyInstallerBuild @buildArguments", build)
                 self.assertIn(spec_name, build)
 
     def test_specs_and_build_scripts_stay_inside_packaging(self):
@@ -58,6 +58,19 @@ class UtilityPackagingContractTests(unittest.TestCase):
                 source = spec.read_text(encoding="utf-8")
                 self.assertIn("SPEC_DIR = Path(SPECPATH).resolve()", source)
                 self.assertIn("ROOT = SPEC_DIR.parent.parent", source)
+
+    def test_every_spec_embeds_version_metadata_and_disables_upx(self):
+        specs = sorted(SPEC_DIR.glob("*.spec"))
+        for spec in specs:
+            with self.subTest(spec=spec.name):
+                source = spec.read_text(encoding="utf-8")
+                self.assertIn("VERSION_INFO = ROOT / 'build' / 'version_info'", source)
+                self.assertIn("version=str(VERSION_INFO)", source)
+                self.assertIn("upx=False", source)
+        helper = (BUILD_DIR / "pyinstaller_build.ps1").read_text(encoding="ascii")
+        self.assertIn("write_version_info.py", helper)
+        self.assertIn("Invoke-WithCleanBuildPath {", helper)
+        self.assertIn("-LiteralPath", helper)
 
     def test_every_spec_is_referenced_by_a_build_script(self):
         build_sources = {
@@ -77,7 +90,7 @@ class UtilityPackagingContractTests(unittest.TestCase):
             with self.subTest(script=path.name):
                 source = path.read_text(encoding="utf-8")
                 self.assertIn(
-                    '(Resolve-Path (Join-Path $PSScriptRoot "..\\..")).Path',
+                    '[System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\\.."))',
                     source,
                 )
                 self.assertNotIn('Join-Path $PSScriptRoot "env', source)

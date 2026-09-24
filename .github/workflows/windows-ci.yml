@@ -6,8 +6,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: windows-ci-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   cpu-static:
@@ -19,16 +24,53 @@ jobs:
       QT_QPA_PLATFORM: "offscreen"
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Detect documentation-only changes
+        id: changes
+        uses: actions/github-script@v9
+        with:
+          script: |
+            let paths = [];
+            if (context.eventName === 'pull_request') {
+              const files = await github.paginate(github.rest.pulls.listFiles, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.issue.number,
+                per_page: 100,
+              });
+              paths = files.map(file => file.filename);
+            } else if (context.eventName === 'push' && context.payload.before && !/^0+$/.test(context.payload.before)) {
+              const diff = await exec.getExecOutput('git', [
+                'diff', '--name-only', `${context.payload.before}..${context.sha}`,
+              ], {ignoreReturnCode: true});
+              if (diff.exitCode === 0) paths = diff.stdout.trim().split(/\r?\n/).filter(Boolean);
+            } else {
+              paths = ['run-all'];
+            }
+            const isDocumentation = path => {
+              const lower = path.toLowerCase();
+              return lower.startsWith('docs/') || lower.startsWith('documentation/') ||
+                lower.startsWith('.github/issue_template/') ||
+                ['.md', '.rst', '.adoc'].includes(path.slice(path.lastIndexOf('.')).toLowerCase());
+            };
+            const docsOnly = paths.length > 0 && paths.every(isDocumentation);
+            core.setOutput('run_validation', docsOnly ? 'false' : 'true');
+            if (docsOnly) core.notice(`Skipping source validation for ${paths.length} documentation-only file(s).`);
       - uses: actions/setup-python@v7
+        if: steps.changes.outputs.run_validation == 'true'
         with:
           python-version: "3.13"
           cache: pip
           cache-dependency-path: requirements.lock.txt
       - name: Install dependencies
+        if: steps.changes.outputs.run_validation == 'true'
         run: python -m pip install -r requirements.lock.txt
       - name: Unit tests
+        if: steps.changes.outputs.run_validation == 'true'
         run: python -m unittest discover -s tests -v
       - name: Compile Python sources
+        if: steps.changes.outputs.run_validation == 'true'
         run: >-
           python -m compileall
           main.py
@@ -40,8 +82,10 @@ jobs:
           gui
           gpu
       - name: Validate CUDA headers and source contract
+        if: steps.changes.outputs.run_validation == 'true'
         run: python gpu/preflight_cuda_build.py
       - name: Recipe and CLI smoke
+        if: steps.changes.outputs.run_validation == 'true'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force outputs_validation | Out-Null
@@ -51,10 +95,11 @@ jobs:
           if ($cliExitCode -notin @(0, 2)) { exit $cliExitCode }
           exit 0
       - name: GUI offscreen smoke
+        if: steps.changes.outputs.run_validation == 'true'
         shell: pwsh
         run: python -c "from pathlib import Path; from PySide6.QtWidgets import QApplication; from gui.main_window import MainWindow; app=QApplication([]); w=MainWindow(); w.recipe_panel.load_recipe(Path('recipes/PRODUCT_A_AOI_01.yaml')); assert w.recipe_panel.detector_list.count() > 0"
       - name: Upload static validation artifacts
-        if: always()
+        if: always() && steps.changes.outputs.run_validation == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: windows-static-${{ github.sha }}

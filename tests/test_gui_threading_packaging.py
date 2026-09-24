@@ -115,23 +115,30 @@ class GuiThreadingPackagingContractTests(unittest.TestCase):
 
         self.assertIn("if cuda_dll.exists() else []", spec)
         self.assertIn("(str(cuda_dll), 'gpu')", spec)
-        self.assertIn("if (Test-Path $cudaDll)", build)
+        self.assertIn("if (Test-Path -LiteralPath $cudaDll -PathType Leaf)", build)
         self.assertIn('"VisionFlow AOI.spec"', build)
-        self.assertIn("-m PyInstaller --noconfirm --clean $spec", build)
+        self.assertIn("Invoke-PyInstallerBuild @buildArguments", build)
         self.assertNotIn('"--add-binary"', build)
         self.assertIn("CPU-compatible package", build)
 
     def test_every_pyinstaller_build_runs_behind_the_path_guard(self):
         guard = BUILD_DIR / "pyinstaller_path_guard.ps1"
         self.assertTrue(guard.read_bytes().isascii())
-        builders = [path for path in BUILD_DIR.glob("*.ps1") if "-m PyInstaller" in path.read_text(encoding="utf-8")]
+        helper = BUILD_DIR / "pyinstaller_build.ps1"
+        helper_source = helper.read_text(encoding="ascii")
+        self.assertEqual(helper_source.count('"-m", "PyInstaller"'), 1)
+        self.assertIn("Invoke-WithCleanBuildPath {", helper_source)
+        builders = [
+            path for path in BUILD_DIR.glob("build_*.ps1")
+            if "Invoke-PyInstallerBuild @buildArguments" in path.read_text(encoding="utf-8")
+        ]
         self.assertGreaterEqual(len(builders), 7)
         for path in builders:
             source = path.read_text(encoding="utf-8")
             with self.subTest(script=path.name):
                 self.assertIn('. (Join-Path $PSScriptRoot "pyinstaller_path_guard.ps1")', source)
-                self.assertEqual(source.count("-m PyInstaller"), 1)
-                self.assertLess(source.index("Invoke-WithCleanBuildPath {"), source.index("-m PyInstaller"))
+                self.assertIn('. (Join-Path $PSScriptRoot "pyinstaller_build.ps1")', source)
+                self.assertEqual(source.count("Invoke-PyInstallerBuild @buildArguments"), 1)
 
     @unittest.skipUnless(sys.platform == "win32", "Windows PowerShell build scripts")
     def test_path_guard_hides_agent_runtime_dlls_only_while_pyinstaller_runs(self):

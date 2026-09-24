@@ -237,6 +237,36 @@ class GuiDisplayObservabilityTests(unittest.TestCase):
         self.assertEqual(len(viewer._defect_items), 3)
         self.assertTrue(viewer.view.updatesEnabled())
 
+    def test_overlay_updates_reuse_items_and_selection_touches_only_old_and_new(self):
+        viewer = ImageViewer()
+        overlays = [
+            {"id": index, "type": "scratch", "bbox_global": [index, 10, 8, 6], "score": 0.9}
+            for index in range(5)
+        ]
+        overlays.append({
+            "id": "status", "type": "tile_status", "bbox_global": [0, 0, 20, 12],
+            "score": 1.0, "status": "NG", "overlay_role": "tile_status",
+        })
+        viewer.set_defects(overlays)
+        original_items = dict(viewer._defect_items)
+
+        viewer.set_selected_defect(2)
+        self.assertTrue(original_items[2]._selected)
+        self.assertFalse(original_items[1]._selected)
+        self.assertFalse(original_items[3]._selected)
+
+        updated = [dict(item, bbox_global=[item["bbox_global"][0] + 30, 20, 8, 6]) for item in overlays]
+        viewer.set_defects(updated)
+        self.assertTrue(all(viewer._defect_items[key] is item for key, item in original_items.items()))
+        self.assertEqual(viewer._defect_items[2].rect(), QRectF(32, 20, 8, 6))
+        self.assertIsNone(viewer._selected_defect_id)
+        self.assertTrue(viewer._defect_items["status"]._label.isVisible())
+
+        viewer.set_defects(updated[:3])
+        self.assertEqual(set(viewer._defect_items), {0, 1, 2})
+        self.assertTrue(viewer.view.updatesEnabled())
+        viewer.deleteLater()
+
 
 if __name__ == "__main__":
     unittest.main()

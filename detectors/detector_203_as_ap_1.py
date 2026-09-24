@@ -12,6 +12,17 @@ from core.parameter_schema import (
 )
 from core.preprocess_plan import AdaptiveMean, Gaussian, Gray, Morphology, PreprocessPlan
 from detectors.base_detector import BaseDetector
+from detectors.contour_helpers import (
+    CONTOUR_RETRIEVAL_MODES,
+    CONTOUR_EDGE_DEFAULTS,
+    apply_edge_insets,
+    contour_retrieval,
+    edge_mask_parameter_overrides,
+    effective_edge_insets,
+    execute_cached_preprocess_plan,
+    passes_area_filter,
+    resolve_contour_mode,
+)
 
 
 class Detector203AsAp1(BaseDetector):
@@ -41,15 +52,7 @@ class Detector203AsAp1(BaseDetector):
     PARAM_SPEC = specs_from_defaults(
         default_params,
         {
-            "edge_mask_enabled": {
-                "parameter_group": PARAMETER_GROUP_INNER,
-                "label": "啟用四邊屏蔽",
-            },
-            "edge_inset_all": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER, "label": "共同內縮"},
-            "edge_inset_left": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER, "label": "左側內縮"},
-            "edge_inset_right": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER, "label": "右側內縮"},
-            "edge_inset_top": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER, "label": "上側內縮"},
-            "edge_inset_bottom": {"minimum": 0, "parameter_group": PARAMETER_GROUP_OUTER, "label": "下側內縮"},
+            **edge_mask_parameter_overrides(),
             "blur_size": {
                 "minimum": 1,
                 "odd": True,
@@ -104,12 +107,7 @@ class Detector203AsAp1(BaseDetector):
         },
     )
 
-    _CONTOUR_MODES = {
-        "external": cv2.RETR_EXTERNAL,
-        "list": cv2.RETR_LIST,
-        "tree": cv2.RETR_TREE,
-        "ccomp": cv2.RETR_CCOMP,
-    }
+    _CONTOUR_MODES = CONTOUR_RETRIEVAL_MODES
 
     def preprocess(self, image):
         return image
@@ -118,10 +116,10 @@ class Detector203AsAp1(BaseDetector):
         with self.measure_detection_stage("preprocess"):
             binary = self._make_binary(image)
         with self.measure_detection_stage("find_contours"):
-            contour_mode = str(self.params.get("contour_mode", "list")).lower()
+            contour_mode = resolve_contour_mode(self.params.get("contour_mode", "list"))
             contours, _ = cv2.findContours(
                 binary,
-                self._CONTOUR_MODES.get(contour_mode, cv2.RETR_LIST),
+                contour_retrieval(contour_mode),
                 cv2.CHAIN_APPROX_SIMPLE,
             )
 
@@ -129,51 +127,45 @@ class Detector203AsAp1(BaseDetector):
         defects = []
         image_height, image_width = image.shape[:2]
         effective_insets = self._effective_edge_insets(image_width, image_height)
+        min_area = float(self.params.get("min_area", 0.0))
+        max_area = float(self.params.get("max_area", 0.0))
+        binary_inv = bool(self.params.get("binary_inv", True))
+        morphology = {
+            "operation": str(self.params.get("morph_operation", "open")).lower(),
+            "kernel": int(self.params.get("morph_kernel", 3)),
+            "iterations": int(self.params.get("morph_iterations", 1)),
+        }
+        base_meta = {
+            "shape": "contour",
+            "threshold_method": "adaptive_mean_inv" if binary_inv else "adaptive_mean",
+            "blur_size": int(self.params.get("blur_size", 3)),
+            "adaptive_block_size": int(self.params.get("adaptive_block_size", 21)),
+            "adaptive_c": float(self.params.get("adaptive_c", 1.0)),
+            "max_value": int(self.params.get("max_value", 255)),
+            "morphology": morphology,
+            "contour_mode": contour_mode,
+            "min_area": min_area,
+            "max_area": max_area,
+            "edge_mask_enabled": bool(self.params.get("edge_mask_enabled", True)),
+            "effective_edge_insets": effective_insets,
+            "mask_order": "gray_gaussian_adaptive_mean_inv_open_edge_mask_contours",
+        }
         for contour in contours:
             area = float(cv2.contourArea(contour))
-            if area <= 0.0 or not self._passes_area_filter(area):
+            if area <= 0.0 or (min_area and area < min_area) or (max_area and area > max_area):
                 continue
 
             x, y, width, height = cv2.boundingRect(contour)
+            metadata = dict(base_meta)
+            metadata["morphology"] = dict(morphology)
+            metadata["effective_edge_insets"] = dict(effective_insets)
             defects.append(
                 {
                     "type": "203_as_ap_1_contour_ng",
                     "bbox_local": [int(x), int(y), int(width), int(height)],
                     "area": float(np.round(area, 3)),
                     "confidence": 1.0,
-                    "metadata": {
-                        "shape": "contour",
-                        "threshold_method": (
-                            "adaptive_mean_inv"
-                            if bool(self.params.get("binary_inv", True))
-                            else "adaptive_mean"
-                        ),
-                        "blur_size": int(self.params.get("blur_size", 3)),
-                        "adaptive_block_size": int(
-                            self.params.get("adaptive_block_size", 21)
-                        ),
-                        "adaptive_c": float(self.params.get("adaptive_c", 1.0)),
-                        "max_value": int(self.params.get("max_value", 255)),
-                        "morphology": {
-                            "operation": str(
-                                self.params.get("morph_operation", "open")
-                            ).lower(),
-                            "kernel": int(self.params.get("morph_kernel", 3)),
-                            "iterations": int(
-                                self.params.get("morph_iterations", 1)
-                            ),
-                        },
-                        "contour_mode": contour_mode,
-                        "min_area": float(self.params.get("min_area", 0.0)),
-                        "max_area": float(self.params.get("max_area", 0.0)),
-                        "edge_mask_enabled": bool(
-                            self.params.get("edge_mask_enabled", True)
-                        ),
-                        "effective_edge_insets": effective_insets,
-                        "mask_order": (
-                            "gray_gaussian_adaptive_mean_inv_open_edge_mask_contours"
-                        ),
-                    },
+                    "metadata": metadata,
                 }
             )
 
@@ -209,7 +201,8 @@ class Detector203AsAp1(BaseDetector):
             morph_kernel,
             morph_iterations,
         )
-        plan = self.cached_preprocess_plan(
+        binary = execute_cached_preprocess_plan(
+            self,
             image,
             signature,
             lambda: PreprocessPlan(
@@ -231,55 +224,27 @@ class Detector203AsAp1(BaseDetector):
                 ),
             ),
         )
-        binary = self.execute_preprocess_plan(image, plan)
         self._record_debug_image("203-AS-AP-1_binary", binary)
         masked = self._apply_edge_mask(binary)
         self._record_debug_image("203-AS-AP-1_masked_binary", masked)
         return masked
 
     def _apply_edge_mask(self, binary: np.ndarray) -> np.ndarray:
-        masked = binary.copy()
         if not bool(self.params.get("edge_mask_enabled", True)):
-            return masked
-
-        height, width = masked.shape[:2]
-        insets = self._effective_edge_insets(width, height)
-        if insets["top"] > 0:
-            masked[: insets["top"], :] = 0
-        if insets["bottom"] > 0:
-            masked[height - insets["bottom"] :, :] = 0
-        if insets["left"] > 0:
-            masked[:, : insets["left"]] = 0
-        if insets["right"] > 0:
-            masked[:, width - insets["right"] :] = 0
-        return masked
+            return binary.copy()
+        height, width = binary.shape[:2]
+        return apply_edge_insets(
+            binary, self._effective_edge_insets(width, height)
+        )
 
     def _effective_edge_insets(self, width: int, height: int) -> dict[str, int]:
-        common = max(0, int(self.params.get("edge_inset_all", 0)))
-        return {
-            "left": min(
-                max(common, max(0, int(self.params.get("edge_inset_left", 15)))),
-                width,
-            ),
-            "right": min(
-                max(common, max(0, int(self.params.get("edge_inset_right", 26)))),
-                width,
-            ),
-            "top": min(
-                max(common, max(0, int(self.params.get("edge_inset_top", 50)))),
-                height,
-            ),
-            "bottom": min(
-                max(common, max(0, int(self.params.get("edge_inset_bottom", 20)))),
-                height,
-            ),
-        }
+        return effective_edge_insets(
+            self.params, width, height, CONTOUR_EDGE_DEFAULTS
+        )
 
     def _passes_area_filter(self, area: float) -> bool:
-        min_area = float(self.params.get("min_area", 0.0))
-        max_area = float(self.params.get("max_area", 0.0))
-        if min_area and area < min_area:
-            return False
-        if max_area and area > max_area:
-            return False
-        return True
+        return passes_area_filter(
+            area,
+            float(self.params.get("min_area", 0.0)),
+            float(self.params.get("max_area", 0.0)),
+        )

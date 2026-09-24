@@ -178,7 +178,8 @@ class GuiWorkflowTests(unittest.TestCase):
         session = Mock()
         cache = MagicMock()
         cache.use.return_value.__enter__.return_value = session
-        pipeline = Mock()
+        pipeline = MagicMock()
+        pipeline.__enter__.return_value = pipeline
         pipeline.run.return_value = {"final_result": "PASS"}
         worker = InspectionWorker(
             Path("input.png"), Path("recipe.yaml"), Path("outputs"),
@@ -364,8 +365,50 @@ class GuiWorkflowTests(unittest.TestCase):
                 monitor_worker = window._monitor_controller.start.call_args.args[0]
                 self.assertIs(monitor_worker.gpu_session_cache, window._inspection_gpu_sessions)
                 window.monitor_running = False
+
+                window.image_path = Path("preview.bmp")
+                window._tile_preview_controller.start = Mock()
+                window._preview_contour_tiles({
+                    "tile": {"mode": "grid", "width": 512, "height": 512},
+                    "gpu": {"mode": "auto", "tiling": False},
+                })
+                tile_preview_worker = window._tile_preview_controller.start.call_args.args[0]
+                self.assertIs(
+                    tile_preview_worker.gpu_session_cache,
+                    window._tile_preview_gpu_sessions,
+                )
             finally:
                 window._inspection_gpu_sessions.close()
+                window._tile_preview_gpu_sessions.close()
+                window.deleteLater()
+
+    def test_closing_during_batch_requests_cooperative_cancel_without_a_modal_dialog(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = QSettings(str(Path(temp_dir) / "batch_close.ini"), QSettings.Format.IniFormat)
+            window = MainWindow(settings=settings)
+            try:
+                window._batch_controller.thread = Mock()
+                window._batch_controller.thread.isRunning.return_value = True
+                window._batch_controller.worker = Mock()
+                event = Mock()
+
+                with patch("gui.main_window.QMessageBox.information") as information:
+                    window.closeEvent(event)
+
+                event.ignore.assert_called_once()
+                information.assert_not_called()
+                window._batch_controller.worker.stop.assert_called_once()
+                self.assertTrue(window.batch_cancel_requested)
+                self.assertIn("正在取消批量檢測", window.statusBar().currentMessage())
+                self.assertEqual(
+                    window.run_screen.batch_folder_panel.message_label.text(),
+                    "正在取消批量檢測；目前圖片完成後會停止後續項目。",
+                )
+            finally:
+                window._batch_controller.thread = None
+                window._batch_controller.worker = None
+                window._inspection_gpu_sessions.close()
+                window._tile_preview_gpu_sessions.close()
                 window.deleteLater()
 
     def test_results_keyboard_navigation_and_focus_signal(self):
@@ -787,6 +830,8 @@ class GuiWorkflowTests(unittest.TestCase):
         screen = DesignerScreen()
         screen.set_recipe(recipe)
         screen._select_detector(detector_id)
+        self.assertFalse(screen.detector_notice_label.isHidden())
+        self.assertIn("不可用於量產判定", screen.detector_notice_label.text())
         widgets = screen._param_widgets[detector_id]
 
         self.assertIsNone(screen.param_form.labelForField(widgets["mode"]))
@@ -1086,6 +1131,25 @@ class GuiWorkflowTests(unittest.TestCase):
         self.assertEqual(len(sampled), 1_000)
         self.assertEqual((sampled[0], sampled[-1]), (0, 9_999))
         self.assertEqual(sampled, deterministic_sample(range(10_000), 1_000))
+
+    def test_status_filter_skips_row_copies_for_large_tables(self):
+        model = RowTableModel([TableColumn("結果", "final_result")])
+        model.set_rows(
+            {"final_result": ("PASS" if index % 2 else "NG")}
+            for index in range(1000)
+        )
+        proxy = StatusFilterProxyModel()
+        proxy.setSourceModel(model)
+
+        with patch.object(model, "row_dict", wraps=model.row_dict) as row_dict:
+            proxy.set_status("pass")
+            self.assertEqual(proxy.rowCount(), 500)
+            proxy.set_status("ng")
+            self.assertEqual(proxy.rowCount(), 500)
+            proxy.set_status("all")
+            self.assertEqual(proxy.rowCount(), 1000)
+
+        row_dict.assert_not_called()
 
     def test_batch_tables_fit_columns_from_bounded_row_sample(self):
         from gui.screens.batch_dashboard_screen import BatchDashboardScreen

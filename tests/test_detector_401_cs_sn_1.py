@@ -136,6 +136,23 @@ class Detector401CsSn1ContractTests(unittest.TestCase):
             (("gray",), ("adaptive_mean", 157, -56.0, 255, False)),
         )
 
+    def test_even_configured_block_records_configured_and_effective_values(self):
+        detector = Detector401CsSn1()
+        image = np.zeros((181, 199, 3), dtype=np.uint8)
+        contour = np.array(
+            [[[2, 2]], [[30, 2]], [[30, 30]], [[2, 30]]], dtype=np.int32
+        )
+
+        with patch(
+            "detectors.detector_401_cs_sn_1.cv2.findContours",
+            return_value=([contour], None),
+        ):
+            defects = detector.detect(image)
+
+        metadata = defects[0]["metadata"]
+        self.assertEqual(metadata["adaptive_block_size"], 156)
+        self.assertEqual(metadata["effective_adaptive_block_size"], 157)
+
     def test_four_side_mask_is_exact_and_does_not_mutate_input(self):
         detector = Detector401CsSn1(
             params={
@@ -309,6 +326,12 @@ class Detector401CsSn1ResultTests(unittest.TestCase):
             [[40, 20, 15, 15], [10, 10, 10, 10]],
         )
         self.assertEqual([item["area"] for item in result["defects"]], [196.0, 81.0])
+        first, second = result["defects"]
+        self.assertIsNot(first["metadata"], second["metadata"])
+        self.assertIsNot(
+            first["metadata"]["effective_edge_insets"],
+            second["metadata"]["effective_edge_insets"],
+        )
 
 
 if __name__ == "__main__":

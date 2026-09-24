@@ -4,6 +4,7 @@ import contextlib
 from copy import deepcopy
 import io
 import json
+import logging
 from pathlib import Path
 import tempfile
 import unittest
@@ -15,6 +16,7 @@ import yaml
 
 from core.batch_processor import BatchInspectionProcessor
 from core.detector_manager import DetectorManager
+from core.logging_system import AOILogManager
 from core.pipeline import AOIPipeline
 from core.preprocess_plan import CpuPreprocessExecutor, UnsupportedPreprocessPlan
 from core.recipe_manager import RecipeManager
@@ -84,6 +86,7 @@ class FlowTestDetectorContractTests(unittest.TestCase):
             {"mode": "pass", "defect_x": 0, "defect_y": 0, "defect_width": 32, "defect_height": 32},
         )
         self.assertEqual(definition["param_spec"]["mode"]["choices"], ("pass", "ng", "error"))
+        self.assertTrue(definition["test_only"])
         self.assertEqual(
             {key for key, spec in definition["param_spec"].items() if spec["parameter_group"] == "outer"},
             {"defect_width", "defect_height"},
@@ -118,6 +121,8 @@ class FlowTestDetectorResultTests(unittest.TestCase):
 
         self.assertTrue(result["pass"])
         self.assertEqual(result["defects"], [])
+        self.assertTrue(result["execution"]["test_only"])
+        self.assertIn("不可用於量產", result["execution"]["warning"])
         self.assertIn("preprocess", result["execution"]["performance"]["stages_sec"])
 
     def test_ng_mode_returns_one_fixed_rectangle(self):
@@ -212,6 +217,11 @@ class FlowTestEndToEndTests(unittest.TestCase):
             cv2.imwrite(str(self.images / name), np.full((700, 1100, 3), 90, np.uint8))
 
     def tearDown(self):
+        logger = logging.getLogger("aoi")
+        for handler in list(logger.handlers):
+            logger.removeHandler(handler)
+            handler.close()
+        AOILogManager.instance()._configured = False
         self._temporary.cleanup()
 
     def _cli(self, recipe: Path, output: Path):
@@ -239,6 +249,15 @@ class FlowTestEndToEndTests(unittest.TestCase):
         self.assertEqual(len(list(Path(outputs["ng_tiles_dir"]).glob("*.png"))), 6)
 
         report = json.loads(Path(outputs["json"]).read_text(encoding="utf-8"))
+        executions = [
+            detector["execution"]
+            for tile in report["tiles"]
+            for detector in tile["detectors"]
+            if detector["detector_id"] == DETECTOR_ID
+        ]
+        self.assertTrue(executions)
+        self.assertTrue(all(item["test_only"] for item in executions))
+        self.assertTrue(all("不可用於量產" in item["warning"] for item in executions))
         boxes = sorted(
             tuple(defect["bbox_global"])
             for tile in report["tiles"]
@@ -263,14 +282,14 @@ class FlowTestEndToEndTests(unittest.TestCase):
         passed = self._batch(RECIPE)
         self.assertEqual(
             passed["summary"],
-            {"total": 3, "pass": 3, "ng": 0, "error": 0, "defects": 0, "tiles": 18, "ng_tiles": 0},
+            {"total": 3, "pass": 3, "ng": 0, "error": 0, "cancelled": 0, "defects": 0, "tiles": 18, "ng_tiles": 0},
         )
         self.assertEqual([item["image_name"] for item in passed["items"]], ["a.png", "b.png", "c.bmp"])
 
         failed = self._batch(_write_recipe(self.root, mode="ng"))
         self.assertEqual(
             failed["summary"],
-            {"total": 3, "pass": 0, "ng": 3, "error": 0, "defects": 18, "tiles": 18, "ng_tiles": 18},
+            {"total": 3, "pass": 0, "ng": 3, "error": 0, "cancelled": 0, "defects": 18, "tiles": 18, "ng_tiles": 18},
         )
         self.assertTrue(Path(failed["csv_summary"]).is_file())
         self.assertEqual(len(list((Path(failed["output_dir"]) / "ng_tiles").glob("*.png"))), 18)

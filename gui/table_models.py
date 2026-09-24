@@ -94,15 +94,21 @@ class StatusFilterProxyModel(QSortFilterProxyModel):
         self._status = "all"
 
     def set_status(self, status: str) -> None:
-        self._status = str(status or "all").lower()
-        self.invalidate()
+        status = str(status or "all").lower()
+        if status == self._status:
+            return
+        self.beginFilterChange()
+        self._status = status
+        self.endFilterChange(QSortFilterProxyModel.Direction.Rows)
 
     def filterAcceptsRow(self, source_row: int, source_parent) -> bool:
         if self._status == "all":
             return True
         model = self.sourceModel()
-        row = model.row_dict(source_row) if model is not None else None
-        value = str((row or {}).get(self.status_key, "")).lower()
+        rows = model.rows if model is not None else ()
+        if source_row < 0 or source_row >= len(rows):
+            return False
+        value = str(rows[source_row].get(self.status_key, "")).lower()
         return value == self._status
 
     def row_dict(self, proxy_row: int) -> dict | None:

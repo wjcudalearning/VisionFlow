@@ -465,9 +465,16 @@ class Detector503CsSn1IdentityTests(unittest.TestCase):
 
         self.assertIsInstance(manager.create("503-CS-SN-1"), Detector503CsSn1)
         self.assertEqual(
+            definition["detector_name"], "global_polygon_detector_503"
+        )
+        self.assertEqual(
             definition["default_params"],
             manager.definitions()["506-CS-SN-1"]["default_params"],
         )
+        self.assertIsNot(
+            Detector503CsSn1.default_params, Detector506CsSn1.default_params
+        )
+        self.assertIsNot(Detector503CsSn1.PARAM_SPEC, Detector506CsSn1.PARAM_SPEC)
         self.assertEqual(
             set(definition["param_spec"]), set(definition["default_params"])
         )

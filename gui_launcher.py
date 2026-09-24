@@ -377,15 +377,18 @@ def run_packaged_gpu_fallback_smoke_test() -> int:
             paths[name] = root / f"{name}.yaml"
             paths[name].write_text(yaml.safe_dump(recipe, sort_keys=False), encoding="utf-8")
 
-        cpu_result = AOIPipeline(paths["cpu"], root / "cpu_output").run(image_path)
-        fallback_result = AOIPipeline(paths["fallback"], root / "fallback_output").run(image_path)
+        with AOIPipeline(paths["cpu"], root / "cpu_output") as pipeline:
+            cpu_result = pipeline.run(image_path)
+        with AOIPipeline(paths["fallback"], root / "fallback_output") as pipeline:
+            fallback_result = pipeline.run(image_path)
         if _normalized_smoke_result(cpu_result) != _normalized_smoke_result(fallback_result):
             return 5
         gpu_report = fallback_result.get("execution", {}).get("gpu", {})
         if gpu_report.get("metrics", {}).get("call_count") != 0:
             return 6
         try:
-            AOIPipeline(paths["strict"], root / "strict_output").run(image_path)
+            with AOIPipeline(paths["strict"], root / "strict_output") as pipeline:
+                pipeline.run(image_path)
         except GpuRuntimeError as exc:
             if "CUDA DLL not found" not in str(exc):
                 return 7
@@ -426,7 +429,8 @@ def run_packaged_yolox_smoke_test() -> int:
         if not encoded:
             return 11
         image_path.write_bytes(payload.tobytes())
-        result = AOIPipeline(recipe_path, root / "output").run(image_path)
+        with AOIPipeline(recipe_path, root / "output") as pipeline:
+            result = pipeline.run(image_path)
 
     defect_types = [
         defect["type"]

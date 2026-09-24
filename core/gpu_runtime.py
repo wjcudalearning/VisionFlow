@@ -41,6 +41,29 @@ CONTOUR_MODES = {"list": CUDA_CONTOURS_LIST, "external": CUDA_CONTOURS_EXTERNAL}
 STICKY_CUDA_ERRORS = frozenset({214, 220, 226, 700, 702, 709, 710, 714, 715, 716, 717, 718, 719})
 
 
+def _image_export_prototypes() -> dict[str, list]:
+    """ctypes signatures for the stateless image exports in visionflow_cuda.h."""
+    u8_ptr = ctypes.POINTER(ctypes.c_uint8)
+    integer = ctypes.c_int
+    common = [u8_ptr, integer, integer, integer, integer, u8_ptr, integer, integer]
+    return {
+        "vf_bgr_to_gray_u8": list(common),
+        "vf_bgr_to_rgb_u8": list(common),
+        "vf_crop_u8": [*common, integer, integer, integer, integer],
+        "vf_resize_gray_u8": [*common, integer, integer],
+        "vf_gaussian_blur_u8": [*common, integer],
+        "vf_threshold_u8": [*common, integer, integer, integer],
+        "vf_adaptive_mean_u8": [*common, integer, ctypes.c_float, integer, integer],
+        "vf_morphology_rect_u8": [*common, integer, integer, integer],
+        "vf_preprocess_401_2_u8": [
+            ctypes.c_void_p,
+            u8_ptr, integer, integer, integer, integer,
+            u8_ptr, integer,
+            integer, integer, ctypes.c_float, integer, integer,
+        ],
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class GpuResidentImage:
     runtime: object
@@ -1630,6 +1653,7 @@ class GpuRuntime:
         self._load_optional_context()
 
     def _load_optional_context(self) -> None:
+        self._load_image_export_prototypes()
         create = getattr(self._dll, "vf_context_create", None)
         destroy = getattr(self._dll, "vf_context_destroy", None)
         fused = getattr(self._dll, "vf_preprocess_401_2_u8", None)
@@ -1706,6 +1730,20 @@ class GpuRuntime:
         self._load_optional_cnr_mask_f32()
         self._load_optional_cnr_mask_u8_roi()
         self._load_optional_cnr_candidates_u8_roi()
+
+    def _load_image_export_prototypes(self) -> None:
+        if self._dll is None:
+            return
+        for name, argtypes in _image_export_prototypes().items():
+            function = getattr(self._dll, name, None)
+            if function is None:
+                continue
+            try:
+                function.argtypes = argtypes
+                function.restype = ctypes.c_int
+            except (AttributeError, TypeError):
+                # Plain Python test doubles may not support ctypes metadata. Real DLL exports do.
+                continue
 
     def _load_optional_native_plan(self) -> None:
         query = getattr(self._dll, "vf_plan_query", None)

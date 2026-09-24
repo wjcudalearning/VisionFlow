@@ -84,6 +84,7 @@ class DetectorManager:
             definition = {
                 "display_name": detector_cls.display_name,
                 "detector_name": detector_cls.detector_name,
+                "test_only": bool(getattr(detector_cls, "test_only", False)),
                 "default_params": deepcopy(detector_cls.default_params),
                 "param_spec": {
                     key: spec.to_dict() for key, spec in detector_cls.PARAM_SPEC.items()

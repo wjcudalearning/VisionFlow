@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from copy import deepcopy
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import cv2
 import numpy as np
@@ -274,7 +274,9 @@ class GpuExecutionSessionTests(unittest.TestCase):
             "functions": {}, "persistent_context": {"active": True, "reserved_bytes": 855238144, "allocation_count": 22},
         }
         session = GpuExecutionSession(runtime, requested=True, config={"dll_path": "fake_resident.dll"})
-        pipeline = Mock()
+        pipeline = MagicMock()
+        pipeline.__enter__.return_value = pipeline
+        pipeline.__exit__.return_value = False
         pipeline.run.return_value = {"execution": {"gpu": {
             "resident_image": {"active": True},
             "device_host_split": {"anchor_localization": "device"},
@@ -333,7 +335,9 @@ class GpuExecutionSessionTests(unittest.TestCase):
         missing_session.close()
 
         fallback_session = GpuExecutionSession(_ResidentRuntime(), requested=True, config={"dll_path": "fake_resident.dll"})
-        pipeline = Mock()
+        pipeline = MagicMock()
+        pipeline.__enter__.return_value = pipeline
+        pipeline.__exit__.return_value = False
         pipeline.run.return_value = {"execution": {"gpu": {"detectors": {
             "202-CS-SN-1": {"requested": True, "active": False, "fallback_reason": "kernel error"},
         }}}}

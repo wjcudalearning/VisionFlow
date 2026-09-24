@@ -237,13 +237,14 @@ def _summary(rows: list[dict]) -> dict:
 
 def _run_pipeline(image: Path, recipe: Path, output: Path, session=None) -> dict:
     started = time.perf_counter()
-    result = AOIPipeline(
+    with AOIPipeline(
         recipe, output, gpu_session=session,
         output_overrides={
             "save_overlay": False, "save_ng_tiles": False, "save_csv": False,
             "save_matrix_csv": False, "save_json": False,
         },
-    ).run(image)
+    ) as pipeline:
+        result = pipeline.run(image)
     result["profile_host_wall_ms"] = (time.perf_counter() - started) * 1000.0
     return result
 

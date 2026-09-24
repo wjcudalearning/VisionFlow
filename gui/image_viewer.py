@@ -43,6 +43,8 @@ LOD_DETAIL_MARGIN = 0.125
 
 
 class _DefectItem(QGraphicsRectItem):
+    _shared_mono_font = None
+
     def __init__(self, defect: dict, on_click):
         x, y, w, h = defect.get("bbox_global", [0, 0, 0, 0])
         super().__init__(QRectF(x, y, w, h))
@@ -51,6 +53,7 @@ class _DefectItem(QGraphicsRectItem):
         self._on_click = on_click
         self._is_status_overlay = defect.get("overlay_role") in {"pattern_match_status", "tile_status"}
         self._color = self._overlay_color(defect)
+        self._selected: bool | None = None
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setZValue(2)
         self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
@@ -73,17 +76,35 @@ class _DefectItem(QGraphicsRectItem):
             return QColor(COLORS["ng"] if defect.get("status") == "NG" else COLORS["pass"])
         return QColor(DEFECT_COLORS.get(defect.get("type", ""), DEFECT_COLOR_FALLBACK))
 
-    @staticmethod
-    def _mono_font():
+    @classmethod
+    def _mono_font(cls):
         from PySide6.QtGui import QFont
 
+        if cls._shared_mono_font is not None:
+            return cls._shared_mono_font
         font = QFont("IBM Plex Mono")
         font.setStyleHint(QFont.StyleHint.Monospace)
         font.setPointSize(9)
         font.setWeight(QFont.Weight.DemiBold)
-        return font
+        cls._shared_mono_font = font
+        return cls._shared_mono_font
+
+    def update_defect(self, defect: dict) -> None:
+        self._defect = defect
+        self.defect_id = defect.get("id")
+        x, y, width, height = defect.get("bbox_global", [0, 0, 0, 0])
+        self.setRect(QRectF(x, y, width, height))
+        self._is_status_overlay = defect.get("overlay_role") in {"pattern_match_status", "tile_status"}
+        self._color = self._overlay_color(defect)
+        self._label_bg.setBrush(QBrush(self._color))
+        self._selected = None
+        self.set_selected(False)
 
     def set_selected(self, selected: bool) -> None:
+        selected = bool(selected)
+        if self._selected is selected:
+            return
+        self._selected = selected
         width = 3.0 if self._is_status_overlay else (2.5 if selected else 1.5)
         pen = QPen(self._color, width)
         pen.setCosmetic(True)
@@ -553,14 +574,21 @@ class ImageViewer(QWidget):
     def set_defects(self, defects: list[dict]) -> None:
         self.view.setUpdatesEnabled(False)
         try:
-            self._clear_defects(refresh=False)
+            previous_items = self._defect_items
+            self._defect_items = {}
             for defect in defects:
-                item = _DefectItem(defect, self._on_defect_clicked)
+                defect_id = defect.get("id")
+                item = previous_items.pop(defect_id, None)
+                if item is None:
+                    item = _DefectItem(defect, self._on_defect_clicked)
+                    self._scene.addItem(item)
+                else:
+                    item.update_defect(defect)
                 item.setVisible(self._show_overlay)
-                self._scene.addItem(item)
                 self._defect_items[item.defect_id] = item
-            if self._selected_defect_id is not None:
-                self.set_selected_defect(self._selected_defect_id)
+            for item in previous_items.values():
+                self._scene.removeItem(item)
+            self._selected_defect_id = None
         finally:
             self.view.setUpdatesEnabled(True)
         self.refresh_overlay_view()
@@ -580,9 +608,15 @@ class ImageViewer(QWidget):
         self.view.viewport().update()
 
     def set_selected_defect(self, defect_id) -> None:
+        if defect_id == self._selected_defect_id:
+            return
+        previous = self._defect_items.get(self._selected_defect_id)
+        if previous is not None:
+            previous.set_selected(False)
         self._selected_defect_id = defect_id
-        for item_id, item in self._defect_items.items():
-            item.set_selected(item_id == defect_id)
+        selected = self._defect_items.get(defect_id)
+        if selected is not None:
+            selected.set_selected(True)
 
     def focus_defect(self, defect_id) -> bool:
         item = self._defect_items.get(defect_id)

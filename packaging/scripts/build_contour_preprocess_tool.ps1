@@ -6,9 +6,10 @@ param(
 $ErrorActionPreference = "Stop"
 
 # Build scripts live in packaging\scripts; the repository root is two levels up.
-$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
 $SpecRoot = Join-Path $RepoRoot "packaging\specs"
 . (Join-Path $PSScriptRoot "pyinstaller_path_guard.ps1")
+. (Join-Path $PSScriptRoot "pyinstaller_build.ps1")
 
 $expectedVersion = "1.1.0"
 if ($Version -ne $expectedVersion) {
@@ -35,19 +36,19 @@ if (Test-Path -LiteralPath $exePath) {
     throw "Refusing to overwrite an existing versioned executable: $exePath"
 }
 
-Push-Location $RepoRoot
+Push-Location -LiteralPath $RepoRoot
 try {
-    Invoke-WithCleanBuildPath {
-        & $python -m PyInstaller `
-            --noconfirm `
-            --clean `
-            --distpath $distRoot `
-            --workpath $workRoot `
-            $spec
-        if ($LASTEXITCODE -ne 0) {
-            throw "PyInstaller failed with exit code $LASTEXITCODE"
-        }
+    $buildArguments = @{
+        PythonPath = $python
+        SpecPath = $spec
+        VersionInfoPath = (Join-Path $RepoRoot "build\version_info\Traditional CV Tuning Tool.txt")
+        ProductName = "Traditional CV Tuning Tool"
+        ExecutableName = "Traditional CV Tuning Tool.exe"
+        Version = $Version
+        DistPath = $distRoot
+        WorkPath = $workRoot
     }
+    Invoke-PyInstallerBuild @buildArguments
 
     Copy-Item -LiteralPath $readme -Destination (Join-Path $distRoot "README.md") -Force
     $commit = (& git rev-parse HEAD).Trim()

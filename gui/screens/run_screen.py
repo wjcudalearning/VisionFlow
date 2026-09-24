@@ -356,6 +356,7 @@ class RunControlPanel(Panel):
 class BatchFolderPanel(Panel):
     choose_folder_requested = Signal()
     start_batch_requested = Signal()
+    cancel_batch_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(title="批量資料夾", parent=parent)
@@ -392,6 +393,14 @@ class BatchFolderPanel(Panel):
         self.start_button.clicked.connect(self.start_batch_requested.emit)
         self.add_widget(self.start_button)
 
+        self.cancel_button = QPushButton("取消批量檢測")
+        self.cancel_button.setProperty("variant", "secondary")
+        self.cancel_button.setProperty("size", "sm")
+        self.cancel_button.setIcon(icons.icon("x", size=14, color=COLORS["text_2"]))
+        self.cancel_button.setVisible(False)
+        self.cancel_button.clicked.connect(self.cancel_batch_requested.emit)
+        self.add_widget(self.cancel_button)
+
         progress_row = QWidget()
         progress_layout = QHBoxLayout(progress_row)
         progress_layout.setContentsMargins(0, 0, 0, 0)
@@ -417,11 +426,15 @@ class BatchFolderPanel(Panel):
             f"color: {COLORS['text_2'] if folder else COLORS['text_3']}; font-size: 11px;"
         )
 
-    def set_ready(self, ready: bool, running: bool) -> None:
+    def set_ready(self, ready: bool, running: bool, cancelling: bool = False) -> None:
         self.choose_button.setEnabled(not running)
         self.recursive_check.setEnabled(not running)
         self.start_button.setEnabled(ready and not running)
         self.start_button.setText("批量檢測中" if running else "開始批量檢測")
+        self.cancel_button.setVisible(running)
+        self.cancel_button.setEnabled(running)
+        self.cancel_button.setText("取消中…" if cancelling else "取消批量檢測")
+        self.cancel_button.setEnabled(running and not cancelling)
 
     def set_progress(self, pct: int, message: str) -> None:
         pct = max(0, min(100, int(pct)))
@@ -445,7 +458,13 @@ class BatchDataPanel(Panel):
         stats_layout.setContentsMargins(12, 10, 12, 10)
         stats_layout.setSpacing(6)
         self._stat_labels: dict[str, QLabel] = {}
-        for key, label in (("total", "總數"), ("pass", "PASS"), ("ng", "NG"), ("error", "ERROR")):
+        for key, label in (
+            ("total", "總數"),
+            ("pass", "PASS"),
+            ("ng", "NG"),
+            ("error", "ERROR"),
+            ("cancelled", "取消"),
+        ):
             cell = QWidget()
             cell_layout = QVBoxLayout(cell)
             cell_layout.setContentsMargins(0, 0, 0, 0)
@@ -500,7 +519,7 @@ class BatchDataPanel(Panel):
             items = result.get("items", [])
             output_dir = result.get("output_dir", "")
 
-        for key in ("total", "pass", "ng", "error"):
+        for key in ("total", "pass", "ng", "error", "cancelled"):
             self._stat_labels[key].setText(str(summary.get(key, 0)))
         batch_duration = _format_duration(result.get("duration_sec") if result else None)
         self.output_label.setText(f"{output_dir}\n總耗時：{batch_duration}" if output_dir else "")
@@ -616,6 +635,7 @@ class RunScreen(QWidget):
     view_results_requested = Signal()
     choose_batch_folder_requested = Signal()
     start_batch_requested = Signal()
+    cancel_batch_requested = Signal()
     warmup_requested = Signal()
     compare_requested = Signal()
 
@@ -670,6 +690,7 @@ class RunScreen(QWidget):
         self.recipe_info_panel.open_recipe_requested.connect(self.open_recipe_requested.emit)
         self.batch_folder_panel.choose_folder_requested.connect(self.choose_batch_folder_requested.emit)
         self.batch_folder_panel.start_batch_requested.connect(self.start_batch_requested.emit)
+        self.batch_folder_panel.cancel_batch_requested.connect(self.cancel_batch_requested.emit)
 
         self.set_mode("eng")
 
@@ -684,8 +705,8 @@ class RunScreen(QWidget):
     def set_batch_folder(self, folder: str | None) -> None:
         self.batch_folder_panel.set_folder(folder)
 
-    def set_batch_ready(self, ready: bool, running: bool) -> None:
-        self.batch_folder_panel.set_ready(ready, running)
+    def set_batch_ready(self, ready: bool, running: bool, cancelling: bool = False) -> None:
+        self.batch_folder_panel.set_ready(ready, running, cancelling)
 
     def set_batch_progress(self, pct: int, message: str) -> None:
         self.batch_folder_panel.set_progress(pct, message)

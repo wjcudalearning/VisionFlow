@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -51,6 +52,28 @@ class AOIPipeline(LogMixin):
         )
         self._active_profiler = None
         self._last_progress_percent = None
+        self._tile_executor: ThreadPoolExecutor | None = None
+        self._tile_executor_workers = 0
+        self._tile_executor_runtime = None
+        self._tile_worker_local = threading.local()
+        self._tile_executor_lock = threading.Lock()
+
+    def close(self) -> None:
+        """Stop cached tile workers and release their thread-local Detectors."""
+        with self._tile_executor_lock:
+            executor = self._tile_executor
+            self._tile_executor = None
+            self._tile_executor_workers = 0
+            self._tile_executor_runtime = None
+            self._tile_worker_local = threading.local()
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=False)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback):
+        self.close()
 
     def run(self, image_path: Path) -> InspectionResult:
         if self.gpu_session is not None:
@@ -488,17 +511,41 @@ class AOIPipeline(LogMixin):
     def _inspect_tiles_parallel(
         self, tiles, detector_configs, gpu_runtime, profiler, workers, debug_images=False
     ) -> list[dict]:
-        local = threading.local()
+        with self._tile_executor_lock:
+            if (
+                self._tile_executor is None
+                or self._tile_executor_workers != workers
+                or self._tile_executor_runtime is not gpu_runtime
+            ):
+                previous = self._tile_executor
+                self._tile_executor = ThreadPoolExecutor(
+                    max_workers=workers, thread_name_prefix="AOI-Tile"
+                )
+                self._tile_executor_workers = workers
+                self._tile_executor_runtime = gpu_runtime
+                self._tile_worker_local = threading.local()
+            else:
+                previous = None
+            executor = self._tile_executor
+            local = self._tile_worker_local
+        if previous is not None:
+            previous.shutdown(wait=True, cancel_futures=False)
+
+        detector_signature = json.dumps(
+            detector_configs, sort_keys=True, separators=(",", ":"), default=str
+        )
+        worker_signature = (detector_signature, bool(debug_images))
 
         def thread_detectors():
-            detectors = getattr(local, "detectors", None)
-            if detectors is None:
+            cached = getattr(local, "detector_state", None)
+            if cached is None or cached[0] != worker_signature:
                 detectors = self.detector_manager.create_enabled(
                     detector_configs, gpu_runtime=gpu_runtime
                 )
                 self._apply_debug_flag(detectors, debug_images)
-                local.detectors = detectors
-            return detectors
+                local.detector_state = (worker_signature, detectors)
+                return detectors
+            return cached[1]
 
         def work(indexed_tile):
             index, tile = indexed_tile
@@ -506,14 +553,13 @@ class AOIPipeline(LogMixin):
             return index, tile_result, timings
 
         results: list[dict | None] = [None] * len(tiles)
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            for completed, (index, tile_result, timings) in enumerate(
-                executor.map(work, enumerate(tiles)), start=1
-            ):
-                results[index] = tile_result
-                self._record_tile_timings(profiler, timings)
-                percent = 20 + int(completed / len(tiles) * 60)
-                self._progress(min(percent, 80), f"檢測 Tile {completed}/{len(tiles)}")
+        for completed, (index, tile_result, timings) in enumerate(
+            executor.map(work, enumerate(tiles)), start=1
+        ):
+            results[index] = tile_result
+            self._record_tile_timings(profiler, timings)
+            percent = 20 + int(completed / len(tiles) * 60)
+            self._progress(min(percent, 80), f"檢測 Tile {completed}/{len(tiles)}")
         return results
 
     @staticmethod

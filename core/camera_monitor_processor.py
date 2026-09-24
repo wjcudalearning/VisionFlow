@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import datetime
-import gc
 import threading
 import time
+from contextlib import contextmanager
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -22,7 +22,7 @@ from core.monitor_processor import (
     MonitorStopCallback,
 )
 from core.pipeline import AOIPipeline
-from core.result_compactor import compact_inspection_result
+from core.processor_common import GenerationZeroGcThrottle, summarize_pipeline_result
 
 # Frames can be hundreds of MB (16384 x 50000 mono is 819 MB), so the hand-off queue stays small and
 # a full queue reports the frame as not inspected instead of growing without bound.
@@ -145,6 +145,33 @@ class CameraMonitorProcessor(LogMixin):
         self._dropped_count = 0
         self._raw_saved_count = 0
         self._raw_failed_count = 0
+        self._pipeline: AOIPipeline | None = None
+        self._active_progress_prefix = ""
+        self._gc_throttle = GenerationZeroGcThrottle()
+
+    @contextmanager
+    def _pipeline_scope(self):
+        try:
+            yield
+        finally:
+            if self._pipeline is not None:
+                self._pipeline.close()
+                self._pipeline = None
+
+    def _pipeline_progress(self, percent: int, message: str) -> None:
+        prefix = f"{self._active_progress_prefix}: " if self._active_progress_prefix else ""
+        self._progress(percent, f"{prefix}{message}")
+
+    def _get_pipeline(self, monitor_output_dir: Path, gpu_session: GpuExecutionSession) -> AOIPipeline:
+        if self._pipeline is None:
+            self._pipeline = AOIPipeline(
+                recipe_path=self.recipe_path,
+                output_dir=monitor_output_dir,
+                output_overrides=self.output_overrides,
+                gpu_session=gpu_session,
+                progress_callback=self._pipeline_progress,
+            )
+        return self._pipeline
 
     def run(self) -> dict:
         started_at = datetime.datetime.now()
@@ -165,16 +192,13 @@ class CameraMonitorProcessor(LogMixin):
         return summary
 
     def _run(self, started_at: datetime.datetime, monitor_output_dir: Path, session_started: float) -> dict:
-        with GpuExecutionSession.scoped(self.recipe_path, self.gpu_session) as gpu_session:
-            session_ms = round((time.perf_counter() - session_started) * 1000.0, 1)
-            gpu_warmup = {
-                "session_ms": session_ms,
-                **gpu_session.warm_up_before_run(
-                    self.recipe_path,
-                    self.warmup_image_path,
-                    progress_callback=lambda pct, msg: self._progress(pct, msg),
-                ),
-            }
+        with GpuExecutionSession.scoped(self.recipe_path, self.gpu_session) as gpu_session, self._pipeline_scope():
+            gpu_warmup = gpu_session.prepare_processor_run(
+                self.recipe_path,
+                session_started,
+                self.warmup_image_path,
+                progress_callback=lambda pct, msg: self._progress(pct, msg),
+            )
             self.logger.info("Camera monitor GPU warm-up: %s", gpu_warmup)
             self._progress(0, f"{GpuExecutionSession.warm_up_notice(gpu_warmup)}等待相機觸發影像")
             while not self._should_stop():
@@ -218,33 +242,29 @@ class CameraMonitorProcessor(LogMixin):
         result = None
         try:
             self.logger.info("Camera frame inspection started: frame=%s shape=%s", frame.source_name, frame.image.shape)
-            pipeline = AOIPipeline(
-                recipe_path=self.recipe_path,
-                output_dir=monitor_output_dir,
-                output_overrides=self.output_overrides,
-                gpu_session=gpu_session,
-                progress_callback=lambda pct, msg: self._progress(pct, f"{frame.source_name}: {msg}"),
-            )
+            self._active_progress_prefix = frame.source_name
+            pipeline = self._get_pipeline(monitor_output_dir, gpu_session)
             result = pipeline.run_frame(frame.image, frame.source_name, frame.metadata)
-            pipeline_duration = float(result.get("duration_sec", 0) or 0)
-            summary = result.get("summary", {})
+            fields = summarize_pipeline_result(result)
+            pipeline_duration = fields["duration_sec"]
             item = MonitorImageResult(
                 image_path=Path(frame.source_name),
-                final_result=str(result.get("final_result", "-")),
-                defect_count=int(summary.get("defect_count", 0)),
-                ng_count=int(summary.get("ng_count", 0)),
-                tile_count=int(summary.get("tile_count", 0)),
+                final_result=fields["final_result"],
+                defect_count=fields["defect_count"],
+                ng_count=fields["ng_count"],
+                tile_count=fields["tile_count"],
                 duration_sec=0.0,
-                outputs=result.get("outputs", {}),
-                detail=compact_inspection_result(result),
+                outputs=fields["outputs"],
+                detail=fields["detail"],
                 timing={},
             )
         except Exception as exc:
             self.logger.exception("Camera frame inspection failed: frame=%s", frame.source_name)
             item = self._error_item(frame.source_name, str(exc))
         finally:
+            self._active_progress_prefix = ""
             result = None
-            gc.collect(0)
+            self._gc_throttle.maybe_collect()
         raw_info = self._finish_raw_save(frame.source_name, raw_save)
         self._emit(item, frame.received_at, processing_started, pipeline_duration, frame.metadata, raw_info)
         self._processed_count += 1

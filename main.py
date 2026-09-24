@@ -65,12 +65,12 @@ def main() -> int:
         raise SystemExit("--image and --recipe are required unless --gui is used.")
 
     logger.info("CLI inspection requested: image=%s recipe=%s output=%s", args.image, args.recipe, args.output)
-    pipeline = AOIPipeline(
+    with AOIPipeline(
         recipe_path=Path(args.recipe),
         output_dir=Path(args.output),
         debug=args.debug,
-    )
-    result = pipeline.run(Path(args.image))
+    ) as pipeline:
+        result = pipeline.run(Path(args.image))
     CsvSummaryExporter.finalize_result(Path(args.output), result)
 
     summary = {

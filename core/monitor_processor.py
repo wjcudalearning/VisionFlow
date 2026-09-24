@@ -1,19 +1,22 @@
 from __future__ import annotations
 
 import datetime
-import gc
 import shutil
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 from core.csv_summary import CsvSummaryExporter
 from core.gpu_session import GpuExecutionSession
-from core.image_loader import SUPPORTED_EXTENSIONS
 from core.logging_system import LogMixin
 from core.pipeline import AOIPipeline
-from core.result_compactor import compact_inspection_result
+from core.processor_common import (
+    GenerationZeroGcThrottle,
+    discover_supported_images,
+    summarize_pipeline_result,
+)
 
 
 MonitorProgressCallback = Callable[[int, str], None]
@@ -95,6 +98,33 @@ class FolderMonitorProcessor(LogMixin):
         self._last_scan_wall = time.time()
         self._last_scan_monotonic = time.perf_counter()
         self._processed_count = 0
+        self._pipeline: AOIPipeline | None = None
+        self._active_progress_prefix = ""
+        self._gc_throttle = GenerationZeroGcThrottle()
+
+    @contextmanager
+    def _pipeline_scope(self):
+        try:
+            yield
+        finally:
+            if self._pipeline is not None:
+                self._pipeline.close()
+                self._pipeline = None
+
+    def _pipeline_progress(self, percent: int, message: str) -> None:
+        prefix = f"{self._active_progress_prefix}: " if self._active_progress_prefix else ""
+        self._progress(percent, f"{prefix}{message}")
+
+    def _get_pipeline(self, monitor_output_dir: Path, gpu_session: GpuExecutionSession) -> AOIPipeline:
+        if self._pipeline is None:
+            self._pipeline = AOIPipeline(
+                recipe_path=self.recipe_path,
+                output_dir=monitor_output_dir,
+                output_overrides=self.output_overrides,
+                gpu_session=gpu_session,
+                progress_callback=self._pipeline_progress,
+            )
+        return self._pipeline
 
     def run(self) -> dict:
         if not self.input_dir.exists():
@@ -116,9 +146,8 @@ class FolderMonitorProcessor(LogMixin):
             len(self._seen),
         )
         session_started = time.perf_counter()
-        with GpuExecutionSession.scoped(self.recipe_path, self.gpu_session) as gpu_session:
-            session_ms = round((time.perf_counter() - session_started) * 1000.0, 1)
-            gpu_warmup = self._warm_up_gpu(gpu_session, session_ms)
+        with GpuExecutionSession.scoped(self.recipe_path, self.gpu_session) as gpu_session, self._pipeline_scope():
+            gpu_warmup = self._warm_up_gpu(gpu_session, session_started)
             self._progress(0, f"{GpuExecutionSession.warm_up_notice(gpu_warmup)}正在監控 {self.input_dir}")
             while not self._should_stop():
                 self._enqueue_new_stable_images()
@@ -154,21 +183,19 @@ class FolderMonitorProcessor(LogMixin):
         self.logger.info("Folder monitor stopped: summary=%s", summary)
         return summary
 
-    def _warm_up_gpu(self, gpu_session: GpuExecutionSession, session_ms: float) -> dict:
+    def _warm_up_gpu(self, gpu_session: GpuExecutionSession, session_started_at: float) -> dict:
         """Warm the monitor's own session before the first product arrives.
 
         Monitoring waits for the first image anyway, so the CUDA context and, with a sample image,
         the production-size device buffers are paid here instead of on the first real result. The
         sample run writes no outputs and is not counted, moved or reported as a monitor item.
         """
-        summary = {
-            "session_ms": session_ms,
-            **gpu_session.warm_up_before_run(
-                self.recipe_path,
-                self.warmup_image_path,
-                progress_callback=lambda pct, msg: self._progress(pct, msg),
-            ),
-        }
+        summary = gpu_session.prepare_processor_run(
+            self.recipe_path,
+            session_started_at,
+            self.warmup_image_path,
+            progress_callback=lambda pct, msg: self._progress(pct, msg),
+        )
         self.logger.info("Monitor GPU warm-up: %s", summary)
         return summary
 
@@ -209,17 +236,11 @@ class FolderMonitorProcessor(LogMixin):
         move_duration = 0.0
         try:
             self.logger.info("Monitor image started: image=%s", image_path)
-            pipeline = AOIPipeline(
-                recipe_path=self.recipe_path,
-                output_dir=monitor_output_dir,
-                output_overrides=self.output_overrides,
-                gpu_session=gpu_session,
-                progress_callback=lambda pct, msg: self._progress(pct, f"{image_path.name}: {msg}"),
-            )
+            self._active_progress_prefix = image_path.name
+            pipeline = self._get_pipeline(monitor_output_dir, gpu_session)
             result = pipeline.run(image_path)
-            pipeline_duration = float(result.get("duration_sec", 0) or 0)
-            summary = result.get("summary", {})
-            compact_detail = compact_inspection_result(result)
+            fields = summarize_pipeline_result(result)
+            pipeline_duration = fields["duration_sec"]
             move_started = time.perf_counter()
             moved_path = self._move_processed_image(image_path)
             move_duration = time.perf_counter() - move_started
@@ -236,13 +257,13 @@ class FolderMonitorProcessor(LogMixin):
             self.logger.info("Monitor image timing: image=%s timing=%s", image_path, timing)
             return MonitorImageResult(
                 image_path=current_image_path,
-                final_result=str(result.get("final_result", "-")),
-                defect_count=int(summary.get("defect_count", 0)),
-                ng_count=int(summary.get("ng_count", 0)),
-                tile_count=int(summary.get("tile_count", 0)),
+                final_result=fields["final_result"],
+                defect_count=fields["defect_count"],
+                ng_count=fields["ng_count"],
+                tile_count=fields["tile_count"],
                 duration_sec=timing["end_to_end_sec"],
-                outputs=result.get("outputs", {}),
-                detail=compact_detail,
+                outputs=fields["outputs"],
+                detail=fields["detail"],
                 timing=timing,
                 source_image_path=image_path,
                 moved_image_path=moved_path,
@@ -272,8 +293,9 @@ class FolderMonitorProcessor(LogMixin):
                 error=str(exc),
             )
         finally:
+            self._active_progress_prefix = ""
             result = None
-            gc.collect(0)
+            self._gc_throttle.maybe_collect()
 
     def _estimate_arrival_monotonic(
         self,
@@ -353,11 +375,7 @@ class FolderMonitorProcessor(LogMixin):
             index += 1
 
     def _discover_images(self) -> list[Path]:
-        return sorted(
-            path
-            for path in self.input_dir.rglob("*")
-            if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS
-        )
+        return discover_supported_images(self.input_dir, recursive=True)
 
     def _is_stable(self, image_path: Path) -> bool:
         try:

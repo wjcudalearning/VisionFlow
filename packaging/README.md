@@ -33,8 +33,9 @@ packaging/
    ```
 
    只要 spec 維持在 `packaging/specs/` 這一層，所有來源路徑都會自動跟著走。
-2. **建置腳本以自身位置回推根目錄**：`$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path`。不要寫依賴 CWD 的相對路徑，否則從別處呼叫就會走鐘。
+2. **建置腳本以自身位置回推根目錄**：`$RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))`。不要用會展開萬用字元的 `Resolve-Path`，repository 路徑含 `[` 或 `]` 時會被誤判；輸入檔案一律用 `-LiteralPath` 檢查或複製。
 3. **這些檔案必須維持純 ASCII。** Windows PowerShell 5.1 會把「無 BOM 的 UTF-8」當 ANSI 讀取，中文註解可能連行尾一起吃掉，導致下一行被併入註解而整段失效（實際踩過：`$RepoRoot` 變成 `$null`）。中文說明請寫在本檔或 `docs/`。
-4. **`build_utility_tools.ps1` 以同層相對名稱呼叫其餘腳本**，被呼叫的腳本各自回推根目錄，因此新增工具時只要在 `scripts/` 放同名腳本並加進 `$buildScripts` 即可。
+4. **共用 PyInstaller helper**：所有 EXE builder dot-source `pyinstaller_build.ps1`；它產生含工具版本與 Git commit 的 PE version resource、以清理過的 `PATH` 呼叫 PyInstaller，並集中處理 exit code。所有 spec 都設 `upx=False`，避免建置結果依建置機是否安裝 UPX 而改變。
+5. **`build_utility_tools.ps1` 以同層相對名稱呼叫其餘腳本**，被呼叫的腳本各自回推根目錄，因此新增工具時只要在 `scripts/` 放同名腳本並加進 `$buildScripts` 即可。
 
 `tests/test_utility_packaging.py` 會驗證：根目錄不得再出現 `*.ps1`／`*.spec`、每個 spec 都有建置腳本引用、spec 具備上述 `SPECPATH` 慣例，以及建置腳本不再用 `$PSScriptRoot` 當根目錄。

@@ -1,9 +1,10 @@
 $ErrorActionPreference = "Stop"
 
 # Build scripts live in packaging\scripts; the repository root is two levels up.
-$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
 $SpecRoot = Join-Path $RepoRoot "packaging\specs"
 . (Join-Path $PSScriptRoot "pyinstaller_path_guard.ps1")
+. (Join-Path $PSScriptRoot "pyinstaller_build.ps1")
 
 $python = Join-Path $RepoRoot "env\Scripts\python.exe"
 if (-not (Test-Path -LiteralPath $python)) {
@@ -18,19 +19,19 @@ if (-not (Test-Path -LiteralPath $spec)) {
 $distRoot = Join-Path $RepoRoot "dist\Scatter-Plot-Exporter"
 $workRoot = Join-Path $RepoRoot "build\scatter_plot_exporter"
 
-Push-Location $RepoRoot
+Push-Location -LiteralPath $RepoRoot
 try {
-    Invoke-WithCleanBuildPath {
-        & $python -m PyInstaller `
-            --noconfirm `
-            --clean `
-            --distpath $distRoot `
-            --workpath $workRoot `
-            $spec
-        if ($LASTEXITCODE -ne 0) {
-            throw "PyInstaller failed with exit code $LASTEXITCODE"
-        }
+    $buildArguments = @{
+        PythonPath = $python
+        SpecPath = $spec
+        VersionInfoPath = (Join-Path $RepoRoot "build\version_info\Scatter Plot Exporter.txt")
+        ProductName = "Scatter Plot Exporter"
+        ExecutableName = "Scatter-Plot-Exporter.exe"
+        Version = "1.0.0"
+        DistPath = $distRoot
+        WorkPath = $workRoot
     }
+    Invoke-PyInstallerBuild @buildArguments
 } finally {
     Pop-Location
 }

@@ -412,11 +412,35 @@ def validate_primitives(runtime: GpuRuntime) -> list[dict]:
             f"morphology_{operation}", runtime.morphology(binary, operation, 3, 1), expected,
             "preprocess.morphology_u8",
         ))
-    # The 5x5 path uses a shared-memory separable kernel. Cover partial CUDA
-    # blocks, neutral borders, BGR channels, and repeated open/close passes.
+    # The 3x3 global path and 5x5 shared-memory path cover partial CUDA blocks,
+    # neutral borders, BGR channels, strided inputs and repeated passes.
     morphology_rng = np.random.default_rng(20260914)
     for shape in ((1, 1), (17, 19), (65, 67), (65, 67, 3)):
         source = morphology_rng.integers(0, 256, shape, dtype=np.uint8)
+        for operation, cv_operation, iterations in (
+            ("open", cv2.MORPH_OPEN, 2),
+            ("close", cv2.MORPH_CLOSE, 2),
+            ("erode", cv2.MORPH_ERODE, 1),
+            ("dilate", cv2.MORPH_DILATE, 1),
+        ):
+            expected = (
+                cv2.morphologyEx(source, cv_operation, np.ones((3, 3), dtype=np.uint8), iterations=iterations)
+                if operation in {"open", "close"}
+                else cv2.erode(source, np.ones((3, 3), dtype=np.uint8), iterations=iterations)
+                if operation == "erode"
+                else cv2.dilate(source, np.ones((3, 3), dtype=np.uint8), iterations=iterations)
+            )
+            label = f"morphology_k3_{operation}_i{iterations}_{'x'.join(map(str, shape))}"
+            metrics.append(compare(
+                label, runtime.morphology(source, operation, 3, iterations), expected,
+                "preprocess.morphology_u8",
+            ))
+            if runtime.supports_native_plan:
+                plan = PreprocessPlan((Morphology(operation, 3, iterations),), name=label)
+                metrics.append(compare(
+                    f"native_{label}", runtime.execute_plan(source, plan), expected,
+                    "preprocess.morphology_u8",
+                ))
         for operation, cv_operation, iterations in (
             ("open", cv2.MORPH_OPEN, 10),
             ("close", cv2.MORPH_CLOSE, 2),
@@ -459,8 +483,18 @@ def validate_primitives(runtime: GpuRuntime) -> list[dict]:
         metrics.append(compare(
             "native_morphology_k5_strided_bgr",
             runtime.execute_plan(strided_morphology, strided_plan), strided_expected,
-            "preprocess.morphology_u8",
-        ))
+        "preprocess.morphology_u8",
+    ))
+    strided_k3_expected = cv2.morphologyEx(
+        strided_morphology, cv2.MORPH_OPEN,
+        np.ones((3, 3), dtype=np.uint8), iterations=2,
+    )
+    metrics.append(compare(
+        "morphology_k3_strided_bgr",
+        runtime.morphology(strided_morphology, "open", 3, 2),
+        strided_k3_expected,
+        "preprocess.morphology_u8",
+    ))
     if runtime.supports_native_plan:
         native_plans = (
             PreprocessPlan(

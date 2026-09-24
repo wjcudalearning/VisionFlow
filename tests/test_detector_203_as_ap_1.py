@@ -461,6 +461,11 @@ class Detector203AsAp1ResultTests(unittest.TestCase):
             first["metadata"]["morphology"],
             {"operation": "open", "kernel": 3, "iterations": 1},
         )
+        second = result["defects"][1]
+        self.assertIsNot(first["metadata"], second["metadata"])
+        self.assertIsNot(first["metadata"]["morphology"], second["metadata"]["morphology"])
+        first["metadata"]["morphology"]["operation"] = "mutated"
+        self.assertEqual(second["metadata"]["morphology"]["operation"], "open")
 
         with patch.object(detector, "_make_binary", return_value=np.zeros_like(binary)):
             passed = detector.run(np.zeros((80, 100, 3), dtype=np.uint8))

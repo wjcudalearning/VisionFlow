@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -46,6 +47,18 @@ def _fake_session(summary=None, error=None, events=None):
         return dict(summary or {"status": "warmed", "image_used": True})
 
     session.warm_up_before_run.side_effect = warm_up_before_run
+
+    def prepare_processor_run(recipe_path, session_started_at, image_path=None, progress_callback=None):
+        import time
+
+        return {
+            "session_ms": round(max(0.0, time.perf_counter() - session_started_at) * 1000.0, 1),
+            **session.warm_up_before_run(
+                recipe_path, image_path, progress_callback=progress_callback
+            ),
+        }
+
+    session.prepare_processor_run.side_effect = prepare_processor_run
     return session
 
 
@@ -196,8 +209,8 @@ class BatchWarmupTests(unittest.TestCase):
 
         self.assertEqual(factory.call_args.kwargs, {"workload": "throughput"})
         self.assertEqual(session.warm_up_before_run.call_count, 1)
-        self.assertEqual(len(session.warm_up_before_run.call_args.args), 1)
-        self.assertNotIn("progress_callback", session.warm_up_before_run.call_args.kwargs)
+        self.assertEqual(len(session.warm_up_before_run.call_args.args), 2)
+        self.assertIsNone(session.warm_up_before_run.call_args.kwargs["progress_callback"])
         self.assertEqual(events[0], "warm_up")
         self.assertEqual([event[1] for event in events[1:]], ["image0.png", "image1.png"])
         self.assertTrue(all(event[2] is session for event in events[1:]))
@@ -231,6 +244,43 @@ class BatchWarmupTests(unittest.TestCase):
         result, factory, _ = self._run(session, events, images=0)
         factory.assert_not_called()
         self.assertNotIn("gpu_warmup", result)
+
+    def test_batch_cancellation_finishes_current_image_and_marks_pending_images(self):
+        with tempfile.TemporaryDirectory(prefix="visionflow_batch_cancel_") as temporary:
+            root = Path(temporary)
+            images = [root / f"image{index}.png" for index in range(3)]
+            processor = BatchInspectionProcessor(
+                root, root / "recipe.yaml", root / "output", max_workers=1,
+            )
+            processor.discover_images = lambda: images
+            image_started = threading.Event()
+            finish_image = threading.Event()
+            result_holder = {}
+
+            def process_image(image_path, _output_dir, _gpu_session):
+                image_started.set()
+                self.assertTrue(finish_image.wait(3), "test did not release current image")
+                return BatchImageResult(image_path, "PASS", 0, 0, 1, 0.01, {}, {})
+
+            session = _fake_session({"status": "context_only", "image_used": False})
+            with patch(
+                "core.batch_processor.GpuExecutionSession.from_recipe_path", return_value=session
+            ), patch.object(processor, "_process_image", side_effect=process_image), patch(
+                "core.batch_processor.CsvSummaryExporter.write_summary", return_value=None
+            ):
+                runner = threading.Thread(target=lambda: result_holder.setdefault("result", processor.run()))
+                runner.start()
+                self.assertTrue(image_started.wait(3), "batch did not start its first image")
+                processor.stop()
+                finish_image.set()
+                runner.join(5)
+
+            self.assertFalse(runner.is_alive(), "batch did not stop after current image completed")
+            result = result_holder["result"]
+            self.assertEqual([item["final_result"] for item in result["items"]], ["PASS", "CANCELLED", "CANCELLED"])
+            self.assertEqual(result["summary"]["pass"], 1)
+            self.assertEqual(result["summary"]["cancelled"], 2)
+            self.assertEqual(result["summary"]["error"], 0)
 
 
 class InjectedSessionTests(unittest.TestCase):
@@ -291,8 +341,8 @@ class InjectedSessionTests(unittest.TestCase):
                 worker.run()
             self.assertIs(processor_type.call_args.kwargs["gpu_session"], session, target)
             cache.use.assert_called_once_with(Path("recipe.yaml"))
-            self.assertEqual(exits_before_run, [0], f"{target} released the session before its run ended")
-            cache.use.return_value.__exit__.assert_called_once()
+        self.assertEqual(exits_before_run, [0], f"{target} released the session before its run ended")
+        cache.use.return_value.__exit__.assert_called_once()
 
         # A strict CUDA failure raised by the run still returns the session to the cache.
         cache.use.reset_mock()
@@ -311,6 +361,23 @@ class InjectedSessionTests(unittest.TestCase):
             processor_type.return_value.run.return_value = {"summary": {}}
             worker.run()
         self.assertIsNone(processor_type.call_args.kwargs["gpu_session"])
+
+    def test_gui_batch_worker_passes_its_stop_event_to_the_processor(self):
+        from gui.workers import BatchInspectionWorker
+
+        cache = MagicMock()
+        cache.use.return_value.__enter__.return_value = object()
+        worker = BatchInspectionWorker(
+            Path("images"), Path("recipe.yaml"), Path("output"), gpu_session_cache=cache
+        )
+        worker.stop()
+
+        with patch("gui.workers.BatchInspectionProcessor") as processor_type:
+            processor_type.return_value.run.return_value = {"summary": {}}
+            worker.run()
+
+        self.assertIs(processor_type.call_args.kwargs["cancel_event"], worker._stop_event)
+        self.assertTrue(processor_type.call_args.kwargs["cancel_event"].is_set())
 
 
 if __name__ == "__main__":

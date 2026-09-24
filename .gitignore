@@ -10,6 +10,9 @@ venv/
 outputs_validation/
 outputs/logs/
 outputs/ccd_snapshots/
+outputs/csv/*
+!outputs/csv/.gitkeep
+outputs/reports/
 # Machine-level CCD camera and meter wheel settings written by the GUI.
 /config/ccd_machine.json
 /config/ccd_machine.json.tmp
@@ -22,6 +25,12 @@ dist/
 
 # Local versioned release packages live under release_artifacts/.
 *.zip
+!tests/fixtures/**/*.zip
+
+node_modules/
+*.pdb
+*.ilk
+*.obj
 /gpu/cuda_build_preflight.json
 /gpu/test_cuda_api.exe
 /gpu/cufft64_*.dll

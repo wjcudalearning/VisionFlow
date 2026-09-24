@@ -5,6 +5,10 @@ on:
     - cron: "30 20 * * 0"
   workflow_dispatch:
 
+concurrency:
+  group: weekly-packaging-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 

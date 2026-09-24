@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 # Build scripts live in packaging\scripts; the repository root is two levels up.
-$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
 
 $buildScripts = @(
     "build_ng_tile_area_tool.ps1",
@@ -60,7 +60,9 @@ $tools = @(
 )
 
 $resolvedTools = foreach ($tool in $tools) {
-    $sourceMatches = @(Get-ChildItem -Path (Join-Path $RepoRoot $tool.Source) -File)
+    $sourceDirectory = Join-Path $RepoRoot (Split-Path -Parent $tool.Source)
+    $sourcePattern = Split-Path -Leaf $tool.Source
+    $sourceMatches = @(Get-ChildItem -LiteralPath $sourceDirectory -Filter $sourcePattern -File)
     if ($sourceMatches.Count -ne 1) {
         throw "Expected exactly one built executable for $($tool.Source), found $($sourceMatches.Count)"
     }

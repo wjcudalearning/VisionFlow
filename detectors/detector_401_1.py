@@ -14,9 +14,13 @@ from detectors.base_detector import BaseDetector
 
 
 class Detector401_1(BaseDetector):
+    """401-1 circle detector with fixed confidence formula `min(1, area / image_area * 20)`."""
+
     detector_id = "401-CS-AP-1"
     detector_name = "adaptive_circle_contour_detector"
     display_name = "401-CS-AP-1 adaptive circle contour detector"
+    CONFIDENCE_AREA_SCALE = 20.0
+    CONFIDENCE_CAP = 1.0
     default_params = {
         "threshold_method": "adaptive_mean",
         "max_value": 255,
@@ -94,7 +98,10 @@ class Detector401_1(BaseDetector):
             x = max(0, int(round((cx_scaled - radius_scaled) * inv_scale + offset_x)))
             y = max(0, int(round((cy_scaled - radius_scaled) * inv_scale + offset_y)))
             diameter = max(1, int(round(radius * 2.0)))
-            confidence = min(1.0, area / image_area * 20.0)
+            confidence = min(
+                self.CONFIDENCE_CAP,
+                area / image_area * self.CONFIDENCE_AREA_SCALE,
+            )
 
             defects.append(
                 {

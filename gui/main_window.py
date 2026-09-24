@@ -210,6 +210,7 @@ class MainWindow(QMainWindow, LogMixin):
         self.history: list[dict] = []
         self.batch_dir: Path | None = None
         self.batch_running = False
+        self.batch_cancel_requested = False
         self.batch_result: dict | None = None
         self.monitor_dir: Path | None = None
         self.monitor_move_dir: Path | None = None
@@ -251,6 +252,9 @@ class MainWindow(QMainWindow, LogMixin):
         # run also prepares the next batch/monitor. Runs on it are serialized; throughput queue depth
         # only bounds concurrent requests inside one run.
         self._inspection_gpu_sessions = GpuExecutionSessionCache(workload="throughput")
+        # Tile preview settings may be unsaved designer state, so keep its runtime cache separate
+        # from inspection sessions while still reusing it across consecutive previews.
+        self._tile_preview_gpu_sessions = GpuExecutionSessionCache(workload="throughput")
         self._batch_thread: QThread | None = None
         self._batch_worker: BatchInspectionWorker | None = None
         self._monitor_thread: QThread | None = None
@@ -505,6 +509,7 @@ class MainWindow(QMainWindow, LogMixin):
         self.run_screen.image_viewer.overlay_toggled.connect(self._on_overlay_toggled)
         self.run_screen.choose_batch_folder_requested.connect(self._choose_batch_folder)
         self.run_screen.start_batch_requested.connect(self._run_batch_inspection)
+        self.run_screen.cancel_batch_requested.connect(self._cancel_batch_inspection)
         self.monitor_screen.choose_folder_requested.connect(self._choose_monitor_folder)
         self.monitor_screen.choose_move_folder_requested.connect(self._choose_monitor_move_folder)
         self.monitor_screen.source_changed.connect(self._on_monitor_source_changed)
@@ -750,7 +755,7 @@ class MainWindow(QMainWindow, LogMixin):
 
     def _update_batch_ready(self) -> None:
         ready = self.batch_dir is not None and self.recipe_path is not None and not self.batch_running
-        self.run_screen.set_batch_ready(ready, self.batch_running)
+        self.run_screen.set_batch_ready(ready, self.batch_running, self.batch_cancel_requested)
 
     def _run_batch_inspection(self) -> None:
         if not self.batch_dir:
@@ -764,6 +769,7 @@ class MainWindow(QMainWindow, LogMixin):
             return
 
         self.batch_running = True
+        self.batch_cancel_requested = False
         self._batch_started_at = datetime.datetime.now()
         self._update_batch_ready()
         self.run_screen.set_batch_progress(0, "正在啟動批量檢測")
@@ -795,6 +801,18 @@ class MainWindow(QMainWindow, LogMixin):
         self.topbar.set_running(True, percent)
         self.statusBar().showMessage("批量檢測中")
 
+    def _cancel_batch_inspection(self) -> None:
+        if not self._batch_controller.is_running:
+            return
+        self.batch_cancel_requested = True
+        self._batch_controller.stop()
+        self.run_screen.set_batch_progress(
+            self.run_screen.batch_folder_panel.progress_bar.value(),
+            "正在取消批量檢測；目前圖片完成後會停止後續項目。",
+        )
+        self.statusBar().showMessage("正在取消批量檢測")
+        self._update_batch_ready()
+
     def _on_batch_finished(self, result: dict) -> None:
         self.batch_result = result
         self.run_screen.set_batch_result(result)
@@ -802,7 +820,8 @@ class MainWindow(QMainWindow, LogMixin):
         summary = result.get("summary", {})
         message = (
             f"批量完成：總數 {summary.get('total', 0)}，"
-            f"PASS {summary.get('pass', 0)}, NG {summary.get('ng', 0)}, ERR {summary.get('error', 0)}"
+            f"PASS {summary.get('pass', 0)}, NG {summary.get('ng', 0)}, "
+            f"ERR {summary.get('error', 0)}, 取消 {summary.get('cancelled', 0)}"
         )
         self.run_screen.set_batch_progress(100, message)
         completed_detail = next(
@@ -811,7 +830,7 @@ class MainWindow(QMainWindow, LogMixin):
         )
         if completed_detail:
             self.topbar.set_backend_status(_backend_status_from_result(completed_detail))
-        self._notice(message, "success")
+        self._notice(message, "warning" if summary.get("cancelled", 0) else "success")
 
     def _on_batch_failed(self, message: str) -> None:
         self.run_screen.set_batch_progress(0, "批量檢測失敗")
@@ -819,6 +838,7 @@ class MainWindow(QMainWindow, LogMixin):
 
     def _on_batch_thread_finished(self) -> None:
         self.batch_running = False
+        self.batch_cancel_requested = False
         self._batch_controller.clear()
         self.topbar.set_running(False, 0)
         self._update_batch_ready()
@@ -1532,7 +1552,12 @@ class MainWindow(QMainWindow, LogMixin):
         self.statusBar().showMessage("切圖預覽中...")
         tile_config = preview_config.get("tile", preview_config)
         gpu_config = preview_config.get("gpu", {})
-        worker = TilePreviewWorker(self.image_path, tile_config, gpu_config=gpu_config)
+        worker = TilePreviewWorker(
+            self.image_path,
+            tile_config,
+            gpu_config=gpu_config,
+            gpu_session_cache=self._tile_preview_gpu_sessions,
+        )
         self._tile_preview_controller.start(
             worker,
             signal_handlers=(
@@ -1589,7 +1614,7 @@ class MainWindow(QMainWindow, LogMixin):
             event.ignore()
             return
         if self._batch_thread and self._batch_thread.isRunning():
-            QMessageBox.information(self, "背景作業", "批量檢測仍在執行中，請等待完成後再關閉。")
+            self._cancel_batch_inspection()
             event.ignore()
             return
         if self._monitor_thread and self._monitor_thread.isRunning():
@@ -1605,6 +1630,7 @@ class MainWindow(QMainWindow, LogMixin):
             return
         self.ccd_controller.close()
         self._inspection_gpu_sessions.close()
+        self._tile_preview_gpu_sessions.close()
         self._save_preferences()
         super().closeEvent(event)
 

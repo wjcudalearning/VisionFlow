@@ -5,12 +5,17 @@ on:
     - cron: "15 19 * * *"
   workflow_dispatch:
 
+concurrency:
+  group: rtx-heartbeat-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   actions: read
   contents: read
 
 jobs:
   verify-recent-success:
+    if: github.repository == 'wjcudalearning/VisionFlow'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

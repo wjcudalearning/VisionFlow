@@ -14,6 +14,11 @@ import numpy as np
 import core.recipe_manager as recipe_manager
 from core.batch_processor import BatchInspectionProcessor
 from core.pipeline import AOIPipeline
+from core.processor_common import (
+    GenerationZeroGcThrottle,
+    discover_supported_images,
+    summarize_pipeline_result,
+)
 from core.recipe_manager import RecipeManager
 from core.report_artifacts import ReportImageEncoder
 from core.report_writers import JsonReportWriter
@@ -146,10 +151,89 @@ class WorkerAndGcPolicyTests(unittest.TestCase):
 
     def test_gc_interval_and_collection(self):
         proc = self._processor(AOI_BATCH_GC_INTERVAL="3")
-        with mock.patch("core.batch_processor.gc.collect") as collect:
+        with mock.patch("core.processor_common.gc.collect") as collect:
             for _ in range(6):
                 proc._maybe_collect()
             self.assertEqual(collect.call_count, 2)
+
+
+class SharedProcessorHelperTests(unittest.TestCase):
+    def test_gc_throttle_collects_only_at_shared_interval(self):
+        throttle = GenerationZeroGcThrottle(interval=3)
+        with mock.patch("core.processor_common.gc.collect") as collect:
+            self.assertEqual([throttle.maybe_collect() for _ in range(8)], [False, False, True, False, False, True, False, False])
+        self.assertEqual(collect.call_count, 2)
+
+    def test_zero_gc_interval_disables_collection(self):
+        throttle = GenerationZeroGcThrottle(interval=0)
+        with mock.patch("core.processor_common.gc.collect") as collect:
+            self.assertFalse(throttle.maybe_collect())
+        collect.assert_not_called()
+
+    def test_image_discovery_is_sorted_and_can_recurse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "z.png").touch()
+            (root / "a.jpg").touch()
+            (root / "ignore.txt").touch()
+            child = root / "nested"
+            child.mkdir()
+            (child / "b.bmp").touch()
+
+            self.assertEqual(
+                [path.name for path in discover_supported_images(root)],
+                ["a.jpg", "z.png"],
+            )
+            self.assertEqual(
+                [path.relative_to(root).as_posix() for path in discover_supported_images(root, recursive=True)],
+                ["a.jpg", "nested/b.bmp", "z.png"],
+            )
+
+    def test_summary_helper_preserves_shared_summary_and_compact_detail(self):
+        result = {
+            "image_name": "part.png",
+            "final_result": "NG",
+            "summary": {"tile_count": 1, "ng_count": 1, "defect_count": 1, "detector_ng_counts": {"d1": 1}},
+            "duration_sec": 0.25,
+            "outputs": {"overlay": "overlay.png"},
+            "execution": {"test_only": False},
+            "internal_debug_payload": "must not leak into compact detail",
+            "tiles": [
+                {
+                    "tile": {"tile_id": "tile_0", "x": 0, "y": 0, "width": 10, "height": 10, "row": 0, "col": 0, "unused": 1},
+                    "result": "NG",
+                    "detectors": [
+                        {
+                            "detector_id": "d1",
+                            "pass": False,
+                            "score": 0.5,
+                            "execution": {"backend": "cpu"},
+                            "unused": 1,
+                            "defects": [{"type": "scratch", "bbox_global": [1, 2, 3, 4], "area": 2, "unused": 1}],
+                        }
+                    ],
+                }
+            ],
+        }
+
+        fields = summarize_pipeline_result(result)
+
+        self.assertEqual(
+            {key: fields[key] for key in ("final_result", "defect_count", "ng_count", "tile_count", "duration_sec", "outputs")},
+            {
+                "final_result": "NG",
+                "defect_count": 1,
+                "ng_count": 1,
+                "tile_count": 1,
+                "duration_sec": 0.25,
+                "outputs": {"overlay": "overlay.png"},
+            },
+        )
+        self.assertEqual(fields["detail"]["summary"], result["summary"])
+        self.assertEqual(fields["detail"]["outputs"], result["outputs"])
+        self.assertEqual(fields["detail"]["tiles"][0]["tile"].keys(), {"tile_id", "x", "y", "width", "height", "row", "col"})
+        self.assertNotIn("internal_debug_payload", fields["detail"])
+        self.assertNotIn("unused", fields["detail"]["tiles"][0]["detectors"][0])
 
 
 class ReporterParameterTests(unittest.TestCase):

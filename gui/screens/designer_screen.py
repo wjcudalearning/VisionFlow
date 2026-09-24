@@ -813,7 +813,9 @@ class DesignerScreen(QWidget):
         score_text = ""
         best_score = shape_counts.get("best_score")
         gpu_backend = shape_counts.get("gpu_backend", {})
-        if gpu_backend.get("active"):
+        if gpu_backend.get("preview_route") == "cpu_crop":
+            score_text += " · CPU 切圖"
+        elif gpu_backend.get("active"):
             score_text += " · CUDA DLL"
         elif gpu_backend.get("requested"):
             score_text += " · CPU fallback"
@@ -1147,6 +1149,17 @@ class DesignerScreen(QWidget):
             return
         self.detector_notice_label.setVisible(False)
         self.detector_notice_label.setText("")
+        definition = self.detector_definitions.get(self._active_detector, {})
+        if definition.get("test_only"):
+            message = "此 Detector 僅供流程驗證，會固定回傳測試結果，不可用於量產判定。"
+            self.detector_notice_label.setText(message)
+            self.detector_notice_label.setStyleSheet(
+                f"color: {COLORS['warn']}; background: rgba(255,180,60,0.08); "
+                "border: 1px solid rgba(255,180,60,0.25); "
+                "border-radius: 6px; padding: 8px;"
+            )
+            self.detector_notice_label.setVisible(True)
+            return
         if self._active_detector != "yolox":
             return
 
