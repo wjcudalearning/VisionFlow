@@ -262,6 +262,14 @@ class AdvantechDigitalIoTests(unittest.TestCase):
         self.assertFalse(io.is_connected)
         self.assertEqual(bdaq.disposed, 2)
 
+    def test_a_device_number_is_passed_as_a_number(self):
+        seen = []
+        bdaq = FakeBdaq()
+        bdaq.DeviceInformation = lambda device: seen.append(device) or ("device", device)
+        io = self._io(bdaq)
+        io.connect(SensorRelaySettings(device="0"))
+        self.assertEqual(seen, [0, 0])
+
     def test_vendor_error_codes_become_operator_errors(self):
         io = self._io(FakeBdaq(read_result=("ErrorCode.ErrorPrivilegeNotHeld", 0), write_result="ErrorFuncBusy"))
         io.connect(ENABLED)

@@ -157,12 +157,14 @@ class AdvantechDigitalIo(DigitalIo):
             path = locate_assembly(settings.assembly_path or self._configured_path(), self._environ)
             if path is None and self._namespace_loader is _load_namespace:
                 raise DeviceError(self.availability().reason)
+            # DAQNavi accepts a description ("PCIe-1730,BID#0") or a device number ("0").
+            device = int(settings.device) if settings.device.isdigit() else settings.device
             try:
                 bdaq = self._namespace_loader(path)
                 di = bdaq.InstantDiCtrl()
-                di.SelectedDevice = bdaq.DeviceInformation(settings.device)
+                di.SelectedDevice = bdaq.DeviceInformation(device)
                 do = bdaq.InstantDoCtrl()
-                do.SelectedDevice = bdaq.DeviceInformation(settings.device)
+                do.SelectedDevice = bdaq.DeviceInformation(device)
             except DeviceError:
                 raise
             except Exception as exc:  # noqa: BLE001 - any driver/.NET failure becomes an operator message

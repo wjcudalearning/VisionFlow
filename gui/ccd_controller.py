@@ -48,6 +48,12 @@ from devices.sapera_api import (
     SaperaVersions,
     translate_exception,
 )
+from devices.legacy_program_import import ImportFinding as LegacyImportFinding
+from devices.legacy_program_import import (
+    LegacyImportError,
+    LegacyImportReport,
+    scan_legacy_program,
+)
 from devices.sensor_relay import MODE_FORWARD, MODE_LABELS, MODE_SNAP, SensorRelay, relay_mode
 from devices.trigger_automation import (
     SOFTWARE_TRIGGER_POLL_SEC,
@@ -217,6 +223,8 @@ class CcdController(QObject, LogMixin):
     #: `SensorRelayStats` whenever the PCIe-1730 Sensor relay starts, stops or counts something.
     sensor_relay_changed = Signal(object)
     sensor_relay_settings_changed = Signal(object)
+    #: (LegacyImportReport, current values by finding key) after scanning the original program.
+    legacy_import_ready = Signal(object, object)
     sapera_versions_changed = Signal(object)
     #: `TriggerDiagnosis` while an external-trigger watch runs, None when it ends.
     trigger_diagnosis_changed = Signal(object)
@@ -361,6 +369,8 @@ class CcdController(QObject, LogMixin):
         screen.sensor_input_read_requested.connect(self.read_sensor_input)
         screen.sensor_output_pulse_requested.connect(self.pulse_sensor_output)
         screen.sensor_dll_selected.connect(self.set_sensor_dll_path)
+        screen.legacy_program_selected.connect(self.import_legacy_program)
+        screen.legacy_import_apply_requested.connect(self.apply_legacy_import)
 
         self.camera_status_changed.connect(screen.set_camera_status)
         self.camera_busy_changed.connect(screen.set_camera_busy)
@@ -376,6 +386,7 @@ class CcdController(QObject, LogMixin):
         self.trigger_diagnosis_changed.connect(screen.set_trigger_diagnosis)
         self.sensor_relay_changed.connect(screen.set_sensor_relay_stats)
         self.sensor_relay_settings_changed.connect(screen.set_sensor_relay_settings)
+        self.legacy_import_ready.connect(screen.show_legacy_import)
 
         self._publish_availability()
         screen.set_camera_settings(self.camera_settings_view())
@@ -1313,6 +1324,102 @@ class CcdController(QObject, LogMixin):
             "info",
         )
         return True
+
+    # ------------------------------------------------------------------
+    # 從原機台程式匯入（smart import from the original C# program）
+    # ------------------------------------------------------------------
+    def import_legacy_program(self, path: str) -> LegacyImportReport | None:
+        """Scan the original program's .sln/.csproj/folder; the screen shows the confirmation table."""
+        try:
+            report = scan_legacy_program(path)
+        except LegacyImportError as exc:
+            self.notice.emit(str(exc), "warning")
+            return None
+        except OSError as exc:
+            self.notice.emit(f"讀取原程式失敗：{exc}", "error")
+            return None
+        applicable = len(report.applicable)
+        self.status_message.emit(f"原程式掃描完成：{report.files_scanned} 個原始檔，找到 {applicable} 個可套用的值。")
+        self.legacy_import_ready.emit(report, self.legacy_current_values())
+        return report
+
+    def legacy_current_values(self) -> dict[str, str]:
+        wheel = self._machine.meter_wheel
+        relay = self._machine.sensor_relay
+        acquisition = self._product.acquisition
+        return {
+            "meter_wheel.card_id": str(wheel.card_id),
+            "meter_wheel.compare_increment": str(wheel.compare_increment),
+            "meter_wheel.multiple_rate": MultipleRate(wheel.multiple_rate).name,
+            "meter_wheel.cmp_out_width": str(wheel.cmp_out_width),
+            "meter_wheel.reverse_direction": "是" if wheel.reverse_direction else "否",
+            "sensor_relay.device": relay.device,
+            "sensor_relay.di_port": str(relay.di_port),
+            "sensor_relay.di_bit": str(relay.di_bit),
+            "sensor_relay.do_port": str(relay.do_port),
+            "sensor_relay.do_bit": str(relay.do_bit),
+            "sensor_relay.do_active_low": "是" if relay.do_active_low else "否",
+            "sensor_relay.pulse_ms": f"{relay.pulse_ms:g}",
+            "connection.config_file_path": self._machine.connection.config_file_path,
+            "acquisition.length_lines": str(acquisition.length_lines),
+            "acquisition.exposure_time": f"{acquisition.exposure_time:g}",
+            "acquisition.gain": f"{acquisition.gain:g}",
+        }
+
+    def apply_legacy_import(self, findings: Sequence[LegacyImportFinding]) -> list[str]:
+        """Apply the confirmed values through the normal CCD settings paths; returns applied labels."""
+        values = {f.key: f.value for f in findings if f.applicable}
+        labels = {f.key: f.label for f in findings}
+        applied: list[str] = []
+        skipped: list[str] = []
+
+        wheel_card = values.pop("meter_wheel.card_id", None)
+        if wheel_card is not None and int(wheel_card) != self._machine.meter_wheel.card_id:
+            if self.devices.meter_wheel.is_connected:
+                skipped.append(f"{labels['meter_wheel.card_id']}（米輪連線中，請斷線後再匯入）")
+            elif self._save_meter_wheel(replace(self._machine.meter_wheel, card_id=int(wheel_card)).normalized()):
+                applied.append(labels["meter_wheel.card_id"])
+        elif wheel_card is not None:
+            applied.append(labels["meter_wheel.card_id"])
+        wheel_actions = (
+            ("meter_wheel.compare_increment", lambda v: self.apply_compare_increment(int(v))),
+            ("meter_wheel.multiple_rate", lambda v: self.set_multiple_rate(MultipleRate(v))),
+            ("meter_wheel.cmp_out_width", lambda v: self.set_cmp_out_width(int(v))),
+            ("meter_wheel.reverse_direction", lambda v: self.set_reverse_direction(bool(v))),
+        )
+        for key, action in wheel_actions:
+            if key in values:
+                action(values.pop(key))
+                applied.append(labels[key])
+
+        relay_fields = {key.split(".", 1)[1]: values.pop(key) for key in list(values) if key.startswith("sensor_relay.")}
+        if relay_fields:
+            if self._sensor_relay is not None:
+                skipped.extend(f"{labels['sensor_relay.' + name]}（Sensor 中繼執行中）" for name in relay_fields)
+            else:
+                relay = replace(self._machine.sensor_relay, **relay_fields).normalized()
+                if self._save_machine(replace(self._machine, sensor_relay=relay)):
+                    self.sensor_relay_settings_changed.emit(self._machine.sensor_relay)
+                    applied.extend(labels["sensor_relay." + name] for name in relay_fields)
+
+        connection = self._machine.connection
+        if "connection.config_file_path" in values:
+            connection = replace(connection, config_file_path=str(values.pop("connection.config_file_path")))
+            applied.append(labels["connection.config_file_path"])
+        acquisition_fields = {key.split(".", 1)[1]: values.pop(key) for key in list(values) if key.startswith("acquisition.")}
+        if acquisition_fields or connection != self._machine.connection:
+            product = replace(
+                self._product, acquisition=replace(self._product.acquisition, **acquisition_fields).normalized()
+            )
+            applied.extend(labels["acquisition." + name] for name in acquisition_fields)
+            # Same path as the CCD page's 「套用相機設定」: product values become an unsaved Recipe edit.
+            self.apply_camera_settings(connection, product)
+
+        if applied:
+            self.notice.emit(f"已從原程式套用：{'、'.join(applied)}。", "success")
+        if skipped:
+            self.notice.emit(f"以下項目未套用：{'、'.join(skipped)}。", "warning")
+        return applied
 
     # ------------------------------------------------------------------
     # meter wheel

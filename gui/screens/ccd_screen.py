@@ -5,6 +5,7 @@ from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFormLayout,
     QGraphicsPixmapItem,
@@ -234,6 +235,8 @@ class CcdScreen(QWidget):
     sensor_input_read_requested = Signal()
     sensor_output_pulse_requested = Signal()
     sensor_dll_selected = Signal(str)
+    legacy_program_selected = Signal(str)
+    legacy_import_apply_requested = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -271,6 +274,7 @@ class CcdScreen(QWidget):
         controls_layout = QVBoxLayout(controls)
         controls_layout.setContentsMargins(0, 0, 6, 0)
         controls_layout.setSpacing(12)
+        controls_layout.addWidget(self._build_legacy_import_panel())
         controls_layout.addWidget(self._build_camera_panel())
         controls_layout.addWidget(self._build_settings_panel())
         controls_layout.addWidget(self._build_sapera_diagnostics_panel())
@@ -307,6 +311,47 @@ class CcdScreen(QWidget):
     # ------------------------------------------------------------------
     # construction
     # ------------------------------------------------------------------
+    def _build_legacy_import_panel(self) -> Panel:
+        """Admin-only smart import: read the original machine program and apply its settings."""
+        panel = Panel(title="從原機台程式匯入（智能模式）")
+        panel.add_widget(
+            _hint(
+                "選擇原機台程式的 .sln（或 .csproj）。程式只讀取 C# 原始碼與設定檔、不會執行它，"
+                "會追過類別、方法參數、常數、列舉與設定檔，找出米輪、Sensor 中繼（PCIe-1730）與 CCF／影像長度等設定，"
+                "列出確認表讓你勾選後才套用。"
+            )
+        )
+        self.legacy_import_button = self.gate.register(_button("選擇原程式 .sln…", "primary", "folder"))
+        self.legacy_import_button.clicked.connect(self._choose_legacy_program)
+        panel.add_widget(_row(self.legacy_import_button))
+        self.legacy_import_panel = panel
+        return panel
+
+    def _choose_legacy_program(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "選擇原機台程式",
+            "",
+            "Visual Studio 方案 (*.sln);;C# 專案 (*.csproj);;所有檔案 (*.*)",
+        )
+        if path:
+            self.legacy_program_selected.emit(path)
+
+    def show_legacy_import(self, report, current) -> None:
+        """Show the confirmation table; the chosen findings go back to the controller."""
+        dialog = self.legacy_dialog_factory(report, current, self)
+        self.legacy_import_dialog = dialog
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            selected = dialog.selected_findings()
+            if selected:
+                self.legacy_import_apply_requested.emit(selected)
+
+    @staticmethod
+    def legacy_dialog_factory(report, current, parent):
+        from gui.legacy_import_dialog import LegacyImportDialog  # noqa: PLC0415 - opened on demand
+
+        return LegacyImportDialog(report, current, parent)
+
     def _build_camera_panel(self) -> Panel:
         panel = Panel(title="相機連線")
         self.camera_availability_label = _hint(color=COLORS["warn"])
@@ -871,6 +916,7 @@ class CcdScreen(QWidget):
     def set_mode(self, mode: str) -> None:
         self.gate.set_mode(mode)
         self.extension_panel.setVisible(mode == "admin")
+        self.legacy_import_panel.setVisible(mode == "admin")
         self.diagnostics_panel.setVisible(mode == "admin")
 
     def set_availability(self, camera: DeviceAvailability, meter_wheel: DeviceAvailability) -> None:
