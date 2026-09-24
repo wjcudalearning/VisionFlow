@@ -43,7 +43,7 @@ The normal development machine may not have `nvcc`, CMake, or an NVIDIA GPU. Nev
 - `core/`: pipeline, recipe loading/building, tiling, aggregation, reporting, profiling, batch/monitor processing, result schemas/compaction, GPU sessions/bridge, preprocessing plans and executors.
 - `detectors/`: detector-specific feature extraction, geometry, filtering, and result metadata.
 - `gpu/`: CUDA C ABI, kernels, persistent contexts, build scripts, native smoke tests, and CPU/GPU validation.
-- `devices/`: optional acquisition hardware (CCD line-scan camera, LSI-8181 meter wheel, PCIe-1730 Sensor relay I/O): backend-neutral interfaces, typed settings, simulators, vendor bindings, machine-level settings store, and frame writing. No Qt imports.
+- `devices/`: optional acquisition hardware (CCD line-scan camera, LSI-8181 meter wheel, PCIe-1730 Sensor relay I/O, RS-232 light controller): backend-neutral interfaces, typed settings, simulators, vendor bindings, machine-level settings store, and frame writing. No Qt imports.
 - `gui/`: PySide6 screens, widgets, workers, status, and preview behavior; `gui/ccd_controller.py` owns the long-lived CCD sessions.
 - `recipes/`: YAML configuration and production defaults.
 - `tests/`: automated correctness, fallback, routing, and regression tests.
@@ -113,7 +113,8 @@ Put behavior in the narrowest appropriate module. Do not duplicate pipeline or f
 - Trigger automation (external-trigger meter-wheel writes, the software-trigger monitor, auto-save) follows the trigger settings actually written to the camera at connect, never unapplied edits. Driver and monitor threads only hand work to the GUI thread, which owns camera and meter-wheel commands; Stop ends monitoring but never aborts a frame that is still capturing.
 - Camera-direct monitoring inspects only frames from trigger-mode connections, hands them off through the bounded `CameraFrameQueue`, and reports every frame that could not be queued as an ERROR item. `AOIPipeline.run_frame` must stay pixel-identical to inspecting the same frame saved as an 8-bit BMP, keep the file-path entry point and its result schema unchanged, and in GPU mode treat the frame as a decoded image uploaded once.
 - On the camera machine the Sensor reaches the grabber only through a PCIe-1730 DI -> program -> DO path. The optional Sensor relay (`devices/sensor_relay.py`) is machine-level, off by default, and must never run alongside the machine's original I/O program. It follows the trigger written at connect: External Trigger One Frame pulses the DO from the relay thread itself; Software Trigger hands each DI edge to the GUI thread for one `Snap()`. The relay owns the card only while it runs and releases it when it stops.
-- Do not mark CCD, meter wheel, or Sensor relay items hardware-validated until they run on the camera machine.
+- The RS-232 light controller is machine-level and brand-neutral: it sends the original program's on/off commands and per-channel brightness rendered from a template. When enabled, camera-direct monitoring switches it on at start and off at stop; otherwise it is switched by hand, and `CcdController.close()` switches it off. All serial exchanges run on one light thread.
+- Do not mark CCD, meter wheel, Sensor relay, or light items hardware-validated until they run on the camera machine.
 
 ## Detector parameter access contract
 

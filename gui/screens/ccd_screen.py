@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -33,8 +34,15 @@ from devices.ccd_models import (
     IMAGE_SAVE_FORMAT_LABELS,
     INT16_RANGE,
     LENGTH_LINES_RANGE,
+    LIGHT_BRIGHTNESS_MAX_RANGE,
+    LIGHT_COMMAND_DELAY_MS_RANGE,
+    LIGHT_REPLY_TIMEOUT_MS_RANGE,
+    LINE_ENDINGS,
     LINE_RATE_HZ_RANGE,
     MULTIPLE_RATE_LABELS,
+    SERIAL_BAUD_RATES,
+    SERIAL_PARITIES,
+    SERIAL_STOP_BITS,
     SENSOR_MIN_INTERVAL_MS_RANGE,
     SENSOR_POLL_MS_RANGE,
     SENSOR_PULSE_MS_RANGE,
@@ -48,6 +56,8 @@ from devices.ccd_models import (
     DeviceAvailability,
     ExtensionCompareChannel,
     ImageSaveFormat,
+    LightChannel,
+    LightSettings,
     MeterWheelSettings,
     MeterWheelSnapshot,
     MultipleRate,
@@ -237,6 +247,11 @@ class CcdScreen(QWidget):
     sensor_dll_selected = Signal(str)
     legacy_program_selected = Signal(str)
     legacy_import_apply_requested = Signal(object)
+    light_settings_applied = Signal(object)
+    light_on_requested = Signal()
+    light_off_requested = Signal()
+    light_brightness_applied = Signal(object)
+    light_test_requested = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -281,6 +296,7 @@ class CcdScreen(QWidget):
         controls_layout.addWidget(self._build_save_panel())
         controls_layout.addWidget(self._build_meter_wheel_panel())
         controls_layout.addWidget(self._build_sensor_relay_panel())
+        controls_layout.addWidget(self._build_light_panel())
         self.extension_panel = self._build_extension_panel()
         controls_layout.addWidget(self.extension_panel)
         controls_layout.addStretch(1)
@@ -766,6 +782,190 @@ class CcdScreen(QWidget):
         if stats.error:
             text += f"\n錯誤：{stats.error}"
         self.sensor_relay_stats_label.setText(text)
+
+    def _build_light_panel(self) -> Panel:
+        """RS-232 light: on/off and per-channel brightness, plus the controller commands (admin)."""
+        panel = Panel(title="光源（RS-232）")
+        self.light_availability_label = _hint(color=COLORS["warn"])
+        self.light_availability_label.setVisible(False)
+        panel.add_widget(self.light_availability_label)
+        panel.add_widget(
+            _hint(
+                "啟用後，相機直連監控開始時自動開燈並送出各通道亮度，停止監控時關燈；其他時候用「開燈／關燈」手動測試，關閉程式時若燈仍開著會關燈。指令照原機台程式送的內容設定（可用「從原機台程式匯入」帶入）；"
+                "原機台程式也會佔用這個 COM port，兩者不可同時開啟。"
+            )
+        )
+        self.light_state_label = _mono_value("未連線")
+        self.light_on_button = self.gate.register(_button("開燈", "primary", "play"), ACCESS_ENGINEER)
+        self.light_off_button = self.gate.register(_button("關燈", "danger-ghost", "x"), ACCESS_ENGINEER)
+        self.light_on_button.clicked.connect(self.light_on_requested.emit)
+        self.light_off_button.clicked.connect(self.light_off_requested.emit)
+        panel.add_widget(_row(self.light_on_button, self.light_off_button, self.light_state_label))
+
+        panel.add_widget(_section("亮度"))
+        self.light_channels_widget = QWidget()
+        self.light_channels_layout = QGridLayout(self.light_channels_widget)
+        self.light_channels_layout.setContentsMargins(0, 0, 0, 0)
+        self.light_channels_layout.setHorizontalSpacing(10)
+        panel.add_widget(self.light_channels_widget)
+        self.light_brightness_inputs: dict[str, NumStepper] = {}
+        self.light_brightness_button = self.gate.register(_button("套用亮度", icon_name="check"))
+        self.light_brightness_button.clicked.connect(lambda: self.light_brightness_applied.emit(self.light_channels()))
+        panel.add_widget(_row(self.light_brightness_button))
+
+        panel.add_widget(_section("控制器設定"))
+        self.light_enabled_check = self.gate.register(QCheckBox("啟用光源控制"))
+        panel.add_widget(self.light_enabled_check)
+        form = _form()
+        self.light_port_combo = self.gate.register(QComboBox())
+        self.light_port_combo.setEditable(True)
+        form.addRow("COM port", self.light_port_combo)
+        self.light_baud_combo = self.gate.register(QComboBox())
+        self.light_baud_combo.setEditable(True)
+        for rate in SERIAL_BAUD_RATES:
+            self.light_baud_combo.addItem(str(rate))
+        form.addRow("Baud rate", self.light_baud_combo)
+        self.light_data_bits_input = self.gate.register(_fixed_width(NumStepper(8, 5, 8), 90))
+        form.addRow("Data bits", self.light_data_bits_input)
+        self.light_parity_combo = self.gate.register(QComboBox())
+        for parity in SERIAL_PARITIES:
+            self.light_parity_combo.addItem(parity.capitalize(), parity)
+        form.addRow("Parity", self.light_parity_combo)
+        self.light_stop_bits_combo = self.gate.register(QComboBox())
+        for stop_bits, label in zip(SERIAL_STOP_BITS, ("1", "1.5", "2")):
+            self.light_stop_bits_combo.addItem(label, stop_bits)
+        form.addRow("Stop bits", self.light_stop_bits_combo)
+        self.light_line_ending_combo = self.gate.register(QComboBox())
+        for ending, label in LINE_ENDINGS.items():
+            self.light_line_ending_combo.addItem(label, ending)
+        form.addRow("指令結尾", self.light_line_ending_combo)
+        self.light_template_edit = self.gate.register(QLineEdit())
+        self.light_template_edit.setProperty("mono", "true")
+        self.light_template_edit.setPlaceholderText("例如 @{channel:02}F{value:03}{checksum}")
+        self.light_template_edit.setToolTip(
+            "{channel} 通道、{value} 亮度，冒號後可指定格式（{value:03} 補零三位、{value:02X} 十六進位）；"
+            "{checksum}／{xor} 為前面所有位元組的 8-bit 和／XOR（兩位十六進位）。\\r \\n \\xNN 可寫控制字元。"
+        )
+        form.addRow("亮度指令範本", self.light_template_edit)
+        self.light_max_input = self.gate.register(NumStepper(255, *LIGHT_BRIGHTNESS_MAX_RANGE))
+        form.addRow("亮度上限", self.light_max_input)
+        self.light_channel_list_edit = self.gate.register(QLineEdit())
+        self.light_channel_list_edit.setProperty("mono", "true")
+        self.light_channel_list_edit.setPlaceholderText("例如 1,2,3,4")
+        form.addRow("通道", self.light_channel_list_edit)
+        self.light_on_commands_edit = self.gate.register(QPlainTextEdit())
+        self.light_on_commands_edit.setPlaceholderText("開燈時依序送出（每行一條，可留空）")
+        self.light_on_commands_edit.setFixedHeight(64)
+        form.addRow("開燈指令", self.light_on_commands_edit)
+        self.light_off_commands_edit = self.gate.register(QPlainTextEdit())
+        self.light_off_commands_edit.setPlaceholderText("關燈時依序送出；留空則把各通道亮度設為 0")
+        self.light_off_commands_edit.setFixedHeight(64)
+        form.addRow("關燈指令", self.light_off_commands_edit)
+        self.light_delay_input = self.gate.register(NumStepper(50, *LIGHT_COMMAND_DELAY_MS_RANGE, step=10))
+        form.addRow("指令間隔（ms）", self.light_delay_input)
+        self.light_reply_input = self.gate.register(NumStepper(200, *LIGHT_REPLY_TIMEOUT_MS_RANGE, step=50))
+        form.addRow("等待回覆（ms）", self.light_reply_input)
+        panel.add_layout(form)
+        self.light_apply_button = self.gate.register(_button("套用光源設定", "primary", "check"))
+        self.light_apply_button.clicked.connect(lambda: self.light_settings_applied.emit(self.light_settings()))
+        panel.add_widget(_row(self.light_apply_button))
+
+        self.light_test_edit = self.gate.register(QLineEdit())
+        self.light_test_edit.setProperty("mono", "true")
+        self.light_test_edit.setPlaceholderText("測試指令，例如 @01F100")
+        self.light_test_button = self.gate.register(_button("送出"))
+        self.light_test_button.clicked.connect(lambda: self.light_test_requested.emit(self.light_test_edit.text()))
+        panel.add_widget(_row(QLabel("測試"), self.light_test_edit, self.light_test_button, stretch_last=False))
+        self.light_replies_label = _hint(color=COLORS["text_2"])
+        self.light_replies_label.setProperty("mono", "true")
+        self.light_replies_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        panel.add_widget(self.light_replies_label)
+        self._light_settings = LightSettings()
+        self._set_light_channel_rows(self._light_settings)
+        return panel
+
+    def _set_light_channel_rows(self, settings: LightSettings) -> None:
+        while self.light_channels_layout.count():
+            item = self.light_channels_layout.takeAt(0)
+            if item.widget() is not None:
+                self.gate._items.pop(item.widget(), None)
+                item.widget().deleteLater()
+        self.light_brightness_inputs = {}
+        for row, channel in enumerate(settings.channels):
+            stepper = self.gate.register(NumStepper(channel.brightness, 0, settings.brightness_max))
+            stepper.setAccessibleName(f"通道 {channel.channel} 亮度")
+            self.light_channels_layout.addWidget(QLabel(f"通道 {channel.channel}"), row, 0)
+            self.light_channels_layout.addWidget(stepper, row, 1)
+            self.light_brightness_inputs[channel.channel] = stepper
+
+    def set_light_availability(self, availability: DeviceAvailability, ports=()) -> None:
+        self.light_availability_label.setText(f"光源不可用：{availability.reason}")
+        self.light_availability_label.setVisible(not availability.available)
+        current = self.light_port_combo.currentText()
+        self.light_port_combo.clear()
+        for port in ports:
+            self.light_port_combo.addItem(port)
+        self.light_port_combo.setCurrentText(current or self._light_settings.port)
+
+    def set_light_settings(self, settings: LightSettings) -> None:
+        self._light_settings = settings
+        self.light_enabled_check.setChecked(settings.enabled)
+        self.light_port_combo.setCurrentText(settings.port)
+        self.light_baud_combo.setCurrentText(str(settings.baud_rate))
+        self.light_data_bits_input.setValue(settings.data_bits)
+        self.light_parity_combo.setCurrentIndex(max(0, self.light_parity_combo.findData(settings.parity)))
+        self.light_stop_bits_combo.setCurrentIndex(max(0, self.light_stop_bits_combo.findData(settings.stop_bits)))
+        self.light_line_ending_combo.setCurrentIndex(max(0, self.light_line_ending_combo.findData(settings.line_ending)))
+        self.light_template_edit.setText(settings.brightness_template)
+        self.light_max_input.setValue(settings.brightness_max)
+        self.light_channel_list_edit.setText(",".join(c.channel for c in settings.channels))
+        self.light_on_commands_edit.setPlainText("\n".join(settings.on_commands))
+        self.light_off_commands_edit.setPlainText("\n".join(settings.off_commands))
+        self.light_delay_input.setValue(settings.command_delay_ms)
+        self.light_reply_input.setValue(settings.reply_timeout_ms)
+        self._set_light_channel_rows(settings)
+        self.gate.set_mode(self.gate.mode)
+
+    def light_channels(self) -> tuple[LightChannel, ...]:
+        return tuple(LightChannel(name, int(stepper.value())) for name, stepper in self.light_brightness_inputs.items())
+
+    def light_settings(self) -> LightSettings:
+        brightness = {name: int(stepper.value()) for name, stepper in self.light_brightness_inputs.items()}
+        names = [n.strip() for n in self.light_channel_list_edit.text().replace("，", ",").split(",") if n.strip()]
+        try:
+            baud_rate = int(self.light_baud_combo.currentText().strip())
+        except ValueError:
+            baud_rate = self._light_settings.baud_rate
+        return LightSettings(
+            enabled=self.light_enabled_check.isChecked(),
+            port=self.light_port_combo.currentText(),
+            baud_rate=baud_rate,
+            data_bits=int(self.light_data_bits_input.value()),
+            parity=str(self.light_parity_combo.currentData()),
+            stop_bits=str(self.light_stop_bits_combo.currentData()),
+            line_ending=str(self.light_line_ending_combo.currentData()),
+            on_commands=tuple(self.light_on_commands_edit.toPlainText().splitlines()),
+            off_commands=tuple(self.light_off_commands_edit.toPlainText().splitlines()),
+            command_delay_ms=int(self.light_delay_input.value()),
+            reply_timeout_ms=int(self.light_reply_input.value()),
+            brightness_template=self.light_template_edit.text(),
+            brightness_max=int(self.light_max_input.value()),
+            channels=tuple(LightChannel(n, brightness.get(n, 0)) for n in dict.fromkeys(names)),
+        ).normalized()
+
+    def set_light_status(self, status) -> None:
+        self.light_status = status
+        if not status.connected:
+            state = "未連線"
+        else:
+            state = "開燈" if status.on else "已連線（未開燈）"
+        if not status.ok:
+            state += "・上次操作失敗"
+        self.light_state_label.setText(state)
+        lines = list(status.replies[-6:])
+        if status.message:
+            lines.append(f"錯誤：{status.message}")
+        self.light_replies_label.setText("\n".join(lines))
 
     def _build_extension_panel(self) -> Panel:
         panel = Panel(title="Extension Compare（CMP0–CMP7）")

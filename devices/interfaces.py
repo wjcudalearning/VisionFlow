@@ -12,6 +12,7 @@ from devices.ccd_models import (
     DeviceAvailability,
     ExtensionCompareChannel,
     FrameTriggerInput,
+    LightSettings,
     MeterWheelSettings,
     MultipleRate,
     SensorRelaySettings,
@@ -107,6 +108,34 @@ class DigitalIo(ABC):
 
     @abstractmethod
     def write_bit(self, port: int, bit: int, value: bool) -> None: ...
+
+    @abstractmethod
+    def close(self) -> None: ...
+
+
+class LightController(ABC):
+    """Backend-neutral serial light controller; commands are raw bytes (see devices/serial_light.py)."""
+
+    @abstractmethod
+    def availability(self) -> DeviceAvailability: ...
+
+    @property
+    @abstractmethod
+    def is_connected(self) -> bool: ...
+
+    @abstractmethod
+    def connect(self, settings: LightSettings) -> None: ...
+
+    @abstractmethod
+    def disconnect(self) -> None: ...
+
+    @abstractmethod
+    def send(self, command: bytes, reply_timeout_ms: int) -> bytes:
+        """Write one command; return whatever the controller answered within the timeout."""
+
+    def ports(self) -> tuple[str, ...]:
+        """COM ports present on this machine (best effort)."""
+        return ()
 
     @abstractmethod
     def close(self) -> None: ...

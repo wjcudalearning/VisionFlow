@@ -365,6 +365,88 @@ class SensorRelayStats:
     error: str = ""
 
 
+SERIAL_BAUD_RATES = (1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200)
+SERIAL_PARITIES = ("none", "odd", "even", "mark", "space")
+SERIAL_STOP_BITS = ("one", "one_point_five", "two")
+LINE_ENDINGS = {"": "無", "\r": "CR (\\r)", "\n": "LF (\\n)", "\r\n": "CR+LF (\\r\\n)"}
+LIGHT_COMMAND_DELAY_MS_RANGE = (0, 5_000)
+LIGHT_REPLY_TIMEOUT_MS_RANGE = (0, 5_000)
+
+
+def _choice(value, choices, default):
+    return value if value in choices else default
+
+
+LIGHT_BRIGHTNESS_MAX_RANGE = (1, 65_535)
+LIGHT_CHANNEL_COUNT_MAX = 16
+
+
+@dataclass(frozen=True)
+class LightChannel:
+    channel: str = "1"
+    brightness: int = 0
+
+    def normalized(self, maximum: int) -> "LightChannel":
+        return LightChannel(str(self.channel).strip() or "1", int(_clamp(int(self.brightness), (0, maximum))))
+
+
+def _default_light_channels() -> tuple[LightChannel, ...]:
+    return (LightChannel("1", 0),)
+
+
+@dataclass(frozen=True)
+class LightSettings:
+    """Machine-level RS-232 light controller, driven with the commands the original program sends.
+
+    The brand is not assumed. Switching on sends `on_commands` in order, then one brightness
+    command per channel rendered from `brightness_template` (`{channel}`, `{value}`, `{checksum}`,
+    `{xor}`; see devices/serial_light.py). Switching off sends `off_commands`, or brightness 0 for
+    every channel when there are none. When enabled, camera-direct monitoring switches the light
+    on when it starts and off when it stops; otherwise it is switched by hand for testing, and it
+    is switched off when VisionFlow closes. Commands are text
+    with escapes (\\r, \\n, \\t, \\xNN, \\\\); `line_ending` is appended to every command. Off by default.
+    """
+
+    enabled: bool = False
+    port: str = "COM1"
+    baud_rate: int = 9600
+    data_bits: int = 8
+    parity: str = "none"
+    stop_bits: str = "one"
+    line_ending: str = "\r\n"
+    on_commands: tuple[str, ...] = ()
+    off_commands: tuple[str, ...] = ()
+    command_delay_ms: int = 50
+    reply_timeout_ms: int = 200
+    brightness_template: str = ""
+    brightness_max: int = 255
+    channels: tuple[LightChannel, ...] = field(default_factory=_default_light_channels)
+
+    def normalized(self) -> "LightSettings":
+        maximum = int(_clamp(int(self.brightness_max), LIGHT_BRIGHTNESS_MAX_RANGE))
+        channels = tuple(c.normalized(maximum) for c in list(self.channels)[:LIGHT_CHANNEL_COUNT_MAX])
+        return LightSettings(
+            enabled=bool(self.enabled),
+            port=str(self.port).strip().upper() or "COM1",
+            baud_rate=max(1, int(self.baud_rate)),
+            data_bits=int(_clamp(int(self.data_bits), (5, 8))),
+            parity=_choice(str(self.parity).lower(), SERIAL_PARITIES, "none"),
+            stop_bits=_choice(str(self.stop_bits).lower(), SERIAL_STOP_BITS, "one"),
+            line_ending=_choice(str(self.line_ending), tuple(LINE_ENDINGS), "\r\n"),
+            on_commands=tuple(str(c) for c in self.on_commands if str(c).strip()),
+            off_commands=tuple(str(c) for c in self.off_commands if str(c).strip()),
+            command_delay_ms=int(_clamp(int(self.command_delay_ms), LIGHT_COMMAND_DELAY_MS_RANGE)),
+            reply_timeout_ms=int(_clamp(int(self.reply_timeout_ms), LIGHT_REPLY_TIMEOUT_MS_RANGE)),
+            brightness_template=str(self.brightness_template).strip(),
+            brightness_max=maximum,
+            channels=channels or _default_light_channels(),
+        )
+
+    @property
+    def controls_brightness(self) -> bool:
+        return bool(self.brightness_template)
+
+
 @dataclass(frozen=True)
 class CcdMachineSettings:
     """Machine-level CCD configuration persisted by `CcdMachineSettingsStore`."""
@@ -373,6 +455,7 @@ class CcdMachineSettings:
     meter_wheel: MeterWheelSettings = field(default_factory=MeterWheelSettings)
     save: SaveSettings = field(default_factory=SaveSettings)
     sensor_relay: SensorRelaySettings = field(default_factory=SensorRelaySettings)
+    light: LightSettings = field(default_factory=LightSettings)
 
     def normalized(self) -> "CcdMachineSettings":
         return CcdMachineSettings(
@@ -380,6 +463,7 @@ class CcdMachineSettings:
             meter_wheel=self.meter_wheel.normalized(),
             save=self.save.normalized(),
             sensor_relay=self.sensor_relay.normalized(),
+            light=self.light.normalized(),
         )
 
 

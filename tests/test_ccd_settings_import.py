@@ -559,7 +559,7 @@ class LevelSeparationTests(unittest.TestCase):
 
     def test_product_values_never_enter_the_machine_store(self):
         payload = settings_to_dict(self.result.machine)
-        self.assertEqual(set(payload), {"schema", "connection", "meter_wheel", "save", "sensor_relay"})
+        self.assertEqual(set(payload), {"schema", "connection", "meter_wheel", "save", "sensor_relay", "light"})
         text = json.dumps(payload, ensure_ascii=False)
         for token in ("exposure_time", "gain", "length_lines", "internal_line_rate_hz", "trigger", "auto_save", "1500.5"):
             with self.subTest(token):

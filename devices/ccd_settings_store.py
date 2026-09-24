@@ -10,6 +10,8 @@ from devices.ccd_models import (
     CcdMachineSettings,
     ExtensionCompareChannel,
     ImageSaveFormat,
+    LightChannel,
+    LightSettings,
     MeterWheelSettings,
     MultipleRate,
     SaveSettings,
@@ -60,6 +62,7 @@ def settings_to_dict(settings: CcdMachineSettings) -> dict:
         "meter_wheel": meter_wheel,
         "save": save,
         "sensor_relay": asdict(settings.sensor_relay),
+        "light": asdict(settings.light),
     }
 
 
@@ -99,7 +102,26 @@ def settings_from_dict(payload: dict) -> CcdMachineSettings:
         **_typed_fields(payload.get("sensor_relay"), SensorRelaySettings(), "sensor_relay")
     )
 
-    return CcdMachineSettings(connection, meter_wheel, save, sensor_relay).normalized()
+    light_section = payload.get("light")
+    light_values = _typed_fields(light_section, LightSettings(), "light")
+    if isinstance(light_section, dict):
+        for key in ("on_commands", "off_commands"):
+            if key in light_section:
+                commands = light_section[key]
+                if not isinstance(commands, (list, tuple)) or not all(isinstance(c, str) for c in commands):
+                    raise ValueError(f"light.{key} 必須是文字陣列")
+                light_values[key] = tuple(commands)
+        if "channels" in light_section:
+            raw_channels = light_section["channels"]
+            if not isinstance(raw_channels, (list, tuple)):
+                raise ValueError("light.channels 必須是陣列")
+            light_values["channels"] = tuple(
+                LightChannel(**_typed_fields(channel, LightChannel(), f"light.channels[{index}]"))
+                for index, channel in enumerate(raw_channels)
+            )
+    light = LightSettings(**light_values)
+
+    return CcdMachineSettings(connection, meter_wheel, save, sensor_relay, light).normalized()
 
 
 class CcdMachineSettingsStore:

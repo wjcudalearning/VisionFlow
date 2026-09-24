@@ -14,12 +14,13 @@ from devices.ccd_models import (
     DeviceAvailability,
     DeviceError,
     ExtensionCompareChannel,
+    LightSettings,
     MeterWheelSettings,
     MultipleRate,
     SensorRelaySettings,
     TriggerSettings,
 )
-from devices.interfaces import DigitalIo, FrameListener, LineScanCamera, MeterWheel, TriggerListener
+from devices.interfaces import DigitalIo, FrameListener, LightController, LineScanCamera, MeterWheel, TriggerListener
 from devices.lsi8181 import Lsi8181Library, Lsi8181MeterWheel
 from devices.sapera_api import (
     ASSEMBLY_FILE_NAME,
@@ -30,7 +31,8 @@ from devices.sapera_api import (
     locate_assembly,
 )
 from devices.sapera_camera import SaperaLineScanCamera
-from devices.simulated import SimulatedDigitalIo, SimulatedLineScanCamera, SimulatedMeterWheel
+from devices.serial_light import DotNetSerialLight
+from devices.simulated import SimulatedDigitalIo, SimulatedLight, SimulatedLineScanCamera, SimulatedMeterWheel
 
 SIMULATOR_ENV = "VISIONFLOW_CCD_SIMULATOR"
 
@@ -176,12 +178,38 @@ class UnavailableDigitalIo(DigitalIo):
         return None
 
 
+class UnavailableLight(LightController):
+    def __init__(self, reason: str = "此機台未設定光源控制器。"):
+        self._reason = reason
+
+    def availability(self) -> DeviceAvailability:
+        return DeviceAvailability(False, self._reason)
+
+    @property
+    def is_connected(self) -> bool:
+        return False
+
+    def connect(self, settings: LightSettings) -> None:
+        raise DeviceError(self._reason)
+
+    def disconnect(self) -> None:
+        return None
+
+    def send(self, command: bytes, reply_timeout_ms: int) -> bytes:
+        raise DeviceError(self._reason)
+
+    def close(self) -> None:
+        return None
+
+
 @dataclass(frozen=True)
 class CcdDevices:
     camera: LineScanCamera
     meter_wheel: MeterWheel
     # Optional PCIe-1730 that relays the Sensor to the grabber (see devices/sensor_relay.py).
     digital_io: DigitalIo = field(default_factory=UnavailableDigitalIo)
+    # Optional RS-232 light controller (see devices/serial_light.py).
+    light: LightController = field(default_factory=UnavailableLight)
 
     def close(self) -> None:
         try:
@@ -190,7 +218,10 @@ class CcdDevices:
             try:
                 self.meter_wheel.close()
             finally:
-                self.digital_io.close()
+                try:
+                    self.digital_io.close()
+                finally:
+                    self.light.close()
 
 
 def create_line_scan_camera(environ: Mapping[str, str] | None = None) -> LineScanCamera:
@@ -214,7 +245,7 @@ def create_ccd_devices(
 ) -> CcdDevices:
     env = os.environ if environ is None else environ
     if str(env.get(SIMULATOR_ENV, "")).strip().lower() in {"1", "true", "yes", "on"}:
-        return CcdDevices(SimulatedLineScanCamera(), SimulatedMeterWheel(auto_advance_per_read=25), SimulatedDigitalIo())
+        return CcdDevices(SimulatedLineScanCamera(), SimulatedMeterWheel(auto_advance_per_read=25), SimulatedDigitalIo(), SimulatedLight())
     # The LSI-8181 DLL is loaded lazily; a missing driver only makes the meter wheel unavailable.
     # `meter_wheel_dll_path` may be a callable so the machine settings store stays the single source
     # of truth: the path is read when the DLL is actually loaded, not when the application starts.
@@ -224,6 +255,7 @@ def create_ccd_devices(
             loader=lambda: Lsi8181Library.load(dll_path=_stored_dll_path(meter_wheel_dll_path), environ=env)
         ),
         AdvantechDigitalIo(lambda: _stored_dll_path(dio_assembly_path) or "", environ=env),
+        DotNetSerialLight(),
     )
 
 

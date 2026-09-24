@@ -17,12 +17,20 @@ from devices.ccd_models import (
     DeviceError,
     ExtensionCompareChannel,
     FrameTriggerInput,
+    LightSettings,
     MeterWheelSettings,
     MultipleRate,
     SensorRelaySettings,
     TriggerSettings,
 )
-from devices.interfaces import DigitalIo, FrameListener, LineScanCamera, MeterWheel, TriggerListener
+from devices.interfaces import (
+    DigitalIo,
+    FrameListener,
+    LightController,
+    LineScanCamera,
+    MeterWheel,
+    TriggerListener,
+)
 
 
 class SimulatedLineScanCamera(LineScanCamera):
@@ -402,6 +410,55 @@ class SimulatedDigitalIo(DigitalIo):
                 raise DeviceError("I/O 卡未連線。")
             self.outputs[(int(port), int(bit))] = bool(value)
             self.writes.append((int(port), int(bit), bool(value)))
+
+    def close(self) -> None:
+        self.disconnect()
+
+
+class SimulatedLight(LightController):
+    """Hardware-free serial light: records every command; `replies` maps a command to its answer."""
+
+    def __init__(self, available: bool = True, reason: str = "", ports: tuple[str, ...] = ("COM1", "COM3")):
+        self._available = bool(available)
+        self._reason = reason or "模擬光源不可用"
+        self._ports = tuple(ports)
+        self._lock = threading.Lock()
+        self._connected = False
+        self.settings: LightSettings | None = None
+        self.sent: list[bytes] = []
+        self.replies: dict[bytes, bytes] = {}
+        self.fail_sends = False
+
+    def availability(self) -> DeviceAvailability:
+        return DeviceAvailability(self._available, "" if self._available else self._reason)
+
+    def ports(self) -> tuple[str, ...]:
+        return self._ports
+
+    @property
+    def is_connected(self) -> bool:
+        with self._lock:
+            return self._connected
+
+    def connect(self, settings: LightSettings) -> None:
+        if not self._available:
+            raise DeviceError(self._reason)
+        with self._lock:
+            self._connected = True
+            self.settings = settings.normalized()
+
+    def disconnect(self) -> None:
+        with self._lock:
+            self._connected = False
+
+    def send(self, command: bytes, reply_timeout_ms: int) -> bytes:
+        with self._lock:
+            if not self._connected:
+                raise DeviceError("光源未連線。")
+            if self.fail_sends:
+                raise DeviceError("模擬光源寫入失敗")
+            self.sent.append(bytes(command))
+            return self.replies.get(bytes(command), b"")
 
     def close(self) -> None:
         self.disconnect()

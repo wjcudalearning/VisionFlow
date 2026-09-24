@@ -4,6 +4,7 @@ import datetime
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -27,6 +28,8 @@ from devices.ccd_models import (
     DeviceError,
     ExtensionCompareChannel,
     ImageSaveFormat,
+    LightChannel,
+    LightSettings,
     MeterWheelSettings,
     MeterWheelSnapshot,
     MultipleRate,
@@ -54,6 +57,7 @@ from devices.legacy_program_import import (
     LegacyImportReport,
     scan_legacy_program,
 )
+from devices.serial_light import describe_bytes, encode_command, render_brightness
 from devices.sensor_relay import MODE_FORWARD, MODE_LABELS, MODE_SNAP, SensorRelay, relay_mode
 from devices.trigger_automation import (
     SOFTWARE_TRIGGER_POLL_SEC,
@@ -81,6 +85,7 @@ PREVIEW_MAX_DIMENSION = 2048
 DIAGNOSED_WATCH_CODES = frozenset({"no_trigger", "no_frame", "reverse"})
 METER_WHEEL_POLL_MS = 200
 SENSOR_RELAY_REFRESH_MS = 250
+LIGHT_CLOSE_TIMEOUT_SEC = 3.0
 DEFAULT_SNAPSHOT_DIR = Path("outputs") / "ccd_snapshots"
 # S7 waits at most 5 s for a frame, so 15 s covers a full run from a run-to-completion join.
 DIAGNOSE_SHUTDOWN_TIMEOUT_MS = 15_000
@@ -195,6 +200,18 @@ class PreviewFrameConverter:
 
 
 @dataclass(frozen=True)
+class LightStatus:
+    """Result of the latest light job (connect/on/off/brightness/test)."""
+
+    connected: bool = False
+    on: bool = False
+    replies: tuple[str, ...] = ()
+    message: str = ""
+    action: str = ""
+    ok: bool = True
+
+
+@dataclass(frozen=True)
 class CcdCameraSettingsView:
     connection: CameraConnectionSettings
     product: CameraRecipeSettings
@@ -225,6 +242,9 @@ class CcdController(QObject, LogMixin):
     sensor_relay_settings_changed = Signal(object)
     #: (LegacyImportReport, current values by finding key) after scanning the original program.
     legacy_import_ready = Signal(object, object)
+    #: `LightStatus` after every light job; `LightSettings` after a save.
+    light_changed = Signal(object)
+    light_settings_changed = Signal(object)
     sapera_versions_changed = Signal(object)
     #: `TriggerDiagnosis` while an external-trigger watch runs, None when it ends.
     trigger_diagnosis_changed = Signal(object)
@@ -242,6 +262,7 @@ class CcdController(QObject, LogMixin):
     _software_monitor_failed = Signal(str)
     _sensor_capture_requested = Signal()
     _sensor_relay_failed = Signal(str)
+    _light_done = Signal(object)
     _auto_save_rejected = Signal()
     _auto_save_fallback_used = Signal()
     _camera_lifecycle_done = Signal(object)
@@ -275,6 +296,10 @@ class CcdController(QObject, LogMixin):
         self._sensor_relay: SensorRelay | None = None
         self._last_relay_stats = SensorRelayStats()
         self._sensor_skipped_busy = 0
+        # One thread owns every serial exchange with the light, so commands never interleave.
+        self._light_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ccd-light")
+        self._light_status = LightStatus()
+        self._light_for_monitoring = False
         # External-trigger capture watch (GUI thread) and whether the grabber reported trigger events.
         self._external_watch: ExternalCaptureWatch | None = None
         self._trigger_seen_since_connect = False
@@ -316,6 +341,7 @@ class CcdController(QObject, LogMixin):
         self._software_monitor_failed.connect(self._on_software_monitor_failed, queued)
         self._sensor_capture_requested.connect(self._execute_sensor_capture, queued)
         self._sensor_relay_failed.connect(self._on_sensor_relay_failed, queued)
+        self._light_done.connect(self._finish_light, queued)
         self._auto_save_rejected.connect(self._on_auto_save_rejected, queued)
         self._auto_save_fallback_used.connect(self._on_auto_save_fallback_used, queued)
         self._camera_lifecycle_done.connect(self._finish_camera_lifecycle, queued)
@@ -371,6 +397,11 @@ class CcdController(QObject, LogMixin):
         screen.sensor_dll_selected.connect(self.set_sensor_dll_path)
         screen.legacy_program_selected.connect(self.import_legacy_program)
         screen.legacy_import_apply_requested.connect(self.apply_legacy_import)
+        screen.light_settings_applied.connect(self.apply_light_settings)
+        screen.light_on_requested.connect(self.light_on)
+        screen.light_off_requested.connect(self.light_off)
+        screen.light_brightness_applied.connect(self.set_light_brightness)
+        screen.light_test_requested.connect(self.send_light_test)
 
         self.camera_status_changed.connect(screen.set_camera_status)
         self.camera_busy_changed.connect(screen.set_camera_busy)
@@ -387,12 +418,16 @@ class CcdController(QObject, LogMixin):
         self.sensor_relay_changed.connect(screen.set_sensor_relay_stats)
         self.sensor_relay_settings_changed.connect(screen.set_sensor_relay_settings)
         self.legacy_import_ready.connect(screen.show_legacy_import)
+        self.light_changed.connect(screen.set_light_status)
+        self.light_settings_changed.connect(screen.set_light_settings)
 
         self._publish_availability()
         screen.set_camera_settings(self.camera_settings_view())
         screen.set_meter_wheel_settings(self._machine.meter_wheel)
         screen.set_sensor_relay_settings(self._machine.sensor_relay)
         screen.set_sensor_relay_stats(self._last_relay_stats)
+        screen.set_light_settings(self._machine.light)
+        screen.set_light_status(self._light_status)
         screen.set_camera_status(self.camera_status())
         screen.set_meter_wheel_snapshot(self._last_meter_snapshot)
         screen.set_save_stats(self._save_queue.stats())
@@ -403,6 +438,7 @@ class CcdController(QObject, LogMixin):
         if screen is not None:
             screen.set_availability(*self.availability())
             screen.set_sensor_relay_availability(self.devices.digital_io.availability())
+            screen.set_light_availability(self.devices.light.availability(), self.devices.light.ports())
 
     def refresh_availability(self) -> None:
         """Republish camera/meter-wheel availability after a DLL or location change."""
@@ -496,9 +532,13 @@ class CcdController(QObject, LogMixin):
         self._inspection_sequence = 0
         self._inspection_saves_raw = bool(monitor_saves_raw)
         self._inspection_queue = queue
+        self.light_on_for_monitoring()
 
     def detach_inspection_queue(self) -> None:
-        self._inspection_queue = None
+        attached, self._inspection_queue = self._inspection_queue, None
+        if attached is not None and not self._closed and self._light_for_monitoring:
+            self._light_for_monitoring = False
+            self.light_off()
 
     def raw_frame_saver(self) -> RawFrameSaver:
         """Camera-monitor raw saver in the machine-level save format, written through ``.tmp``."""
@@ -1326,6 +1366,151 @@ class CcdController(QObject, LogMixin):
         return True
 
     # ------------------------------------------------------------------
+    # RS-232 light (stays on while VisionFlow runs; brightness per channel)
+    # ------------------------------------------------------------------
+    @property
+    def light_status(self) -> LightStatus:
+        return self._light_status
+
+    def _light_steps(self, settings: LightSettings, kind: str, channels=None) -> list[tuple[str, bytes]]:
+        ending = settings.line_ending
+        steps: list[tuple[str, bytes]] = []
+        if kind == "on":
+            steps += [(f"開燈指令 {i + 1}", encode_command(c, ending)) for i, c in enumerate(settings.on_commands)]
+        if kind == "off" and settings.off_commands:
+            return [(f"關燈指令 {i + 1}", encode_command(c, ending)) for i, c in enumerate(settings.off_commands)]
+        if settings.controls_brightness and kind in ("on", "off", "brightness"):
+            for channel in channels if channels is not None else settings.channels:
+                value = 0 if kind == "off" else channel.brightness
+                steps.append(
+                    (f"通道 {channel.channel} 亮度 {value}", render_brightness(settings.brightness_template, channel.channel, value, ending))
+                )
+        return steps
+
+    def _submit_light(self, action: str, settings: LightSettings, steps, reconnect: bool = False):
+        """Run one light job on the single light thread; the result returns to the GUI thread."""
+        light = self.devices.light
+
+        def job() -> LightStatus:
+            replies: list[str] = []
+            try:
+                if reconnect or not light.is_connected:
+                    light.connect(settings)
+                for index, (label, command) in enumerate(steps):
+                    reply = light.send(command, settings.reply_timeout_ms)
+                    replies.append(f"{label}：送出 {describe_bytes(command)}" + (f"，回覆 {describe_bytes(reply)}" if reply else "，無回覆"))
+                    if settings.command_delay_ms and index < len(steps) - 1:
+                        time.sleep(settings.command_delay_ms / 1000.0)
+                if action == "off":
+                    light.disconnect()
+            except DeviceError as exc:
+                return LightStatus(light.is_connected, self._light_status.on, tuple(replies), str(exc), action, False)
+            on = {"on": True, "off": False}.get(action, self._light_status.on or action == "brightness")
+            return LightStatus(light.is_connected, on, tuple(replies), "", action, True)
+
+        future = self._light_executor.submit(job)
+        future.add_done_callback(lambda done: self._light_done.emit(done.result()))
+        return future
+
+    def _finish_light(self, status: LightStatus) -> None:
+        self._light_status = status
+        self.light_changed.emit(status)
+        if self._closed:
+            return
+        labels = {"on": "開燈", "off": "關燈", "brightness": "設定亮度", "test": "送出測試指令"}
+        label = labels.get(status.action, status.action)
+        if not status.ok:
+            self.notice.emit(f"光源{label}失敗：{status.message}", "error")
+            self.logger.warning("Light %s failed: %s", status.action, status.message)
+        elif status.action == "test":
+            self.notice.emit("光源：" + ("；".join(status.replies) or "已送出"), "info")
+        else:
+            self.status_message.emit(f"光源已{label}。" + (status.replies[-1] if status.replies else ""))
+
+    def light_on_for_monitoring(self) -> None:
+        """Camera-direct monitoring started: turn the light on when enabled; it goes off when monitoring stops.
+
+        Outside monitoring the light is switched by hand from the CCD page (for testing). A missing
+        controller only shows a notice and never blocks monitoring.
+        """
+        settings = self._machine.light
+        if self._closed or not settings.enabled:
+            return
+        availability = self.devices.light.availability()
+        if not availability.available:
+            self.notice.emit(f"光源未開啟：{availability.reason}", "warning")
+            return
+        if self.light_on() is not None:
+            self._light_for_monitoring = True
+
+    def light_on(self):
+        settings = self._machine.light
+        steps = self._light_steps(settings, "on")
+        if not steps:
+            self.notice.emit("光源沒有開燈指令，也沒有亮度指令範本；請先在「光源」面板設定或從原程式匯入。", "warning")
+            return None
+        return self._submit_light("on", settings, steps, reconnect=True)
+
+    def light_off(self):
+        settings = self._machine.light
+        steps = self._light_steps(settings, "off")
+        if not self.devices.light.is_connected and not steps:
+            return None
+        return self._submit_light("off", settings, steps)
+
+    def set_light_brightness(self, channels: Sequence[LightChannel]):
+        """Save each channel's brightness and send it when the light is on."""
+        settings = replace(self._machine.light, channels=tuple(channels)).normalized()
+        if not self._save_machine(replace(self._machine, light=settings)):
+            return None
+        self.light_settings_changed.emit(settings)
+        if not settings.controls_brightness:
+            self.notice.emit("尚未設定亮度指令範本，亮度已保存但無法送到光源。", "warning")
+            return None
+        if not self.devices.light.is_connected:
+            self.status_message.emit("亮度已保存；光源開燈時會送出。")
+            return None
+        return self._submit_light("brightness", settings, self._light_steps(settings, "brightness"))
+
+    def apply_light_settings(self, settings: LightSettings):
+        previous = self._machine.light
+        settings = settings.normalized()
+        if not self._save_machine(replace(self._machine, light=settings)):
+            return None
+        self.light_settings_changed.emit(settings)
+        self.notice.emit("光源設定已保存。", "success")
+        connection_changed = (previous.port, previous.baud_rate, previous.data_bits, previous.parity, previous.stop_bits) != (
+            settings.port, settings.baud_rate, settings.data_bits, settings.parity, settings.stop_bits
+        )
+        if settings.enabled and (connection_changed or not self.devices.light.is_connected):
+            return self.light_on()
+        if settings.enabled and settings.channels != previous.channels:
+            return self._submit_light("brightness", settings, self._light_steps(settings, "brightness"))
+        if not settings.enabled and previous.enabled and self.devices.light.is_connected:
+            return self._submit_light("off", previous, self._light_steps(previous, "off"))
+        return None
+
+    def send_light_test(self, text: str):
+        settings = self._machine.light
+        try:
+            command = encode_command(str(text), settings.line_ending)
+        except DeviceError as exc:
+            self.notice.emit(str(exc), "error")
+            return None
+        return self._submit_light("test", settings, [("測試指令", command)])
+
+    def _close_light(self) -> None:
+        """Turn the light off before exit, waiting briefly for the serial writes."""
+        settings = self._machine.light
+        try:
+            if self.devices.light.is_connected:
+                future = self._submit_light("off", settings, self._light_steps(settings, "off"))
+                future.result(timeout=LIGHT_CLOSE_TIMEOUT_SEC)
+        except Exception as exc:  # noqa: BLE001 - never block shutdown on the light
+            self.logger.warning("Light off at close failed: %s", exc)
+        self._light_executor.shutdown(wait=False, cancel_futures=True)
+
+    # ------------------------------------------------------------------
     # 從原機台程式匯入（smart import from the original C# program）
     # ------------------------------------------------------------------
     def import_legacy_program(self, path: str) -> LegacyImportReport | None:
@@ -1364,6 +1549,15 @@ class CcdController(QObject, LogMixin):
             "acquisition.length_lines": str(acquisition.length_lines),
             "acquisition.exposure_time": f"{acquisition.exposure_time:g}",
             "acquisition.gain": f"{acquisition.gain:g}",
+            "light.port": self._machine.light.port,
+            "light.baud_rate": str(self._machine.light.baud_rate),
+            "light.data_bits": str(self._machine.light.data_bits),
+            "light.parity": self._machine.light.parity,
+            "light.stop_bits": self._machine.light.stop_bits,
+            "light.line_ending": describe_bytes(self._machine.light.line_ending.encode()) or "無",
+            "light.on_commands": "；".join(self._machine.light.on_commands),
+            "light.off_commands": "；".join(self._machine.light.off_commands),
+            "light.brightness_template": self._machine.light.brightness_template,
         }
 
     def apply_legacy_import(self, findings: Sequence[LegacyImportFinding]) -> list[str]:
@@ -1401,6 +1595,14 @@ class CcdController(QObject, LogMixin):
                 if self._save_machine(replace(self._machine, sensor_relay=relay)):
                     self.sensor_relay_settings_changed.emit(self._machine.sensor_relay)
                     applied.extend(labels["sensor_relay." + name] for name in relay_fields)
+
+        light_fields = {key.split(".", 1)[1]: values.pop(key) for key in list(values) if key.startswith("light.")}
+        if light_fields:
+            # Importing never switches the light on; `enabled` stays as the operator set it.
+            light = replace(self._machine.light, **light_fields).normalized()
+            if self._save_machine(replace(self._machine, light=light)):
+                self.light_settings_changed.emit(self._machine.light)
+                applied.extend(labels["light." + name] for name in light_fields)
 
         connection = self._machine.connection
         if "connection.config_file_path" in values:
@@ -1942,6 +2144,7 @@ class CcdController(QObject, LogMixin):
         self._stop_sensor_relay()
         self._end_external_watch()
         self._stop_diagnose()
+        self._close_light()
         self._meter_wheel_timer.stop()
         self.devices.camera.set_frame_listener(None)
         self.devices.camera.set_external_trigger_listener(None)

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from devices.ccd_models import MultipleRate
+from devices.serial_light import describe_bytes, escape_text
 
 # ============================================================
 # 「從原機台程式匯入」: read the machine's original C# program (.sln / .csproj / folder) as text and
@@ -430,9 +431,10 @@ _CAST = re.compile(
 _NUMBER = re.compile(r"^[-+]?(?:0[xX][0-9a-fA-F]+|\d+(?:\.\d+)?)(?:[uUlLfFdDmM]{0,2})$")
 _STRING = re.compile(r'^\$?@?"((?:[^"\\]|\\.|"")*)"$')
 _CONVERSION = re.compile(
-    r"^(?:[\w.]+\.)?(?:Parse|ToInt16|ToInt32|ToInt64|ToUInt16|ToUInt32|ToByte|ToDouble|ToSingle|ToDecimal|ToBoolean|ToString)\s*\("
+    r"^(?:[\w.]+\.)?(?:Parse|ToInt16|ToInt32|ToInt64|ToUInt16|ToUInt32|ToByte|ToDouble|ToSingle|ToDecimal|ToBoolean|ToString|GetBytes)\s*\("
 )
 _ASSIGNMENT_START = re.compile(r"(?<![\w.])((?:\w+\.)*)([A-Za-z_]\w*)\s*=(?![=>])\s*")
+_BYTE_ARRAY = re.compile(r"^new\s+byte\s*\[\s*\w*\s*\]\s*\{([^{}]*)\}$", re.IGNORECASE)
 # WinForms control properties hold operator input: always a run-time value.
 _UI_PROPERTIES = frozenset({"SelectedIndex", "SelectedItem", "SelectedValue", "Value", "Text", "Checked", "CheckState"})
 
@@ -517,8 +519,19 @@ def _literal(text: str):
         raw = match.group(1)
         if text.lstrip("$").startswith("@"):
             return raw.replace('""', '"')
-        return raw.replace("\\\\", "\x00").replace('\\"', '"').replace("\x00", "\\")
+        return _CS_ESCAPE.sub(_unescape_cs, raw)
     return None
+
+
+_CS_ESCAPE = re.compile(r"\\(u[0-9a-fA-F]{4}|x[0-9a-fA-F]{1,4}|.)")
+_CS_SIMPLE = {"r": "\r", "n": "\n", "t": "\t", "0": "\0", "a": "\a", "b": "\b", "f": "\f", "v": "\v"}
+
+
+def _unescape_cs(match: re.Match) -> str:
+    code = match.group(1)
+    if code[0] in "ux" and len(code) > 1:
+        return chr(int(code[1:], 16))
+    return _CS_SIMPLE.get(code, code)
 
 
 def _config_literal(text: str):
@@ -588,7 +601,9 @@ class Resolver:
 
     def _add_symbol(self, name: str, expression: str, source: SourceFile, index: int, owner: str = "") -> None:
         expression = expression.strip()
-        if not expression or name in _KEYWORDS or expression.startswith("new ") or expression.startswith("{"):
+        if not expression or name in _KEYWORDS or expression.startswith("{"):
+            return
+        if expression.startswith("new ") and not _BYTE_ARRAY.match(expression):
             return
         self.symbols.setdefault(name, []).append((expression, source, index, owner))
 
@@ -645,6 +660,12 @@ class Resolver:
         literal = _literal(text)
         if literal is not None:
             return {literal}
+        byte_array = _BYTE_ARRAY.match(text)
+        if byte_array:
+            items = [self.values(item, source, index, depth + 1, seen) for item in byte_array.group(1).split(",") if item.strip()]
+            if items and all(len(v) == 1 and isinstance(next(iter(v)), int) for v in items):
+                return {bytes(next(iter(v)) & 0xFF for v in items)}
+            return set()
         if "??" in text:
             left, right = text.split("??", 1)
             return again(left) | again(right)
@@ -847,6 +868,7 @@ class LegacyProgramAnalyzer:
         found += self._meter_wheel()
         found += self._sensor_relay()
         found += self._sapera()
+        found += self._light()
         return [f for f in found if f is not None]
 
     # --- LSI-8181 meter wheel ---------------------------------------------------------
@@ -1030,6 +1052,260 @@ class LegacyProgramAnalyzer:
                 _warning("warn.shaft_encoder", "擷取卡 Shaft Encoder", f"原程式在擷取卡做了除頻／倍頻（{text}），影像比例也受它影響；VisionFlow 請用同一份 CCF。", shaft[:4])
             )
         return out
+
+
+    # --- RS-232 light (System.IO.Ports.SerialPort) ------------------------------------
+    def _light(self) -> list[ImportFinding | None]:
+        names: set[str] = set()
+        for source in self.files:
+            names.update(re.findall(r"\bSerialPort\s+(\w+)\s*[=;]", source.text))
+            names.update(re.findall(r"\b(\w+)\s*=\s*new\s+SerialPort\b", source.text))
+        constructors = find_calls(self.files, ["SerialPort"])
+        constructors = [c for c in constructors if "new" in c.file.text[max(0, c.index - 12) : c.index] and c.args]
+        if not names and not constructors:
+            return []
+        r = self.resolver
+        out: list[ImportFinding | None] = []
+
+        properties: dict[str, list[Call]] = {}
+        for source in self.files:
+            for name in names:
+                pattern = rf"\b(?:this\.)?{re.escape(name)}\.(PortName|BaudRate|Parity|DataBits|StopBits|NewLine)\s*=(?!=)\s*"
+                for match in re.finditer(pattern, source.text):
+                    expression = _expression_at(source.text, match.end())
+                    properties.setdefault(match.group(1), []).append(Call(source, match.end(), (expression,)))
+        ctor_positions = {"PortName": 0, "BaudRate": 1, "Parity": 2, "DataBits": 3, "StopBits": 4}
+        for prop, position in ctor_positions.items():
+            for call in constructors:
+                if position < len(call.args):
+                    properties.setdefault(prop, []).append(Call(call.file, call.index, (call.args[position],)))
+
+        def enum_member(call: Call, enum: str):
+            match = re.search(rf"\b{enum}\.(\w+)", call.args[0])
+            return match.group(1) if match else None
+
+        out.append(_finding("light.port", "光源 COM port", *_collect(properties.get("PortName", []), 0, r),
+                            convert=lambda v: _com_port(v)))
+        out.append(_finding("light.baud_rate", "光源 Baud rate", *_collect(properties.get("BaudRate", []), 0, r), convert=int))
+        out.append(_finding("light.data_bits", "光源 Data bits", *_collect(properties.get("DataBits", []), 0, r), convert=int))
+        for key, label, enum, mapping in (
+            ("light.parity", "光源 Parity", "Parity", {"None": "none", "Odd": "odd", "Even": "even", "Mark": "mark", "Space": "space"}),
+            ("light.stop_bits", "光源 Stop bits", "StopBits", {"One": "one", "OnePointFive": "one_point_five", "Two": "two"}),
+        ):
+            members: dict = {}
+            unknown: list[SourceHit] = []
+            for call in properties.get(enum if enum == "Parity" else "StopBits", []):
+                member = enum_member(call, enum)
+                if member in mapping:
+                    members.setdefault(mapping[member], []).append(call.hit())
+                else:
+                    unknown.append(call.hit())
+            out.append(_finding(key, label, members, unknown))
+
+        writes = find_calls(self.files, ["Write", "WriteLine"], member=True)
+        writes = [c for c in writes if _receiver(c) in names and c.args]
+        uses_line = {c for c in writes if c.file.text[c.index : c.index + 9] == "WriteLine"}
+        line_endings: dict = {}
+        if writes and len(uses_line) == len(writes):
+            newline = properties.get("NewLine", [])
+            if newline:
+                values, _unresolved = _collect(newline, 0, r)
+                line_endings = {v: hits for v, hits in values.items() if isinstance(v, str)}
+            else:
+                line_endings = {"\n": [c.hit() for c in writes]}  # .NET SerialPort.NewLine default
+        elif writes and not uses_line:
+            line_endings = {"": [c.hit() for c in writes]}
+        if line_endings:
+            out.append(_finding("light.line_ending", "光源指令結尾", line_endings, [], convert=_line_ending,
+                                show=lambda v: {"": "無", "\r": "CR", "\n": "LF", "\r\n": "CR+LF"}.get(v, repr(v))))
+        out += self._light_commands(writes)
+        return out
+
+    def _light_commands(self, writes: list[Call]) -> list[ImportFinding | None]:
+        on: dict[str, list[SourceHit]] = {}
+        off: dict[str, list[SourceHit]] = {}
+        unclear: list[SourceHit] = []
+        writer_methods: set[str] = set()
+        for call in writes:
+            method = call.file.method_at(call.index)
+            if method:
+                writer_methods.add(method.name)
+            values, _gaps = self.resolver.trace(call.args[0], call.file, call.index)
+            for value in values:
+                if not isinstance(value, (str, bytes)):
+                    continue
+                text = describe_bytes(value if isinstance(value, bytes) else value.encode("latin-1", errors="replace"))
+                owner = self._literal_owner(value) or (method.name if method else "")
+                kind = _command_kind(owner, text)
+                hit = SourceHit(call.hit().file, call.hit().line, owner, call.hit().text)
+                if kind == "on":
+                    on.setdefault(text, []).append(hit)
+                elif kind == "off":
+                    off.setdefault(text, []).append(hit)
+                else:
+                    unclear.append(hit)
+        out: list[ImportFinding | None] = []
+        for key, label, found in (("light.on_commands", "光源開燈指令", on), ("light.off_commands", "光源關燈指令", off)):
+            if found:
+                hits = tuple(h for group in found.values() for h in group)
+                commands = tuple(found)
+                out.append(
+                    ImportFinding(key, label, STATUS_PARTIAL, commands, "；".join(commands),
+                                  "依所在方法名稱分類為開燈／關燈，請確認順序與內容。", hits)
+                )
+        if unclear:
+            out.append(
+                ImportFinding("info.light_commands", "其他光源指令", STATUS_INFO, None,
+                              "；".join(sorted({h.method for h in unclear if h.method})) or "（無法分類）",
+                              "這些固定指令無法判斷是開燈或關燈，請手動確認。", tuple(unclear))
+            )
+        out.append(self._brightness_template(writer_methods))
+        return out
+
+    def _literal_owner(self, value) -> str:
+        """Method whose source contains this literal command (the caller of a Send(cmd) wrapper)."""
+        if not isinstance(value, str) or not value:
+            return ""
+        for source in self.files:
+            for match in re.finditer(r'@?"(?:[^"\\\n]|\\.|"")*"', source.text):
+                if _literal(match.group(0)) == value:
+                    method = source.method_at(match.start())
+                    return method.name if method else ""
+        return ""
+
+    def _brightness_template(self, writer_methods: set[str]) -> ImportFinding | None:
+        """Interpolated/format strings in methods that write to the port or call one that does."""
+        if not writer_methods:
+            return None
+        callers = set(writer_methods)
+        for source in self.files:
+            for method in source.methods:
+                body = source.text[method.start : method.body_end]
+                if any(re.search(rf"\b{re.escape(name)}\s*\(", body) for name in writer_methods):
+                    callers.add(method.name)
+        templates: dict[str, list[SourceHit]] = {}
+        notes: set[str] = set()
+        for source in self.files:
+            for match in re.finditer(r'\$@?"((?:[^"\\]|\\.|"")*)"|\b[Ss]tring\.Format\s*\(', source.text):
+                method = source.method_at(match.start())
+                if method is None or method.name not in callers:
+                    continue
+                if match.group(0).startswith("$"):
+                    converted = _convert_interpolated(match.group(1))
+                else:
+                    parsed = split_arguments(source.text, match.end() - 1)
+                    converted = _convert_format(parsed[0]) if parsed and parsed[0] else None
+                if converted is None:
+                    continue
+                template, note = converted
+                if "{value" not in template:
+                    continue
+                templates.setdefault(template, []).append(Call(source, match.start(), ()).hit())
+                if note:
+                    notes.add(note)
+        if not templates:
+            return None
+        status = STATUS_PARTIAL if len(templates) == 1 else STATUS_CONFLICT
+        value = next(iter(templates)) if len(templates) == 1 else None
+        note = "依變數名稱判斷通道與亮度欄位，請用「送出」測試確認。" + " ".join(sorted(notes))
+        hits = tuple(h for group in templates.values() for h in group)
+        return ImportFinding("light.brightness_template", "光源亮度指令範本", status, value, "；".join(templates), note, hits)
+
+
+def _receiver(call: Call) -> str:
+    before = call.file.text[max(0, call.index - 80) : call.index].rstrip()
+    before = before[:-1] if before.endswith(".") else before
+    match = re.search(r"(\w+)\s*$", before)
+    return match.group(1) if match else ""
+
+
+def _com_port(value) -> str:
+    text = str(value).strip().upper()
+    if not re.fullmatch(r"COM\d+", text):
+        raise ValueError(text)
+    return text
+
+
+def _line_ending(value) -> str:
+    if value not in ("", "\r", "\n", "\r\n"):
+        raise ValueError(value)
+    return value
+
+
+_OFF_WORDS = ("off", "close", "stop", "dispose", "shutdown", "exit", "disable", "關")
+_ON_WORDS = ("on", "open", "start", "init", "enable", "connect", "load", "開")
+
+
+def _command_kind(method: str, command: str) -> str:
+    name = method.lower()
+    if any(word in name for word in _OFF_WORDS):
+        return "off"
+    if any(word in name for word in _ON_WORDS):
+        return "on"
+    return ""
+
+
+def _csharp_spec(spec: str) -> tuple[str, str]:
+    """C# numeric format ("000", "D3", "X2") as a Python format spec, with a note when unsure."""
+    spec = spec.strip()
+    if not spec:
+        return "", ""
+    if re.fullmatch(r"0+", spec):
+        return f"0{len(spec)}", ""
+    match = re.fullmatch(r"([DdXx])(\d*)", spec)
+    if match:
+        kind, width = match.groups()
+        suffix = "" if kind in "Dd" else kind
+        return (f"0{width}{suffix}" if width else suffix or ""), ""
+    return "", f"格式「{spec}」無法轉換，已省略。"
+
+
+def _field_name(expression: str) -> str | None:
+    lowered = expression.lower()
+    if re.search(r"sum|check|crc|bcc|xor", lowered):
+        return "xor" if "xor" in lowered else "checksum"
+    if re.search(r"ch(an(nel)?)?\b|ch\d|channel|通道|\bch", lowered):
+        return "channel"
+    if re.search(r"val|bright|level|lum|intens|power|亮", lowered):
+        return "value"
+    return None
+
+
+def _convert_interpolated(body: str) -> tuple[str, str] | None:
+    out, notes = [], []
+    position = 0
+    for match in re.finditer(r"\{([^{}:]+)(?::([^{}]*))?\}", body):
+        out.append(body[position : match.start()])
+        name = _field_name(match.group(1))
+        if name is None:
+            return None
+        spec, note = _csharp_spec(match.group(2) or "")
+        notes.append(note)
+        out.append("{" + name + (f":{spec}" if spec and name not in ("checksum", "xor") else "") + "}")
+        position = match.end()
+    out.append(body[position:])
+    return "".join(out), " ".join(n for n in notes if n)
+
+
+def _convert_format(args: list[str]) -> tuple[str, str] | None:
+    format_text = _literal(args[0].strip())
+    if not isinstance(format_text, str):
+        return None
+    fields = [_field_name(a) for a in args[1:]]
+    out, notes = [], []
+    position = 0
+    for match in re.finditer(r"\{(\d+)(?::([^{}]*))?\}", format_text):
+        out.append(escape_text(format_text[position : match.start()]))
+        index = int(match.group(1))
+        name = fields[index] if index < len(fields) else None
+        if name is None:
+            return None
+        spec, note = _csharp_spec(match.group(2) or "")
+        notes.append(note)
+        out.append("{" + name + (f":{spec}" if spec and name not in ("checksum", "xor") else "") + "}")
+        position = match.end()
+    out.append(escape_text(format_text[position:]))
+    return "".join(out), " ".join(n for n in notes if n)
 
 
 def _device_name(value) -> str:
