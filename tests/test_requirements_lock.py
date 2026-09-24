@@ -31,16 +31,16 @@ class RequirementsLockTests(unittest.TestCase):
                     requirements,
                     lock,
                     installed={"vision-flow": "1.2.3", "helper.package": "4.5.6"},
-                    python_version=(3, 13),
+                    python_version=(3, 12),
                 ),
             )
             problems = check_lock_consistency(
                 requirements,
                 lock,
                 installed={"vision-flow": "9.9.9"},
-                python_version=(3, 12),
+                python_version=(3, 13),
             )
-            self.assertTrue(any("Python 3.12" in problem for problem in problems))
+            self.assertTrue(any("Python 3.13" in problem for problem in problems))
             self.assertTrue(any("vision-flow has 9.9.9" in problem for problem in problems))
             self.assertTrue(any("helper-package==4.5.6 is missing" in problem for problem in problems))
 

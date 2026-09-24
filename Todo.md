@@ -1179,6 +1179,7 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 - [ ] 加速不得犧牲 GUI 回應、打包啟動、結果追溯、錯誤訊息或 CPU fallback。
 
 ## 完成紀錄
+- [x] 2026-09-24：依使用者決定，依賴基準改為實際出貨環境：`requirements.lock.txt`／`requirements.txt`、`tools/requirements_lock.py`、三支 workflow 與 README 由 CPython 3.13＋OpenCV 4.13.0.92／NumPy 2.4.6 改為 CPython 3.12＋OpenCV 5.0.0.93／NumPy 2.5.1（另 onnxruntime 1.28.0、Pillow 12.3.0、hypothesis 6.163.0、setuptools 83.0.0）。原因：P8 建立的 3.13 lock 與本機 `env` 已分歧，v1.8.6 等實際發行版皆以 3.12＋OpenCV 5.0 打包；P14 新增的建置前 lock 檢查因此擋下 v1.8.7 打包。對齊後產品依賴與 v1.8.6 相同，套件集合不變；`--check-environment`、35 項封裝／依賴測試通過。CI 首次在 3.12 上的執行結果待確認。
 - [x] 2026-09-24：準備 VisionFlow AOI `v1.8.7` CUDA-enabled Windows x64 發行原始碼，GUI Pipeline 版本、根目錄 README、文件索引與 release notes 同步為 1.8.7。發行內容為 CCD 外部觸發診斷（CCF Sensor 輸入讀回、擷取卡事件計數、排序原因與處理步驟面板）；另含 P14 全模組審查修正（項目 13、20 除外）。相機功能尚待相機機台實測。正式套件以本 release commit 的乾淨 worktree 建置，並以 CUDA 13.3／`sm_86` 重建並驗證 DLL；套件、smoke、tag 與 GitHub Release 結果另於發布後記錄。
 - [x] 2026-09-24：完成 P14 項目 1–12、14–19、21–28。完成 detector、processor、GUI、CUDA binding 與 CI／打包／倉庫衛生修正；RTX 量測確認 Pattern SAT/NMS 與小型 launch kernel 不構成值得改寫的熱點，未改動分數精度路徑。requirements lock 檢查、PowerShell 語法解析、35 項封裝／依賴測試，以及隔離 Python 3.13 的 PyInstaller 版本資源與 packaged smoke 驗證通過。項目 13 依 401-CS-AP-2 暫緩決定保留未勾；項目 20 因 RTX 3090 未見收益保留原 kernel，優化本身未採用。
 

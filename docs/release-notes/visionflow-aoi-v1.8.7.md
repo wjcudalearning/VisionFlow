@@ -23,6 +23,7 @@
 
 - 讀取 CCF 的 Sensor 輸入與擷取卡事件計數尚未在相機機台（Xtium-CL MX4／Sapera 8.60）實測；讀不到時面板改為提示用 CamExpert 查看，不影響相機連線。
 - P14 的 401-2 white-pixel 暫存優化隨 401-CS-AP-2 暫緩，不在本版。
+- 執行環境與 v1.8.6 相同：CPython 3.12、OpenCV 5.0.0.93、NumPy 2.5.1、PySide6 6.11.1；`requirements.lock.txt` 已改為這組版本，建置前會檢查環境與 lock 一致。
 - CPU-only 仍完整支援並作為 correctness reference；`cpu`／`auto`／`cuda` fallback 語意與檢測結果不變。
 - 程式未做商業程式碼簽章，Windows 可能顯示 SmartScreen／未知發行者提示。
 

@@ -10,7 +10,7 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_PYTHON = (3, 13)
+EXPECTED_PYTHON = (3, 12)
 PIN_PATTERN = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*==\s*([^\s;#]+)\s*(?:#.*)?$")
 
 
@@ -89,7 +89,7 @@ def main() -> int:
     parser.add_argument(
         "--check-environment",
         action="store_true",
-        help="also require Python 3.13 and every locked package at its pinned version",
+        help="also require Python 3.12 and every locked package at its pinned version",
     )
     args = parser.parse_args()
 

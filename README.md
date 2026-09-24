@@ -9,7 +9,7 @@ CPU-only 是完整支援的執行模式，也是結果正確性的基準。專�
 | 項目 | 現況 |
 |---|---|
 | 最新發行版 | [VisionFlow AOI v1.8.7](https://github.com/wjcudalearning/VisionFlow/releases/tag/v1.8.7)，Windows x64、CUDA `sm_86` |
-| 支援環境 | Windows 10／11、Python 3.13 |
+| 支援環境 | Windows 10／11、Python 3.12 |
 | 檢測方式 | 10 個傳統 CV Detector + 1 個 YOLOX Detector |
 | 操作入口 | CLI、PySide6 GUI、批次資料夾、資料夾監控、相機直連監控 |
 | GPU | 選用 `visionflow_cuda.dll`；`cpu`／`auto`／`cuda` 三種模式 |
@@ -51,11 +51,11 @@ CPU-only 是完整支援的執行模式，也是結果正確性的基準。專�
 
 ```powershell
 cd <AOI_CVBased 專案目錄>
-py -3.13 -m venv env
+py -3.12 -m venv env
 .\env\Scripts\python.exe -m pip install -r requirements.lock.txt
 ```
 
-`requirements.txt` 是直接相依套件；可重現的完整 Windows dependency lock 位於 `requirements.lock.txt`。測試會核對兩者的直接相依版本，PyInstaller 建置也會先確認目前是 Python 3.13 且所有 lock 套件版本相符。若檢查未通過，請用上述指令重建或更新 `env` 後再建置。
+`requirements.txt` 是直接相依套件；可重現的完整 Windows dependency lock 位於 `requirements.lock.txt`。測試會核對兩者的直接相依版本，PyInstaller 建置也會先確認目前是 Python 3.12 且所有 lock 套件版本相符。若檢查未通過，請用上述指令重建或更新 `env` 後再建置。
 
 ### 2. 啟動 GUI
 
