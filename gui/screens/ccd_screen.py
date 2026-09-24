@@ -233,6 +233,7 @@ class CcdScreen(QWidget):
     sensor_relay_settings_applied = Signal(object)
     sensor_input_read_requested = Signal()
     sensor_output_pulse_requested = Signal()
+    sensor_dll_selected = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -641,7 +642,16 @@ class CcdScreen(QWidget):
         self.sensor_assembly_edit = self.gate.register(QLineEdit())
         self.sensor_assembly_edit.setProperty("mono", "true")
         self.sensor_assembly_edit.setPlaceholderText("預設：DAQNavi 安裝位置（Automation.BDaq4.dll）")
-        form.addRow("DAQNavi DLL", self.sensor_assembly_edit)
+        self.sensor_assembly_edit.setToolTip("可填 DLL 檔案或它所在的資料夾；貼上時的引號會自動去除。")
+        self.sensor_assembly_button = self.gate.register(_button("瀏覽", icon_name="folder"))
+        self.sensor_assembly_button.clicked.connect(self._choose_sensor_dll)
+        assembly_row = QWidget()
+        assembly_layout = QHBoxLayout(assembly_row)
+        assembly_layout.setContentsMargins(0, 0, 0, 0)
+        assembly_layout.setSpacing(6)
+        assembly_layout.addWidget(self.sensor_assembly_edit, 1)
+        assembly_layout.addWidget(self.sensor_assembly_button)
+        form.addRow("DAQNavi DLL", assembly_row)
         panel.add_layout(form)
 
         self.sensor_apply_button = self.gate.register(_button("套用 Sensor 中繼設定", "primary", "check"))
@@ -1233,6 +1243,19 @@ class CcdScreen(QWidget):
         path, _ = QFileDialog.getOpenFileName(self, "選擇 CCF 檔案", self.ccf_path_edit.text(), "CCF 檔案 (*.ccf)")
         if path:
             self.ccf_path_edit.setText(path)
+
+    def _choose_sensor_dll(self) -> None:
+        current = self.sensor_assembly_edit.text().strip().strip("\"'")
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "選擇研華 DAQNavi DLL（Automation.BDaq4.dll）",
+            current,
+            "DAQNavi .NET DLL (Automation.BDaq*.dll);;DLL (*.dll)",
+        )
+        if path:
+            self.sensor_assembly_edit.setText(path)
+            # Saved immediately, like the LSI DLL, so the availability line updates at once.
+            self.sensor_dll_selected.emit(path)
 
     def _choose_save_folder(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "選擇存圖資料夾", self.save_folder_edit.text())

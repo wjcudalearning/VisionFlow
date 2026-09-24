@@ -5,13 +5,14 @@ import os
 import tempfile
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
-from devices.advantech_dio import AdvantechDigitalIo, locate_assembly
+from devices.advantech_dio import AdvantechDigitalIo, explain_missing, locate_assembly
 from devices.ccd_models import (
     AcquisitionSettings,
     CameraConnectionSettings,
@@ -294,6 +295,32 @@ class AdvantechDigitalIoTests(unittest.TestCase):
         with self.assertRaisesRegex(DeviceError, "DAQNavi"):
             io.connect(SensorRelaySettings())
 
+    def test_pasted_quotes_folders_and_the_legacy_dll_name_are_accepted(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            dll = root / "Advantech" / "Automation.BDaq4.dll"
+            dll.parent.mkdir()
+            dll.write_bytes(b"")
+            for text in (f'"{dll}"', f"  '{dll}'  ", str(dll.parent), f'"{dll.parent}"'):
+                with self.subTest(text):
+                    self.assertEqual(locate_assembly(text, {}, ()), dll)
+            legacy = root / "old" / "Automation.BDaq.dll"
+            legacy.parent.mkdir()
+            legacy.write_bytes(b"")
+            self.assertEqual(locate_assembly(str(legacy.parent), {}, ()), legacy)
+            self.assertEqual(locate_assembly("", {}, (root / "old",)), legacy)
+            self.assertIn("不存在", explain_missing(str(root / "nope.dll"), {}, ()))
+            empty = root / "empty"
+            empty.mkdir()
+            self.assertIn("裡沒有", explain_missing(str(empty), {}, ()))
+            self.assertIn("預設安裝位置", explain_missing("", {}, (empty,)))
+            io = AdvantechDigitalIo(assembly_path=f'"{dll}"', environ={})
+            self.assertTrue(io.availability().available)
+            reason = AdvantechDigitalIo(assembly_path=str(empty), environ={}).availability().reason
+            self.assertIn("瀏覽", reason)
+            self.assertIn(str(empty), reason)
+        self.assertEqual(SensorRelaySettings(assembly_path=' "C:\\x\\a.dll" ').normalized().assembly_path, "C:\\x\\a.dll")
+
     def test_factory_wiring(self):
         self.assertFalse(CcdDevices(SimulatedLineScanCamera(auto_emit=False), SimulatedMeterWheel()).digital_io.availability().available)
         self.assertIsInstance(create_ccd_devices({"VISIONFLOW_CCD_SIMULATOR": "1"}).digital_io, SimulatedDigitalIo)
@@ -494,6 +521,31 @@ class ControllerSensorRelayTests(unittest.TestCase):
         self.meter_wheel.set_encoder(35)
         self.controller.poll_meter_wheel()
         self.assertEqual(self.controller.trigger_diagnosis.code, "relay_not_received")
+
+    def test_browsing_for_the_daqnavi_dll_saves_it_and_refreshes_availability(self):
+        dll = self.root / "DAQNavi" / "Automation.BDaq4.dll"
+        dll.parent.mkdir()
+        dll.write_bytes(b"")
+        io = AdvantechDigitalIo(lambda: self.store.load().sensor_relay.assembly_path, environ={})
+        self.controller.devices = CcdDevices(self.camera, self.meter_wheel, io)
+        self.assertFalse(self.controller.set_sensor_dll_path(str(self.root / "missing.dll")))
+        self.assertEqual(self.notices[-1][1], "warning")
+        self.assertFalse(self.screen.sensor_relay_availability_label.isHidden())
+
+        with unittest.mock.patch(
+            "gui.screens.ccd_screen.QFileDialog.getOpenFileName", return_value=(str(dll), "")
+        ):
+            self.screen.sensor_assembly_button.click()
+        self.assertEqual(self.store.load().sensor_relay.assembly_path, str(dll))
+        self.assertEqual(self.screen.sensor_assembly_edit.text(), str(dll))
+        self.assertEqual(self.notices[-1][1], "success")
+        self.assertTrue(self.screen.sensor_relay_availability_label.isHidden())
+
+        with unittest.mock.patch("gui.screens.ccd_screen.QFileDialog.getOpenFileName", return_value=("", "")):
+            self.screen.sensor_assembly_button.click()
+        self.assertEqual(self.store.load().sensor_relay.assembly_path, str(dll), "cancel keeps the saved DLL")
+        self.screen.set_mode("eng")
+        self.assertFalse(self.screen.sensor_assembly_button.isEnabled())
 
     def test_screen_panel_is_admin_only_and_round_trips_settings(self):
         self.screen.set_sensor_relay_settings(ENABLED.normalized())

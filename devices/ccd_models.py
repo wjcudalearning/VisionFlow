@@ -338,7 +338,7 @@ class SensorRelaySettings:
             pulse_ms=float(_clamp(float(self.pulse_ms), SENSOR_PULSE_MS_RANGE)),
             min_interval_ms=int(_clamp(int(self.min_interval_ms), SENSOR_MIN_INTERVAL_MS_RANGE)),
             poll_interval_ms=float(_clamp(float(self.poll_interval_ms), SENSOR_POLL_MS_RANGE)),
-            assembly_path=str(self.assembly_path).strip(),
+            assembly_path=str(self.assembly_path).strip().strip("\"'").strip(),
         )
 
     @property

@@ -360,6 +360,7 @@ class CcdController(QObject, LogMixin):
         screen.sensor_relay_settings_applied.connect(self.apply_sensor_relay_settings)
         screen.sensor_input_read_requested.connect(self.read_sensor_input)
         screen.sensor_output_pulse_requested.connect(self.pulse_sensor_output)
+        screen.sensor_dll_selected.connect(self.set_sensor_dll_path)
 
         self.camera_status_changed.connect(screen.set_camera_status)
         self.camera_busy_changed.connect(screen.set_camera_busy)
@@ -1133,6 +1134,23 @@ class CcdController(QObject, LogMixin):
             text += "外部觸發單張會由程式把 Sensor 轉成 DO 脈衝，軟體觸發改由 Sensor 起拍；請確認原機台程式已關閉。"
         self.notice.emit(text, "success")
         return True
+
+    def set_sensor_dll_path(self, path: str) -> bool:
+        """Remember the DAQNavi DLL (or its folder) chosen on the CCD page and report whether it is usable."""
+        if self._sensor_relay is not None:
+            self.notice.emit("Sensor 中繼執行中，請先停止預覽／擷取再更換 DLL。", "warning")
+            return False
+        settings = replace(self._machine.sensor_relay, assembly_path=str(path or "")).normalized()
+        if not self._save_machine(replace(self._machine, sensor_relay=settings)):
+            return False
+        self.sensor_relay_settings_changed.emit(self._machine.sensor_relay)
+        self._publish_availability()
+        availability = self.devices.digital_io.availability()
+        if availability.available:
+            self.notice.emit(f"已設定 DAQNavi DLL：{settings.assembly_path or '（預設安裝位置）'}", "success")
+        else:
+            self.notice.emit(f"DAQNavi DLL 仍無法使用：{availability.reason}", "warning")
+        return availability.available
 
     def _start_forward_relay(self) -> None:
         if relay_mode(self._machine.sensor_relay, self.hardware_trigger()) == MODE_FORWARD:

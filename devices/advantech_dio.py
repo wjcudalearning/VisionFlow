@@ -17,15 +17,56 @@ from devices.interfaces import DigitalIo
 # ============================================================
 
 ASSEMBLY_FILE_NAME = "Automation.BDaq4.dll"
+# Older DAQNavi releases ship the same `Automation.BDaq` namespace as Automation.BDaq.dll.
+ASSEMBLY_FILE_NAMES = (ASSEMBLY_FILE_NAME, "Automation.BDaq.dll")
 ASSEMBLY_NAME = "Automation.BDaq4"
 NAMESPACE = "Automation.BDaq"
 DLL_PATH_ENV = "VISIONFLOW_BDAQ_DLL"
-# DAQNavi installs the assembly into the .NET Framework GAC; the SDK folder keeps another copy.
+# DAQNavi installs the assembly into the .NET GAC (4.x and the older 2.x GAC); the SDK keeps copies.
 DEFAULT_SEARCH_DIRS = (
     Path(r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL\Automation.BDaq4"),
-    Path(r"C:\Advantech\DAQNavi\Examples\DotNet"),
-    Path(r"C:\Advantech\DAQNavi\Bin"),
+    Path(r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL\Automation.BDaq"),
+    Path(r"C:\Windows\assembly\GAC_MSIL\Automation.BDaq4"),
+    Path(r"C:\Windows\assembly\GAC_MSIL\Automation.BDaq"),
+    Path(r"C:\Advantech\DAQNavi"),
+    Path(r"C:\Program Files\Advantech\DAQNavi"),
+    Path(r"C:\Program Files (x86)\Advantech\DAQNavi"),
 )
+
+
+def clean_path_text(text: str) -> str:
+    """A pasted path without surrounding blanks or quotes (Explorer's "Copy as path" adds quotes)."""
+    value = str(text or "").strip()
+    while len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        value = value[1:-1].strip()
+    return value
+
+
+def _find_in_folder(folder: Path) -> Path | None:
+    for name in ASSEMBLY_FILE_NAMES:
+        direct = folder / name
+        if direct.is_file():
+            return direct
+    for name in ASSEMBLY_FILE_NAMES:
+        for candidate in sorted(folder.rglob(name)):
+            return candidate
+    return None
+
+
+def _explicit_candidate(text: str) -> tuple[Path | None, str]:
+    """(dll, reason when not found) for a configured file or folder path."""
+    path = Path(clean_path_text(text))
+    try:
+        if path.is_file():
+            return path, ""
+        if path.is_dir():
+            found = _find_in_folder(path)
+            if found is not None:
+                return found, ""
+            return None, f"資料夾「{path}」裡沒有 {'／'.join(ASSEMBLY_FILE_NAMES)}"
+    except OSError as exc:
+        return None, f"無法讀取「{path}」：{exc}"
+    return None, f"「{path}」不存在"
 
 
 def locate_assembly(
@@ -33,25 +74,36 @@ def locate_assembly(
     environ: Mapping[str, str] | None = None,
     search_dirs: tuple[Path, ...] = DEFAULT_SEARCH_DIRS,
 ) -> Path | None:
-    """The configured, environment or installed `Automation.BDaq4.dll`, without loading anything."""
+    """The configured, environment or installed `Automation.BDaq4.dll`, without loading anything.
 
+    A configured path may be the DLL itself or a folder that contains it, with or without quotes.
+    """
+    return _search(assembly_path, environ, search_dirs)[0]
+
+
+def explain_missing(
+    assembly_path: str = "",
+    environ: Mapping[str, str] | None = None,
+    search_dirs: tuple[Path, ...] = DEFAULT_SEARCH_DIRS,
+) -> str:
+    return _search(assembly_path, environ, search_dirs)[1]
+
+
+def _search(assembly_path, environ, search_dirs) -> tuple[Path | None, str]:
     env = os.environ if environ is None else environ
-    for explicit in (str(assembly_path or "").strip(), str(env.get(DLL_PATH_ENV) or "").strip()):
-        if explicit:
-            path = Path(explicit)
-            return path if path.is_file() else None
+    for label, explicit in (("設定的 DLL 位置", assembly_path), (DLL_PATH_ENV, env.get(DLL_PATH_ENV))):
+        if clean_path_text(explicit or ""):
+            found, reason = _explicit_candidate(explicit)
+            return found, "" if found else f"{label}：{reason}"
     for folder in search_dirs:
         try:
-            if not folder.is_dir():
-                continue
-            direct = folder / ASSEMBLY_FILE_NAME
-            if direct.is_file():
-                return direct
-            for candidate in sorted(folder.rglob(ASSEMBLY_FILE_NAME)):
-                return candidate
+            if folder.is_dir():
+                found = _find_in_folder(folder)
+                if found is not None:
+                    return found, ""
         except OSError:
             continue
-    return None
+    return None, "預設安裝位置都找不到"
 
 
 def _is_success(error_code) -> bool:
@@ -82,12 +134,13 @@ class AdvantechDigitalIo(DigitalIo):
     def availability(self) -> DeviceAvailability:
         if self._namespace_loader is not _load_namespace:
             return DeviceAvailability(True)
-        if locate_assembly(self._configured_path(), self._environ) is not None:
+        path, reason = _search(self._configured_path(), self._environ, DEFAULT_SEARCH_DIRS)
+        if path is not None:
             return DeviceAvailability(True)
         return DeviceAvailability(
             False,
-            f"找不到研華 DAQNavi（{ASSEMBLY_FILE_NAME}）；請在相機機台安裝 DAQNavi，"
-            f"或在 Sensor 中繼設定指定 DLL 位置（也可設定 {DLL_PATH_ENV}）。",
+            f"找不到研華 DAQNavi 的 {ASSEMBLY_FILE_NAME}（{reason}）；"
+            "請在 Sensor 中繼面板按「瀏覽」選取這個 DLL，或選取它所在的資料夾。",
         )
 
     @property
