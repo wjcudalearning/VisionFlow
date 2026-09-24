@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
@@ -384,12 +385,26 @@ class ControllerImportTests(unittest.TestCase):
         self.dialog_result = 1  # QDialog.Accepted
         self.screen.legacy_dialog_factory = fake_dialog
 
+    def wait_for_scan(self, future=None):
+        future = future or self.controller._legacy_scan
+        self.assertIsNotNone(future)
+        future.result(timeout=10)
+        deadline = time.monotonic() + 10
+        while self.controller._legacy_scan is not None and time.monotonic() < deadline:
+            self.app.processEvents()
+            time.sleep(0.005)
+        self.assertIsNone(self.controller._legacy_scan, "background scan did not finish on the GUI thread")
+        self.app.processEvents()
+
     def test_browse_scan_confirm_and_apply_through_the_normal_settings_paths(self):
         from unittest import mock
 
         self.assertTrue(self.controller.connect_meter_wheel(0))
         with mock.patch("gui.screens.ccd_screen.QFileDialog.getOpenFileName", return_value=(str(self.solution), "")):
             self.screen.legacy_import_button.click()
+        self.assertEqual(self.screen.legacy_scan_label.text(), "分析中…")
+        self.assertFalse(self.screen.legacy_import_button.isEnabled())
+        self.wait_for_scan()
         dialog = self.dialogs[-1]
         self.assertGreater(dialog.table.rowCount(), 10)
         chosen = {f.key for f in dialog.selected_findings()}
@@ -416,7 +431,7 @@ class ControllerImportTests(unittest.TestCase):
     def test_unchecked_rows_and_cancel_change_nothing(self):
         before = self.store.load()
         self.dialog_result = 0
-        self.controller.import_legacy_program(str(self.solution))
+        self.wait_for_scan(self.controller.import_legacy_program(str(self.solution)))
         self.assertEqual(self.store.load(), before)
 
         self.dialog_result = 1
@@ -429,7 +444,7 @@ class ControllerImportTests(unittest.TestCase):
             return dialog
 
         self.screen.legacy_dialog_factory = only_increment
-        self.controller.import_legacy_program(str(self.solution))
+        self.wait_for_scan(self.controller.import_legacy_program(str(self.solution)))
         machine = self.store.load()
         self.assertEqual(machine.meter_wheel.compare_increment, 9)
         self.assertEqual(machine.meter_wheel.multiple_rate, before.meter_wheel.multiple_rate)
@@ -442,8 +457,19 @@ class ControllerImportTests(unittest.TestCase):
         applied = self.controller.apply_legacy_import([ImportFinding("meter_wheel.card_id", "米輪卡片 ID", STATUS_READY, 3, "3")])
         self.assertEqual(applied, [])
         self.assertIn("米輪連線中", self.notices[-1][0])
-        self.assertIsNone(self.controller.import_legacy_program(str(self.root / "nothing.sln")))
+        self.wait_for_scan(self.controller.import_legacy_program(str(self.root / "nothing.sln")))
         self.assertEqual(self.notices[-1][1], "warning")
+
+    def test_folder_selection_and_dialog_failure_are_reported(self):
+        from unittest import mock
+
+        self.screen.legacy_dialog_factory = lambda *_args: (_ for _ in ()).throw(ValueError("table error"))
+        with mock.patch("gui.screens.ccd_screen.QFileDialog.getExistingDirectory", return_value=str(self.solution.parent)):
+            self.screen.legacy_folder_button.click()
+        self.wait_for_scan()
+        self.assertIn("無法顯示匯入確認表", self.notices[-1][0])
+        self.assertEqual(self.notices[-1][1], "error")
+        self.assertTrue(self.screen.legacy_folder_button.isEnabled())
 
     def test_panel_is_admin_only(self):
         self.screen.set_mode("eng")
@@ -454,6 +480,19 @@ class ControllerImportTests(unittest.TestCase):
 
 
 class TextHelperTests(unittest.TestCase):
+    def test_budget_limited_trace_does_not_poison_later_lookup(self):
+        from unittest import mock
+
+        from devices.legacy_program_import import Resolver, SourceFile
+
+        source = SourceFile(Path("machine.cs"), "machine.cs", "int X = 42;", ["int X = 42;"], [0])
+        resolver = Resolver([source], {})
+        with mock.patch("devices.legacy_program_import.TRACE_STEP_BUDGET", 1):
+            values, gaps = resolver.trace("X", source, len(source.text))
+        self.assertEqual(values, set())
+        self.assertTrue(any("追蹤太複雜" in gap for gap in gaps))
+        self.assertEqual(resolver.trace("X", source, len(source.text))[0], {42})
+
     def test_comments_are_blanked_without_touching_strings_or_line_numbers(self):
         text = 'a(1); // b(2)\n/* c(3)\n */ d("// not a comment", @"x""y");'
         stripped = strip_comments(text)

@@ -28,6 +28,7 @@ SKIP_DIRS = frozenset({"bin", "obj", ".vs", ".git", "packages", "node_modules"})
 CONFIG_SUFFIXES = (".config", ".ini", ".settings", ".json", ".xml")
 MAX_FILE_BYTES = 4_000_000
 MAX_DEPTH = 8
+TRACE_STEP_BUDGET = 4000
 
 STATUS_READY = "ready"
 STATUS_PARTIAL = "partial"
@@ -283,6 +284,7 @@ class SourceFile:
     lines: list[str]
     line_starts: list[int]
     methods: list[Method] = field(default_factory=list)
+    method_starts: set[int] = field(default_factory=set)
     class_names: set[str] = field(default_factory=set)
 
     def line_of(self, index: int) -> int:
@@ -351,6 +353,7 @@ def _index_methods(source: SourceFile) -> None:
         else:
             end = close + 1 + body.end()
         source.methods.append(Method(name, _parse_params(args), match.start("name"), end, token == ";"))
+        source.method_starts.add(match.start("name"))
 
 
 def _load(paths: list[Path], root: Path) -> list[SourceFile]:
@@ -393,7 +396,7 @@ def _is_declaration(source: SourceFile, index: int) -> bool:
     prefix = source.text[line_start:index]
     if re.search(r"\b(extern|delegate)\b", prefix):
         return True
-    return any(m.start == index for m in source.methods)
+    return index in source.method_starts
 
 
 def find_calls(files: list[SourceFile], names: Iterable[str], member: bool = False) -> list[Call]:
@@ -578,6 +581,15 @@ class Resolver:
         self.symbols: dict[str, list[tuple[str, SourceFile, int, str]]] = {}
         self.enum_members: dict[str, set[int]] = {}
         self._callers: dict[str, list[Call]] = {}
+        self._memo: dict = {}
+        self._steps = 0
+        self._exhausted = False
+        self._caller_arguments: dict = {}
+        self._methods_by_name: dict[str, list[tuple[SourceFile, Method]]] = {}
+        for source in files:
+            for method in source.methods:
+                if not method.is_declaration_only:
+                    self._methods_by_name.setdefault(method.name, []).append((source, method))
         for source in files:
             for match in _ASSIGNMENT_START.finditer(source.text):
                 expression = _expression_at(source.text, match.end())
@@ -618,6 +630,7 @@ class Resolver:
     def trace(self, expression: str, source: SourceFile, index: int) -> tuple[set, tuple[str, ...]]:
         """(possible values, runtime-only sources met on the way such as UI input or file reads)."""
         self._gaps: list[str] = []
+        self._steps = 0
         values = self.values(expression, source, index)
         return values, tuple(dict.fromkeys(self._gaps))
 
@@ -628,16 +641,59 @@ class Resolver:
         return set()
 
     def values(self, expression: str, source: SourceFile, index: int, depth: int = 0, seen=None, bindings=None) -> set:
+        if depth == 0:
+            self._steps = 0
+            self._exhausted = False
+        return self._lookup(expression, source, index, depth, seen, bindings)
+
+    def _lookup(self, expression: str, source: SourceFile, index: int, depth: int, seen, bindings) -> set:
+        if self._exhausted:
+            return set()
         seen = set() if seen is None else seen
         text = expression.strip()
         if not text or depth > MAX_DEPTH or (text, id(source), index) in seen:
             return set()
+        # Common names (value, index…) are assigned in hundreds of places; without a memo and a step
+        # budget, tracing them grows exponentially on a real program and freezes the scan.
+        bound = tuple(sorted((k, v[0], id(v[1]), v[2]) for k, v in (bindings or {}).items()))
+        # Depth is part of the key: a result cut short by MAX_DEPTH must not be reused nearer the root.
+        key = (text, id(source), index, bound, depth)
+        cached = self._memo.get(key)
+        if cached is not None:
+            self._steps += 1
+            if self._steps > TRACE_STEP_BUDGET:
+                self._exhausted = True
+                return set()
+            result, gaps = cached
+            for gap in gaps:
+                self._gap(gap)
+            return set(result)
+        # Each top-level lookup gets its own budget; nested lookups share it. Past the budget no new
+        # expression is expanded, but values already found are kept (and flagged by the gap).
+        self._steps += 1
+        if self._steps > TRACE_STEP_BUDGET:
+            self._exhausted = True
+            self._gap("（追蹤太複雜，已停止）")
+            return set()
+        outer_gaps = getattr(self, "_gaps", None)
+        self._gaps = []
         seen = seen | {(text, id(source), index)}
         if re.match(r"^(?:out|ref)\s", text):
-            return self._gap(text)
-        text = re.sub(r"^in\s+", "", text)
-        result = self._values(text, source, index, depth, seen, bindings or {})
-        return result if result else self._gap(text)
+            result = self._gap(text)
+        else:
+            text_in = re.sub(r"^in\s+", "", text)
+            result = self._values(text_in, source, index, depth, seen, bindings or {})
+            if not result:
+                self._gap(text_in)
+        own_gaps = tuple(self._gaps)
+        # A budget-limited result is incomplete. A later, independent trace must be able to
+        # explore this expression again rather than inheriting a truncated answer.
+        if not self._exhausted:
+            self._memo[key] = (frozenset(result), own_gaps)
+        if outer_gaps is not None:
+            outer_gaps.extend(g for g in own_gaps if len(outer_gaps) < 20)
+        self._gaps = outer_gaps
+        return set(result)
 
     def _values(self, text: str, source: SourceFile, index: int, depth: int, seen, bindings: dict) -> set:
         def again(expression, where=source, at=index, bound=bindings):
@@ -694,8 +750,9 @@ class Resolver:
             for position, (param, default) in enumerate(method.params):
                 if param != name:
                     continue
-                for caller in self.callers(method, source):
-                    argument = self._argument(caller.args, position, param, default)
+                for argument, caller in self._arguments_for(method, source, position, param, default):
+                    if self._exhausted:
+                        break
                     if argument:
                         results |= again(argument, caller.file, caller.index, {})
                 if results:
@@ -708,12 +765,16 @@ class Resolver:
         if simple and method is not None:
             # A name assigned inside the same method is a local: ignore same-named symbols elsewhere.
             local = [c for c in candidates if c[1] is source and method.start <= c[2] <= method.body_end and c[2] < index]
-            candidates = local or [c for c in candidates if c[3] in ("", "this")]
+            members = [c for c in candidates if c[3] in ("", "this")]
+            # An unqualified field belongs to its own class: prefer assignments in the same file.
+            candidates = local or [c for c in members if c[1] is source] or members
         elif not simple:
             # `_settings.X` only follows `settings.X = …` or an unqualified member `X = …` (object initializer).
             owner = _owner(chain.group(1))
             candidates = [c for c in candidates if c[3] in ("", "this", owner)]
         for expression_text, where, at, _owner_name in candidates:
+            if self._exhausted:
+                break
             results |= again(expression_text, where, at)
         if name in self.enum_members:
             results |= self.enum_members[name]
@@ -726,20 +787,23 @@ class Resolver:
     def _return_values(self, name, args, source, index, depth, seen, bindings) -> set:
         """Values returned by a called method, with its parameters bound to this call's arguments."""
         results: set = set()
-        for method_source in self.files:
-            for method in method_source.methods:
-                required = sum(1 for _n, default in method.params if not default)
-                if method.name != name or method.is_declaration_only or not required <= len(args) <= len(method.params):
-                    continue
-                bound = {}
-                for position, (param, default) in enumerate(method.params):
-                    argument = self._argument(args, position, param, "")
-                    if argument:
-                        bound[param] = (argument, source, index)
-                    elif default:
-                        bound[param] = (default, method_source, method.start)
-                for expression_text, at in self._returns(method_source, method, bound, depth, seen):
-                    results |= self.values(expression_text, method_source, at, depth + 1, seen, bound)
+        for method_source, method in self._methods_by_name.get(name, ()):
+            if self._exhausted:
+                break
+            required = sum(1 for _n, default in method.params if not default)
+            if not required <= len(args) <= len(method.params):
+                continue
+            bound = {}
+            for position, (param, default) in enumerate(method.params):
+                argument = self._argument(args, position, param, "")
+                if argument:
+                    bound[param] = (argument, source, index)
+                elif default:
+                    bound[param] = (default, method_source, method.start)
+            for expression_text, at in self._returns(method_source, method, bound, depth, seen):
+                if self._exhausted:
+                    break
+                results |= self.values(expression_text, method_source, at, depth + 1, seen, bound)
         return results
 
     def _returns(self, source: SourceFile, method: Method, bound: dict, depth, seen) -> list[tuple[str, int]]:
@@ -773,6 +837,15 @@ class Resolver:
             return ""
         last = labels[-1]
         return last.group(1) if last.group(1) else "default"
+
+    def _arguments_for(self, method: Method, source: SourceFile, position: int, param: str, default: str):
+        """(argument expression, call) for one parameter over every caller, literals first; cached."""
+        key = (id(source), method.start, position)
+        if key not in self._caller_arguments:
+            pairs = [(self._argument(c.args, position, param, default), c) for c in self.callers(method, source)]
+            pairs.sort(key=lambda item: _literal(item[0].strip()) is None)
+            self._caller_arguments[key] = pairs
+        return self._caller_arguments[key]
 
     @staticmethod
     def _argument(args: tuple[str, ...], position: int, param: str, default: str) -> str:

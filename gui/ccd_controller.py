@@ -242,6 +242,7 @@ class CcdController(QObject, LogMixin):
     sensor_relay_settings_changed = Signal(object)
     #: (LegacyImportReport, current values by finding key) after scanning the original program.
     legacy_import_ready = Signal(object, object)
+    legacy_scan_running_changed = Signal(bool)
     #: `LightStatus` after every light job; `LightSettings` after a save.
     light_changed = Signal(object)
     light_settings_changed = Signal(object)
@@ -263,6 +264,7 @@ class CcdController(QObject, LogMixin):
     _sensor_capture_requested = Signal()
     _sensor_relay_failed = Signal(str)
     _light_done = Signal(object)
+    _legacy_scan_done = Signal(object)
     _auto_save_rejected = Signal()
     _auto_save_fallback_used = Signal()
     _camera_lifecycle_done = Signal(object)
@@ -300,6 +302,8 @@ class CcdController(QObject, LogMixin):
         self._light_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ccd-light")
         self._light_status = LightStatus()
         self._light_for_monitoring = False
+        self._legacy_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ccd-legacy-import")
+        self._legacy_scan = None
         # External-trigger capture watch (GUI thread) and whether the grabber reported trigger events.
         self._external_watch: ExternalCaptureWatch | None = None
         self._trigger_seen_since_connect = False
@@ -342,6 +346,7 @@ class CcdController(QObject, LogMixin):
         self._sensor_capture_requested.connect(self._execute_sensor_capture, queued)
         self._sensor_relay_failed.connect(self._on_sensor_relay_failed, queued)
         self._light_done.connect(self._finish_light, queued)
+        self._legacy_scan_done.connect(self._finish_legacy_scan, queued)
         self._auto_save_rejected.connect(self._on_auto_save_rejected, queued)
         self._auto_save_fallback_used.connect(self._on_auto_save_fallback_used, queued)
         self._camera_lifecycle_done.connect(self._finish_camera_lifecycle, queued)
@@ -397,6 +402,7 @@ class CcdController(QObject, LogMixin):
         screen.sensor_dll_selected.connect(self.set_sensor_dll_path)
         screen.legacy_program_selected.connect(self.import_legacy_program)
         screen.legacy_import_apply_requested.connect(self.apply_legacy_import)
+        screen.legacy_import_failed.connect(self.report_legacy_import_error)
         screen.light_settings_applied.connect(self.apply_light_settings)
         screen.light_on_requested.connect(self.light_on)
         screen.light_off_requested.connect(self.light_off)
@@ -418,6 +424,7 @@ class CcdController(QObject, LogMixin):
         self.sensor_relay_changed.connect(screen.set_sensor_relay_stats)
         self.sensor_relay_settings_changed.connect(screen.set_sensor_relay_settings)
         self.legacy_import_ready.connect(screen.show_legacy_import)
+        self.legacy_scan_running_changed.connect(screen.set_legacy_scan_running)
         self.light_changed.connect(screen.set_light_status)
         self.light_settings_changed.connect(screen.set_light_settings)
 
@@ -1513,20 +1520,69 @@ class CcdController(QObject, LogMixin):
     # ------------------------------------------------------------------
     # 從原機台程式匯入（smart import from the original C# program）
     # ------------------------------------------------------------------
-    def import_legacy_program(self, path: str) -> LegacyImportReport | None:
-        """Scan the original program's .sln/.csproj/folder; the screen shows the confirmation table."""
+    def import_legacy_program(self, path: str):
+        """Scan the original program's .sln/.csproj/folder on a background thread.
+
+        The confirmation table opens when the scan finishes. Every failure is shown on the screen and
+        written to the log with its traceback, so a scan can never end silently.
+        """
+        if self._closed:
+            return None
+        if self._legacy_scan is not None:
+            self.notice.emit("正在分析原程式，請稍候。", "warning")
+            return None
+        self.legacy_scan_running_changed.emit(True)
+        self.status_message.emit(f"正在分析原程式：{path}")
+        self.logger.info("Legacy program import started: %s", path)
+        future = self._legacy_executor.submit(self._scan_legacy_program, str(path))
+        future.add_done_callback(lambda done: self._legacy_scan_done.emit(done))
+        self._legacy_scan = future
+        return future
+
+    def _scan_legacy_program(self, path: str):
+        """Legacy-import thread: (report, message, level); never raises."""
         try:
-            report = scan_legacy_program(path)
+            return scan_legacy_program(path), "", ""
         except LegacyImportError as exc:
-            self.notice.emit(str(exc), "warning")
-            return None
-        except OSError as exc:
-            self.notice.emit(f"讀取原程式失敗：{exc}", "error")
-            return None
+            return None, str(exc), "warning"
+        except Exception as exc:  # noqa: BLE001 - an unexpected parser failure must reach the operator
+            self.logger.exception("Legacy program import failed: %s", path)
+            return None, f"分析原程式時發生錯誤：{type(exc).__name__}: {exc}（詳細內容已寫入 log）", "error"
+
+    def _finish_legacy_scan(self, future) -> None:
+        if future is not self._legacy_scan:
+            return
+        self._legacy_scan = None
+        self.legacy_scan_running_changed.emit(False)
+        if self._closed:
+            return
+        try:
+            report, message, level = future.result()
+        except Exception as exc:  # noqa: BLE001 - include cancelled or unexpected worker failures
+            self.logger.exception("Legacy program import worker failed")
+            self.notice.emit(f"分析原程式時發生錯誤：{type(exc).__name__}: {exc}", "error")
+            return
+        if report is None:
+            self.notice.emit(message, level)
+            return
         applicable = len(report.applicable)
-        self.status_message.emit(f"原程式掃描完成：{report.files_scanned} 個原始檔，找到 {applicable} 個可套用的值。")
+        self.logger.info(
+            "Legacy program import scanned %d files in %s: %d findings, %d applicable",
+            report.files_scanned, report.root, len(report.findings), applicable,
+        )
+        if not report.findings:
+            self.notice.emit(
+                f"已讀取 {report.files_scanned} 個 C# 原始檔，但沒有找到米輪、Sensor 中繼、光源或相機設定"
+                "（LSI8181、DeviceInformation、ReadBit／WriteBit、SerialPort、.ccf）。請確認選到的是原機台程式。",
+                "warning",
+            )
+        self.status_message.emit(f"原程式分析完成：{report.files_scanned} 個原始檔，找到 {applicable} 個可套用的值。")
         self.legacy_import_ready.emit(report, self.legacy_current_values())
-        return report
+
+    def report_legacy_import_error(self, message: str) -> None:
+        """The screen could not show the confirmation table."""
+        self.logger.error("Legacy import dialog failed: %s", message)
+        self.notice.emit(f"無法顯示匯入確認表：{message}", "error")
 
     def legacy_current_values(self) -> dict[str, str]:
         wheel = self._machine.meter_wheel
@@ -2145,6 +2201,7 @@ class CcdController(QObject, LogMixin):
         self._end_external_watch()
         self._stop_diagnose()
         self._close_light()
+        self._legacy_executor.shutdown(wait=False, cancel_futures=True)
         self._meter_wheel_timer.stop()
         self.devices.camera.set_frame_listener(None)
         self.devices.camera.set_external_trigger_listener(None)

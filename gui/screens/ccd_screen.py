@@ -247,6 +247,7 @@ class CcdScreen(QWidget):
     sensor_dll_selected = Signal(str)
     legacy_program_selected = Signal(str)
     legacy_import_apply_requested = Signal(object)
+    legacy_import_failed = Signal(str)
     light_settings_applied = Signal(object)
     light_on_requested = Signal()
     light_off_requested = Signal()
@@ -332,14 +333,17 @@ class CcdScreen(QWidget):
         panel = Panel(title="從原機台程式匯入（智能模式）")
         panel.add_widget(
             _hint(
-                "選擇原機台程式的 .sln（或 .csproj）。程式只讀取 C# 原始碼與設定檔、不會執行它，"
+                "選擇原機台程式的 .sln（或 .csproj），或直接選原始碼資料夾（會掃描裡面全部 C# 程式碼）。程式只讀取原始碼與設定檔、不會執行它，"
                 "會追過類別、方法參數、常數、列舉與設定檔，找出米輪、Sensor 中繼（PCIe-1730）與 CCF／影像長度等設定，"
                 "列出確認表讓你勾選後才套用。"
             )
         )
         self.legacy_import_button = self.gate.register(_button("選擇原程式 .sln…", "primary", "folder"))
         self.legacy_import_button.clicked.connect(self._choose_legacy_program)
-        panel.add_widget(_row(self.legacy_import_button))
+        self.legacy_folder_button = self.gate.register(_button("選擇資料夾…", icon_name="folder"))
+        self.legacy_folder_button.clicked.connect(self._choose_legacy_folder)
+        self.legacy_scan_label = _hint(color=COLORS["info"])
+        panel.add_widget(_row(self.legacy_import_button, self.legacy_folder_button, self.legacy_scan_label))
         self.legacy_import_panel = panel
         return panel
 
@@ -353,14 +357,28 @@ class CcdScreen(QWidget):
         if path:
             self.legacy_program_selected.emit(path)
 
+    def _choose_legacy_folder(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "選擇原機台程式的原始碼資料夾")
+        if path:
+            self.legacy_program_selected.emit(path)
+
+    def set_legacy_scan_running(self, running: bool) -> None:
+        self.gate.set_enabled(self.legacy_import_button, not running)
+        self.gate.set_enabled(self.legacy_folder_button, not running)
+        self.legacy_scan_label.setText("分析中…" if running else "")
+
     def show_legacy_import(self, report, current) -> None:
         """Show the confirmation table; the chosen findings go back to the controller."""
-        dialog = self.legacy_dialog_factory(report, current, self)
-        self.legacy_import_dialog = dialog
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            selected = dialog.selected_findings()
-            if selected:
-                self.legacy_import_apply_requested.emit(selected)
+        try:
+            dialog = self.legacy_dialog_factory(report, current, self)
+            self.legacy_import_dialog = dialog
+            accepted = dialog.exec() == QDialog.DialogCode.Accepted
+            selected = dialog.selected_findings() if accepted else []
+        except Exception as exc:  # noqa: BLE001 - a broken dialog must not fail silently
+            self.legacy_import_failed.emit(f"{type(exc).__name__}: {exc}")
+            return
+        if selected:
+            self.legacy_import_apply_requested.emit(selected)
 
     @staticmethod
     def legacy_dialog_factory(report, current, parent):
