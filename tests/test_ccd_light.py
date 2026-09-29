@@ -266,7 +266,7 @@ class ControllerLightTests(LightControllerCase):
         )
         self.addCleanup(missing.close)
         notices = []
-        missing.notice.connect(lambda message, kind: notices.append(message))
+        missing.camera_monitor_failed.connect(notices.append)
         missing._machine = CcdMachineSettings(light=LIGHT)
         missing.attach_inspection_queue(CameraFrameQueue())
         self.assertIn("沒有 COM", notices[-1])

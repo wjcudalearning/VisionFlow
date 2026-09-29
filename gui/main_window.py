@@ -81,7 +81,7 @@ SCREEN_INDEX = {"run": 0, "monitor": 1, "designer": 2, "results": 3, "batch_dash
 ALL_SCREENS = set(SCREEN_INDEX)
 HISTORY_LIMIT = 6
 METER_WHEEL_AUTO_CONNECT_DELAY_MS = 1000
-CAMERA_MONITOR_READY_MESSAGE = "相機直連已就緒：按「啟動」後會檢測每張觸發完成的影像。"
+CAMERA_MONITOR_READY_MESSAGE = "相機直連已就緒：按「啟動」後會自動開始接收觸發（有啟用光源時先開燈），並檢測每張觸發完成的影像。"
 CAMERA_MONITOR_NO_ORIGINAL_MESSAGE = "這張相機影像沒有保存原圖（檢測佇列已滿或存圖失敗），詳見錯誤欄位與 log。"
 
 OUTPUT_TOGGLE_LABELS = {
@@ -532,6 +532,8 @@ class MainWindow(QMainWindow, LogMixin):
 
         self.ccd_controller.notice.connect(self._notice)
         self.ccd_controller.status_message.connect(lambda message: self.statusBar().showMessage(message, 8000))
+        self.ccd_controller.camera_monitor_armed.connect(self._on_camera_monitor_armed)
+        self.ccd_controller.camera_monitor_failed.connect(self._on_camera_monitor_failed)
         self.ccd_controller.product_settings_applied.connect(self._on_ccd_product_settings_applied)
         self.ccd_controller.camera_status_changed.connect(self._on_ccd_camera_status_changed)
         self.ccd_controller.camera_settings_changed.connect(
@@ -963,7 +965,6 @@ class MainWindow(QMainWindow, LogMixin):
             frame_queue = CameraFrameQueue()
             # Every inspected frame is saved to the monitor folder while it is inspected, from the same
             # in-memory frame, so the original is kept without a write-then-read round trip.
-            self.ccd_controller.attach_inspection_queue(frame_queue, monitor_saves_raw=True)
             worker = CameraMonitorWorker(
                 frame_queue=frame_queue,
                 recipe_path=self.recipe_path,
@@ -994,6 +995,22 @@ class MainWindow(QMainWindow, LogMixin):
             terminal_signals=(worker.finished, worker.failed),
             on_thread_finished=self._on_monitor_thread_finished,
         )
+        if camera_source:
+            # Attached after the worker runs: switching the light on or arming acquisition may fail at
+            # once, and that failure stops the monitor through the normal path.
+            self.ccd_controller.attach_inspection_queue(frame_queue, monitor_saves_raw=True)
+
+    def _on_camera_monitor_armed(self, message: str) -> None:
+        if self.monitor_running:
+            self.monitor_screen.set_progress(0, message)
+            self.statusBar().showMessage(message)
+
+    def _on_camera_monitor_failed(self, message: str) -> None:
+        if not self.monitor_running:
+            return
+        self._notice(f"相機直連監控無法開始：{message}", "error")
+        self._stop_monitoring()
+        self.monitor_screen.set_progress(0, f"相機直連監控無法開始：{message}")
 
     def _stop_monitoring(self) -> None:
         # New camera frames stop at once; frames already queued are still inspected by the worker.

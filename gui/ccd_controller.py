@@ -87,6 +87,9 @@ DIAGNOSED_WATCH_CODES = frozenset({"no_trigger", "no_frame", "reverse"})
 METER_WHEEL_POLL_MS = 200
 SENSOR_RELAY_REFRESH_MS = 250
 LIGHT_CLOSE_TIMEOUT_SEC = 3.0
+# Monitoring stop waits this long for a frame still capturing before the light goes off.
+LIGHT_OFF_CAPTURE_WAIT_MS = 10_000
+LIGHT_OFF_POLL_MS = 200
 DEFAULT_SNAPSHOT_DIR = Path("outputs") / "ccd_snapshots"
 # S7 waits at most 5 s for a frame, so 15 s covers a full run from a run-to-completion join.
 DIAGNOSE_SHUTDOWN_TIMEOUT_MS = 15_000
@@ -250,6 +253,9 @@ class CcdController(QObject, LogMixin):
     #: True while a light auto-detection runs; LightDetection when it ends.
     light_detect_running_changed = Signal(bool)
     light_detected = Signal(object)
+    #: Camera monitoring is accepting frames (progress text) / cannot run (reason); the owner stops it.
+    camera_monitor_armed = Signal(str)
+    camera_monitor_failed = Signal(str)
     sapera_versions_changed = Signal(object)
     #: `TriggerDiagnosis` while an external-trigger watch runs, None when it ends.
     trigger_diagnosis_changed = Signal(object)
@@ -328,6 +334,10 @@ class CcdController(QObject, LogMixin):
         self._inspection_queue: CameraFrameQueue | None = None
         self._inspection_saves_raw = True
         self._inspection_sequence = 0
+        # Camera monitoring accepts frames only once the light is on and acquisition is armed.
+        self._inspection_accepting = False
+        self._monitor_started_acquisition = False
+        self._monitor_light_pending = False
         self._meter_wheel_diagnosis: MeterWheelDllReport | None = None
         self._meter_wheel_diagnosis_ready = False
         # One diagnose run at a time; the workflow controller owns the QThread lifetime.
@@ -543,19 +553,82 @@ class CcdController(QObject, LogMixin):
     def attach_inspection_queue(self, queue: CameraFrameQueue, monitor_saves_raw: bool = True) -> None:
         """Hand trigger frames to camera monitoring.
 
+        When the light is enabled it is switched on first; frames are accepted only after it answered
+        and acquisition is armed (preview for External Trigger, the trigger monitor for Software
+        Trigger), which is started here when the CCD page has not started it. A light or arm failure
+        emits `camera_monitor_failed` and nothing is inspected.
+
         When the monitor saves every inspected frame itself, the snapshot auto-save skips the frames it
         accepted so an 819 MB frame is not written twice; frames the queue rejects keep auto-save.
         """
         self._inspection_sequence = 0
         self._inspection_saves_raw = bool(monitor_saves_raw)
+        self._inspection_accepting = False
+        self._monitor_started_acquisition = False
         self._inspection_queue = queue
-        self.light_on_for_monitoring()
+        if not self._machine.light.enabled:
+            self._arm_camera_monitoring()
+            return
+        failure = self._light_on_for_monitoring()
+        if failure:
+            self._fail_camera_monitoring(failure)
+
+    def _arm_camera_monitoring(self) -> None:
+        if self._inspection_queue is None or self._closed:
+            return
+        hardware = self.hardware_trigger()
+        status = self.camera_status()
+        if hardware is None or not status.connected:
+            self._fail_camera_monitoring("相機未連線。")
+            return
+        if hardware.mode == TriggerMode.SOFTWARE:
+            if not self.software_trigger_monitor_running:
+                if not self.start_software_trigger_monitor():
+                    self._fail_camera_monitoring("無法開始軟體觸發（原因見上一則提示）。")
+                    return
+                self._monitor_started_acquisition = True
+            text = "相機直連監控中：軟體觸發已啟動，等待觸發。"
+        else:
+            if status.state == CameraState.CAPTURING:
+                self._fail_camera_monitoring("相機正在擷取一張影像，請等它完成後再啟動監控。")
+                return
+            if status.state == CameraState.IDLE:
+                self.start_preview()
+                if self.camera_status().state != CameraState.PREVIEWING:
+                    self._fail_camera_monitoring("無法開始接收外部觸發（原因見上一則提示）。")
+                    return
+                self._monitor_started_acquisition = True
+            text = "相機直連監控中：已開始接收外部觸發，等待 Sensor。"
+        self._inspection_accepting = True
+        self.camera_monitor_armed.emit(text)
+
+    def _fail_camera_monitoring(self, message: str) -> None:
+        self._inspection_accepting = False
+        self.logger.warning("Camera monitoring cannot start: %s", message)
+        self.camera_monitor_failed.emit(message)
 
     def detach_inspection_queue(self) -> None:
         attached, self._inspection_queue = self._inspection_queue, None
-        if attached is not None and not self._closed and self._light_for_monitoring:
+        self._inspection_accepting = False
+        self._monitor_light_pending = False
+        if attached is None or self._closed:
+            return
+        if self._monitor_started_acquisition:
+            # Only what monitoring started is stopped; a frame still capturing is allowed to finish.
+            self._monitor_started_acquisition = False
+            self.stop_preview()
+        if self._light_for_monitoring:
             self._light_for_monitoring = False
-            self.light_off()
+            self._light_off_when_idle()
+
+    def _light_off_when_idle(self, waited_ms: int = 0) -> None:
+        """Switch the monitoring light off once a frame still being captured has finished."""
+        if self._closed or self._inspection_queue is not None:
+            return
+        if self.camera_status().state == CameraState.CAPTURING and waited_ms < LIGHT_OFF_CAPTURE_WAIT_MS:
+            QTimer.singleShot(LIGHT_OFF_POLL_MS, self, lambda: self._light_off_when_idle(waited_ms + LIGHT_OFF_POLL_MS))
+            return
+        self.light_off()
 
     def raw_frame_saver(self) -> RawFrameSaver:
         """Camera-monitor raw saver in the machine-level save format, written through ``.tmp``."""
@@ -815,7 +888,7 @@ class CcdController(QObject, LogMixin):
         # Driver thread. Only trigger frames are inspected; continuous free-run frames are preview only.
         queue = self._inspection_queue
         hardware = self.hardware_trigger()
-        if queue is None or hardware is None or hardware.mode == TriggerMode.CONTINUOUS:
+        if queue is None or not self._inspection_accepting or hardware is None or hardware.mode == TriggerMode.CONTINUOUS:
             return False
         self._inspection_sequence += 1
         sequence = self._inspection_sequence
@@ -1434,6 +1507,15 @@ class CcdController(QObject, LogMixin):
         self.light_changed.emit(status)
         if self._closed:
             return
+        if status.action == "on" and self._monitor_light_pending:
+            self._monitor_light_pending = False
+            if self._inspection_queue is not None:
+                if status.ok:
+                    self._arm_camera_monitoring()
+                else:
+                    # A dark frame would be judged NG, so monitoring does not run without the light.
+                    self._fail_camera_monitoring(f"光源開燈失敗：{status.message}")
+                return
         labels = {"on": "開燈", "off": "關燈", "brightness": "設定亮度", "test": "送出測試指令"}
         label = labels.get(status.action, status.action)
         if not status.ok:
@@ -1444,21 +1526,27 @@ class CcdController(QObject, LogMixin):
         else:
             self.status_message.emit(f"光源已{label}。" + (status.replies[-1] if status.replies else ""))
 
-    def light_on_for_monitoring(self) -> None:
-        """Camera-direct monitoring started: turn the light on when enabled; it goes off when monitoring stops.
+    def _light_on_for_monitoring(self) -> str:
+        """Camera-direct monitoring started with the light enabled: switch it on; it goes off when monitoring stops.
 
-        Outside monitoring the light is switched by hand from the CCD page (for testing). A missing
-        controller only shows a notice and never blocks monitoring.
+        Returns why the light cannot be switched on, or "" when the on job was submitted; its result
+        arms or fails monitoring in `_finish_light`. Outside monitoring the light is switched by hand
+        from the CCD page (for testing).
         """
         settings = self._machine.light
-        if self._closed or not settings.enabled:
-            return
+        if self._closed:
+            return "程式正在關閉。"
         availability = self.devices.light.availability()
         if not availability.available:
-            self.notice.emit(f"光源未開啟：{availability.reason}", "warning")
-            return
-        if self.light_on() is not None:
-            self._light_for_monitoring = True
+            return f"光源已啟用但無法使用：{availability.reason}"
+        steps = self._light_steps(settings, "on")
+        if not steps:
+            return "光源已啟用但沒有開燈指令或亮度指令範本；請先設定光源，或取消「啟用光源控制」。"
+        self._light_for_monitoring = True
+        self._monitor_light_pending = True
+        self.status_message.emit("相機直連監控：正在開燈…")
+        self._submit_light("on", settings, steps, reconnect=True)
+        return ""
 
     def light_on(self):
         settings = self._machine.light

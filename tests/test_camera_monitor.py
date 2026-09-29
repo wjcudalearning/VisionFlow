@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -30,14 +31,16 @@ from core.pipeline import AOIPipeline
 from devices.ccd_models import (
     CameraConnectionSettings,
     CameraRecipeSettings,
+    CameraState,
     ImageSaveFormat,
+    LightSettings,
     TriggerMode,
     TriggerSettings,
 )
 from devices.ccd_settings_store import CcdMachineSettingsStore
 from devices.factory import CcdDevices
 from devices.frame_writer import write_frame_atomic
-from devices.simulated import SimulatedLineScanCamera, SimulatedMeterWheel
+from devices.simulated import SimulatedDigitalIo, SimulatedLight, SimulatedLineScanCamera, SimulatedMeterWheel
 from gui.ccd_controller import CcdController
 from gui.main_window import CAMERA_MONITOR_NO_ORIGINAL_MESSAGE, CAMERA_MONITOR_READY_MESSAGE, MainWindow
 from gui.workers import CameraMonitorWorker
@@ -318,6 +321,7 @@ class ControllerHandOffTests(unittest.TestCase):
             CameraRecipeSettings(trigger=TriggerSettings(TriggerMode.SOFTWARE), auto_save_software_trigger=True),
         )
         self.controller.connect_camera()
+        self.controller.connect_meter_wheel()
         submit = MagicMock(return_value=Path("snapshot.bmp"))
         self.controller._save_queue.submit = submit
 
@@ -344,6 +348,115 @@ class ControllerHandOffTests(unittest.TestCase):
             path = saver.write(frame, Path(directory) / "raw" / f"camera_1{saver.extension}")
             self.assertTrue(path.exists())
             self.assertFalse(path.with_name(path.name + ".tmp").exists())
+
+
+class MonitorStartTests(unittest.TestCase):
+    """Camera monitoring arms acquisition itself and waits for the light before inspecting."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self._temp = tempfile.TemporaryDirectory()
+        self.camera = SimulatedLineScanCamera(width=16, auto_emit=False)
+        self.light = SimulatedLight()
+        self.store = CcdMachineSettingsStore(Path(self._temp.name) / "ccd.json")
+        self.controller = CcdController(CcdDevices(self.camera, SimulatedMeterWheel(), SimulatedDigitalIo(), self.light), self.store)
+        self.failed: list[str] = []
+        self.armed: list[str] = []
+        self.controller.camera_monitor_failed.connect(self.failed.append)
+        self.controller.camera_monitor_armed.connect(self.armed.append)
+
+    def tearDown(self):
+        self.controller.close()
+        self._temp.cleanup()
+
+    def _connect(self, mode: TriggerMode) -> None:
+        self.controller.apply_camera_settings(CameraConnectionSettings(), CameraRecipeSettings(trigger=TriggerSettings(mode)))
+        self.controller.connect_camera()
+
+    def _use_light(self, light: LightSettings) -> None:
+        self.controller._machine = replace(self.controller._machine, light=light)
+
+    def _drain_light(self) -> None:
+        self.controller._light_executor.submit(lambda: None).result(timeout=5)
+        self.app.processEvents()
+        self.app.processEvents()
+
+    def test_external_trigger_preview_is_started_and_stopped_by_monitoring(self):
+        self._connect(TriggerMode.EXTERNAL)
+        queue = CameraFrameQueue()
+        self.controller.attach_inspection_queue(queue)
+        self.assertEqual(self.camera.status().state, CameraState.PREVIEWING)
+        self.assertEqual((self.failed, len(self.armed)), ([], 1))
+        self.camera.emit_frame()
+        self.assertEqual(queue.pending(), 1)
+        self.controller.detach_inspection_queue()
+        self.assertEqual(self.camera.status().state, CameraState.IDLE, "monitoring stops what it started")
+
+        self.controller.start_preview()
+        self.controller.attach_inspection_queue(CameraFrameQueue())
+        self.controller.detach_inspection_queue()
+        self.assertEqual(self.camera.status().state, CameraState.PREVIEWING, "a preview the operator started keeps running")
+
+    def test_software_trigger_needs_the_meter_wheel(self):
+        self._connect(TriggerMode.SOFTWARE)
+        queue = CameraFrameQueue()
+        self.controller.attach_inspection_queue(queue)
+        self.assertIn("軟體觸發", self.failed[-1])
+        self.camera.emit_frame()
+        self.assertEqual(queue.pending(), 0)
+        self.controller.detach_inspection_queue()
+
+        self.failed.clear()
+        self.controller.connect_meter_wheel()
+        self.controller.attach_inspection_queue(queue)
+        self.assertTrue(self.controller.software_trigger_monitor_running)
+        self.assertEqual(self.failed, [])
+        self.controller.detach_inspection_queue()
+        self.assertFalse(self.controller.software_trigger_monitor_running)
+
+    def test_frames_wait_for_the_light_and_a_light_failure_stops_monitoring(self):
+        light = LightSettings(enabled=True, brightness_template="L{channel}{value:03}", line_ending="", command_delay_ms=0, reply_timeout_ms=0)
+        self._use_light(light)
+        self._connect(TriggerMode.EXTERNAL)
+        queue = CameraFrameQueue()
+        self.controller.attach_inspection_queue(queue)
+        self.assertEqual(self.camera.status().state, CameraState.IDLE, "acquisition waits for the light")
+        self.camera.emit_frame()
+        self.assertEqual(queue.pending(), 0, "a frame before the light is on is not inspected")
+        self._drain_light()
+        self.assertEqual(self.light.sent, [b"L1000"])
+        self.assertEqual(self.camera.status().state, CameraState.PREVIEWING)
+        self.camera.emit_frame()
+        self.assertEqual(queue.pending(), 1)
+        self.controller.detach_inspection_queue()
+        self._drain_light()
+        self.assertFalse(self.light.is_connected, "the light goes off when monitoring stops")
+
+        self.light.fail_sends = True
+        self.controller.attach_inspection_queue(CameraFrameQueue())
+        self._drain_light()
+        self.assertIn("光源開燈失敗", self.failed[-1])
+        self.assertEqual(self.camera.status().state, CameraState.IDLE)
+
+    def test_enabled_light_without_commands_or_controller_fails_at_once(self):
+        self._connect(TriggerMode.EXTERNAL)
+        self._use_light(LightSettings(enabled=True))
+        self.controller.attach_inspection_queue(CameraFrameQueue())
+        self.assertIn("沒有開燈指令", self.failed[-1])
+        self.controller.detach_inspection_queue()
+        missing = CcdController(
+            CcdDevices(SimulatedLineScanCamera(auto_emit=False), SimulatedMeterWheel(), SimulatedDigitalIo(), SimulatedLight(False, "沒有 COM")),
+            CcdMachineSettingsStore(Path(self._temp.name) / "other.json"),
+        )
+        self.addCleanup(missing.close)
+        reasons: list[str] = []
+        missing.camera_monitor_failed.connect(reasons.append)
+        missing._machine = replace(missing._machine, light=LightSettings(enabled=True, on_commands=("ON",)))
+        missing.attach_inspection_queue(CameraFrameQueue())
+        self.assertIn("沒有 COM", reasons[-1])
 
 
 class MainWindowCameraMonitorTests(unittest.TestCase):
@@ -403,6 +516,15 @@ class MainWindowCameraMonitorTests(unittest.TestCase):
                 self.assertEqual(Path(open_url.call_args.args[0].toLocalFile()), raw_paths[0])
                 window._open_monitor_original_image({"source": "camera"})
                 self.assertEqual(window.notice_bar.label.text(), CAMERA_MONITOR_NO_ORIGINAL_MESSAGE)
+                self.assertEqual(camera.status().state, CameraState.IDLE, "Stop ends the preview monitoring started")
+
+                # An enabled light that cannot be switched on stops monitoring before any frame is inspected.
+                window.ccd_controller._machine = replace(window.ccd_controller._machine, light=LightSettings(enabled=True))
+                window._start_monitoring()
+                self.assertIn("相機直連監控無法開始：光源", window.notice_bar.label.text())
+                self.assertTrue(_wait_until(lambda: not window.monitor_running))
+                self.assertIsNone(window.ccd_controller._inspection_queue)
+                self.assertEqual(camera.status().state, CameraState.IDLE)
             finally:
                 window.ccd_controller.close()
                 window._inspection_gpu_sessions.close()
