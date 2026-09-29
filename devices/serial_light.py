@@ -145,6 +145,25 @@ def escape_text(raw: str) -> str:
     return describe_bytes(raw.encode("latin-1", errors="replace"))
 
 
+def first_line(exc: BaseException) -> str:
+    """The message without the .NET stack trace pythonnet appends ("\\r\\n   於 System...")."""
+    return str(exc).strip().splitlines()[0].strip() if str(exc).strip() else type(exc).__name__
+
+
+def open_failure_text(port: str, exc: BaseException, ports: tuple[str, ...]) -> str:
+    """One readable sentence for a COM port that would not open, naming the likely cause."""
+    text = f"{type(exc).__name__}: {str(exc)}"
+    present = "、".join(ports) if ports else "（找不到任何 COM port）"
+    if "UnauthorizedAccess" in text or "denied" in text or "拒絕" in text:
+        return f"無法開啟光源 {port}：COM port 正被其他程式使用（通常是原機台程式），請先關閉它再試。"
+    if (ports and port not in ports) or "does not exist" in text or "不存在" in text:
+        return f"無法開啟光源 {port}：這台電腦沒有 {port}。本機的 COM port：{present}；請在光源面板選對 COM port。"
+    return (
+        f"無法開啟光源 {port}：{type(exc).__name__}: {first_line(exc)}。本機的 COM port：{present}。"
+        "請確認 COM port 編號與接線，並確認原機台程式已關閉（COM port 同時只能一個程式使用）。"
+    )
+
+
 class DotNetSerialLight(LightController):
     """`loader` returns an object with `SerialPort`, `Parity`, `StopBits` and `to_bytes(list[int])`."""
 
@@ -200,10 +219,7 @@ class DotNetSerialLight(LightController):
                 port.WriteTimeout = 1000
                 port.Open()
             except Exception as exc:  # noqa: BLE001
-                raise DeviceError(
-                    f"無法開啟光源 {settings.port}：{type(exc).__name__}: {exc}。"
-                    "請確認 COM port 編號，並確認原機台程式已關閉（COM port 同時只能一個程式使用）。"
-                ) from exc
+                raise DeviceError(open_failure_text(settings.port, exc, self.ports())) from exc
             self._port = port
             self._to_bytes = serial.to_bytes
 
@@ -227,7 +243,7 @@ class DotNetSerialLight(LightController):
                 buffer = list(bytes(command))
                 port.Write(self._to_bytes(buffer), 0, len(buffer))
             except Exception as exc:  # noqa: BLE001
-                raise DeviceError(f"送出光源指令失敗：{type(exc).__name__}: {exc}") from exc
+                raise DeviceError(f"送出光源指令失敗：{type(exc).__name__}: {first_line(exc)}") from exc
             deadline = time.monotonic() + max(0, reply_timeout_ms) / 1000.0
             reply = bytearray()
             while time.monotonic() < deadline:

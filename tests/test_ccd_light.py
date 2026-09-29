@@ -23,6 +23,7 @@ from devices.serial_light import (
     describe_bytes,
     encode_command,
     modbus_crc16,
+    open_failure_text,
     render_brightness,
     render_switch_command,
 )
@@ -159,6 +160,18 @@ class DotNetSerialLightTests(unittest.TestCase):
     def test_open_failure_names_the_port_and_the_original_program(self):
         with self.assertRaisesRegex(DeviceError, "COM9.*原機台程式"):
             self.light.connect(LightSettings(port="COM9"))
+
+    def test_open_failures_are_one_readable_sentence(self):
+        trace = "\r\n   於 System.IO.Ports.InternalResources.WinIOError(Int32 errorCode, String str)\r\n   於 System.IO.Ports.SerialPort.Open()"
+        missing = open_failure_text("COM9", RuntimeError("IOException: 通訊埠 'COM9' 不存在。" + trace), ("COM1", "COM3"))
+        self.assertIn("這台電腦沒有 COM9", missing)
+        self.assertIn("COM1、COM3", missing)
+        self.assertNotIn("System.IO", missing, "the .NET stack trace is dropped")
+        busy = open_failure_text("COM1", RuntimeError("UnauthorizedAccessException: 拒絕存取通訊埠 'COM1'。" + trace), ("COM1",))
+        self.assertIn("正被其他程式使用", busy)
+        other = open_failure_text("COM1", RuntimeError("IOException: 信號等待逾時。" + trace), ("COM1",))
+        self.assertIn("信號等待逾時", other)
+        self.assertNotIn("System.IO", other)
 
     def test_missing_dotnet_only_disables_the_light(self):
         def broken():
