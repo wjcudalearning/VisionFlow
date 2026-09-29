@@ -335,6 +335,25 @@ LIGHT_PROGRAM = {
 
 
 class LightImportTests(unittest.TestCase):
+    def test_writeline_program_is_scanned(self):
+        # Regression: a program that sends with WriteLine made the scan fail with
+        # "TypeError: unhashable type: 'SourceFile'".
+        program = dict(LIGHT_PROGRAM)
+        program["Light/LightController.cs"] = (
+            program["Light/LightController.cs"].replace("_port.Write(command);", "_port.WriteLine(command);").replace("\\r\\n", "")
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for relative, text in program.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(textwrap.dedent(text), encoding="utf-8")
+            report = scan_legacy_program(root / "Light.sln")
+        values = {f.key: (f.status, f.value) for f in report.findings}
+        self.assertEqual(values["light.port"], (STATUS_READY, "COM4"))
+        self.assertEqual(values["light.line_ending"], (STATUS_READY, "\n"), ".NET SerialPort.NewLine default")
+        self.assertEqual(values["light.on_commands"], (STATUS_PARTIAL, ("@00L1",)))
+
     def test_serial_settings_commands_and_template_are_read(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

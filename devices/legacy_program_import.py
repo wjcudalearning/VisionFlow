@@ -276,7 +276,9 @@ class Method:
     is_declaration_only: bool
 
 
-@dataclass
+# Compared and hashed by identity: `Call` is frozen and hashes its `file`, and one scan never holds
+# two SourceFile objects for the same path.
+@dataclass(eq=False)
 class SourceFile:
     path: Path
     relative: str
@@ -1177,7 +1179,7 @@ class LegacyProgramAnalyzer:
 
         writes = find_calls(self.files, ["Write", "WriteLine"], member=True)
         writes = [c for c in writes if _receiver(c) in names and c.args]
-        uses_line = {c for c in writes if c.file.text[c.index : c.index + 9] == "WriteLine"}
+        uses_line = [c for c in writes if c.file.text[c.index : c.index + 9] == "WriteLine"]
         line_endings: dict = {}
         if writes and len(uses_line) == len(writes):
             newline = properties.get("NewLine", [])
