@@ -7,7 +7,8 @@ import time
 import unittest
 from pathlib import Path
 
-from devices.ccd_models import MultipleRate
+from devices.ccd_models import AcquisitionSettings, CameraRecipeSettings, CcdMachineSettings, MultipleRate
+from devices.legacy_import_verification import verify_import
 from devices.legacy_program_import import (
     STATUS_CONFLICT,
     STATUS_INFO,
@@ -16,6 +17,7 @@ from devices.legacy_program_import import (
     STATUS_UNRESOLVED,
     STATUS_WARNING,
     LegacyImportError,
+    ImportFinding,
     scan_legacy_program,
     split_arguments,
     strip_comments,
@@ -527,6 +529,23 @@ class TextHelperTests(unittest.TestCase):
     def test_arguments_split_at_top_level_only(self):
         text = 'F(a, G(b, c), "x, y", new[] { 1, 2 })'
         self.assertEqual(split_arguments(text, 1)[0], ["a", "G(b, c)", '"x, y"', "new[] { 1, 2 }"])
+
+
+class ImportVerificationTests(unittest.TestCase):
+    def test_camera_readback_is_separate_from_saved_and_pending_values(self):
+        machine = CcdMachineSettings()
+        product = CameraRecipeSettings(acquisition=AcquisitionSettings(exposure_time=1200))
+        finding = ImportFinding("acquisition.exposure_time", "曝光", STATUS_READY, 1200, "1200")
+
+        def check(applied=None, readback=""):
+            return verify_import((finding,), machine, product, applied_camera_settings=applied,
+                                 camera_readbacks={"EXP": readback}, meter_connected=False)[0].state
+
+        self.assertEqual(check(), "待寫入")
+        applied = (machine.connection, product.acquisition, product.trigger)
+        self.assertEqual(check(applied, ""), "已寫入但未讀回")
+        self.assertEqual(check(applied, "1200"), "已驗證")
+        self.assertEqual(check(applied, "800"), "讀回不符")
 
 
 if __name__ == "__main__":

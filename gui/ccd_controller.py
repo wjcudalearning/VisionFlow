@@ -17,6 +17,9 @@ from PySide6.QtGui import QImage
 from core.camera_monitor_processor import CameraFrameQueue, CapturedFrame, RawFrameSaver
 from core.logging_system import LogMixin
 from devices.ccd_models import (
+    ACQUISITION_EVENT_TRIGGER,
+    ACQUISITION_EVENT_LINE_TRIGGER_TOO_FAST,
+    ACQUISITION_EVENT_LINE_TRIGGER_TOO_SLOW,
     CAMERA_STATE_LABELS,
     TRIGGER_MODE_LABELS,
     AcquisitionSettings,
@@ -58,6 +61,7 @@ from devices.legacy_program_import import (
     LegacyImportReport,
     scan_legacy_program,
 )
+from devices.legacy_import_verification import verify_import
 from devices.error_codes import ensure_tag, tag
 from devices.device_check import (
     CAMERA as CHECK_CAMERA,
@@ -71,11 +75,12 @@ from devices.device_check import (
     WARN as CHECK_WARN,
     CheckItem,
     build_report,
+    camera_monitor_readiness,
     camera_item_from_diagnose,
     check_light,
     write_report,
 )
-from devices.light_protocols import LightDetection, detect_light_protocol
+from devices.light_protocols import KNOWN_LIGHT_PROTOCOLS, LightDetection, detect_light_protocol
 from devices.serial_light import describe_bytes, encode_command, render_brightness, render_switch_command
 from devices.sensor_relay import MODE_FORWARD, MODE_LABELS, MODE_SNAP, SensorRelay, relay_mode
 from devices.trigger_automation import (
@@ -89,7 +94,8 @@ from devices.trigger_automation import (
     external_trigger_actions,
     software_frame_requests_auto_save,
 )
-from devices.trigger_diagnosis import TriggerDiagnosis, TriggerEvidence, diagnose_external_trigger, event_delta
+from devices.trigger_diagnosis import (GuidedSignalObservation, TriggerDiagnosis, TriggerEvidence,
+                                       diagnose_external_trigger, event_delta, guided_signal_result)
 from gui.sapera_diagnostics import (
     SaperaDiagnoseWorker,
     SaperaDiagnosticsReport,
@@ -231,6 +237,7 @@ class LightStatus:
     message: str = ""
     action: str = ""
     ok: bool = True
+    confirmation: str = "unverified"
 
 
 @dataclass(frozen=True)
@@ -264,6 +271,7 @@ class CcdController(QObject, LogMixin):
     sensor_relay_settings_changed = Signal(object)
     #: (LegacyImportReport, current values by finding key) after scanning the original program.
     legacy_import_ready = Signal(object, object)
+    legacy_import_verification_changed = Signal(str)
     legacy_scan_running_changed = Signal(bool)
     #: `LightStatus` after every light job; `LightSettings` after a save.
     light_changed = Signal(object)
@@ -280,6 +288,7 @@ class CcdController(QObject, LogMixin):
     sapera_versions_changed = Signal(object)
     #: `TriggerDiagnosis` while an external-trigger watch runs, None when it ends.
     trigger_diagnosis_changed = Signal(object)
+    guided_trigger_changed = Signal(str)
     #: True while a diagnose run is in flight. Emitted when the controller's own running flag
     #: changes, so the screen's disable/enable state never depends on signal delivery order.
     sapera_diagnose_running_changed = Signal(bool)
@@ -343,6 +352,7 @@ class CcdController(QObject, LogMixin):
         self._device_check_waiting: set[str] = set()
         self._legacy_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ccd-legacy-import")
         self._legacy_scan = None
+        self._legacy_import_selected: tuple[LegacyImportFinding, ...] = ()
         # External-trigger capture watch (GUI thread) and whether the grabber reported trigger events.
         self._external_watch: ExternalCaptureWatch | None = None
         self._trigger_seen_since_connect = False
@@ -353,6 +363,8 @@ class CcdController(QObject, LogMixin):
         self._watch_relay_baseline = (0, 0)
         self._trigger_diagnosis: TriggerDiagnosis | None = None
         self._diagnosis_noticed: set[str] = set()
+        self._guided_trigger_base: dict | None = None
+        self._guided_frames_total = 0
         self._auto_save_fallback_noted = False
         self._auto_save_hint_shown = False
         self._camera_busy_text = ""
@@ -447,6 +459,10 @@ class CcdController(QObject, LogMixin):
         screen.sensor_dll_selected.connect(self.set_sensor_dll_path)
         screen.legacy_program_selected.connect(self.import_legacy_program)
         screen.legacy_import_apply_requested.connect(self.apply_legacy_import)
+        self.legacy_import_verification_changed.connect(screen.show_legacy_import_verification)
+        screen.guided_trigger_start_requested.connect(self.start_guided_trigger_check)
+        screen.guided_trigger_finish_requested.connect(self.finish_guided_trigger_check)
+        self.guided_trigger_changed.connect(screen.set_guided_trigger_text)
         screen.legacy_import_failed.connect(self.report_legacy_import_error)
         screen.light_settings_applied.connect(self.apply_light_settings)
         screen.light_on_requested.connect(self.light_on)
@@ -455,6 +471,7 @@ class CcdController(QObject, LogMixin):
         screen.light_test_requested.connect(self.send_light_test)
         screen.light_detect_requested.connect(self.detect_light)
         screen.device_check_requested.connect(self.start_device_check)
+        screen.quick_device_check_requested.connect(self.quick_device_check)
 
         self.camera_status_changed.connect(screen.set_camera_status)
         self.camera_busy_changed.connect(screen.set_camera_busy)
@@ -721,6 +738,7 @@ class CcdController(QObject, LogMixin):
         if self.camera_busy:
             self.notice.emit(f"相機{self._camera_busy_text}請稍候。", "warning")
             return
+        self._cancel_guided_trigger_check()
         resume_preview = self.camera_status().previewing or self.software_trigger_monitor_running
         self.stop_software_trigger_monitor()
         self._stop_sensor_relay()
@@ -745,6 +763,7 @@ class CcdController(QObject, LogMixin):
             self.notice.emit(tag("E-7101", f"相機連線失敗：{error}"), "error")
             self.camera_settings_changed.emit(self.camera_settings_view())
             self.refresh_camera_status()
+            self._publish_legacy_import_verification()
             return
         self._applied = settings
         self._trigger_seen_since_connect = False
@@ -754,10 +773,12 @@ class CcdController(QObject, LogMixin):
         self.notice.emit(f"相機已連線：{status.camera_name or '線掃相機'}", "success")
         self.camera_settings_changed.emit(self.camera_settings_view())
         self.refresh_camera_status()
+        self._publish_legacy_import_verification()
         if resume_preview:
             self.start_preview()
 
     def disconnect_camera(self) -> None:
+        self._cancel_guided_trigger_check()
         if self.camera_busy:
             self.notice.emit(f"相機{self._camera_busy_text}請稍候。", "warning")
             return
@@ -1059,6 +1080,74 @@ class CcdController(QObject, LogMixin):
     def trigger_diagnosis(self) -> TriggerDiagnosis | None:
         return self._trigger_diagnosis
 
+    def _guided_di_state(self) -> bool | None:
+        relay = self._sensor_relay
+        if relay is not None and relay.is_running:
+            return relay.stats().di_active
+        if not self.devices.digital_io.availability().available:
+            return None
+        probe = SensorRelay(self.devices.digital_io, self._machine.sensor_relay, MODE_FORWARD)
+        try:
+            self.devices.digital_io.connect(probe.settings)
+            return probe.read_input()[0]
+        except DeviceError:
+            return None
+        finally:
+            self.devices.digital_io.disconnect()
+
+    def _guided_encoder(self) -> int | None:
+        if not self.devices.meter_wheel.is_connected:
+            return None
+        try:
+            return self.devices.meter_wheel.read_encoder()
+        except DeviceError:
+            return None
+
+    def start_guided_trigger_check(self) -> bool:
+        hardware = self.hardware_trigger()
+        if self._closed or self.camera_busy or hardware is None or hardware.mode != TriggerMode.EXTERNAL or not self.camera_status().connected:
+            self.notice.emit("請先以外部觸發模式連線相機，再開始引導檢查。", "warning")
+            return False
+        self._guided_trigger_base = {
+            "di": self._guided_di_state(), "encoder": self._guided_encoder(),
+            "relay": self._relay_counts(), "events": self.devices.camera.acquisition_event_counts(),
+            "frames": self._guided_frames_total,
+        }
+        self.guided_trigger_changed.emit("引導檢查已開始。請遮擋 Sensor 並維持遮擋，推動米輪至足夠一張的距離，再按「完成觀測」。本測試不會自動送 DO 脈衝。")
+        return True
+
+    def _cancel_guided_trigger_check(self) -> None:
+        if self._guided_trigger_base is not None:
+            self._guided_trigger_base = None
+            self.guided_trigger_changed.emit("相機連線狀態已變更，引導檢查已中止。")
+
+    def finish_guided_trigger_check(self) -> str:
+        baseline = self._guided_trigger_base
+        if baseline is None:
+            return ""
+        self._guided_trigger_base = None
+        now_encoder = self._guided_encoder()
+        current_events = self.devices.camera.acquisition_event_counts()
+        deltas = event_delta(current_events, baseline["events"])
+        trigger_count = (deltas.get(ACQUISITION_EVENT_TRIGGER, 0)
+                         if ACQUISITION_EVENT_TRIGGER in current_events else None)
+        edges, pulses = self._relay_counts()
+        relay = self._sensor_relay
+        observation = GuidedSignalObservation(
+            di_before=baseline["di"], di_after=self._guided_di_state(),
+            relay_running=relay is not None and relay.is_running,
+            relay_edges=max(0, edges - baseline["relay"][0]),
+            relay_pulses=max(0, pulses - baseline["relay"][1]), frame_triggers=trigger_count,
+            encoder_delta=(now_encoder - baseline["encoder"] if now_encoder is not None and baseline["encoder"] is not None else None),
+            frames=max(0, self._guided_frames_total - baseline["frames"]),
+            expected_counts=self._applied[1].length_lines * max(1, self._machine.meter_wheel.compare_increment) if self._applied else None,
+            line_errors=(deltas.get(ACQUISITION_EVENT_LINE_TRIGGER_TOO_FAST, 0) + deltas.get(ACQUISITION_EVENT_LINE_TRIGGER_TOO_SLOW, 0))
+            if ACQUISITION_EVENT_LINE_TRIGGER_TOO_FAST in current_events or ACQUISITION_EVENT_LINE_TRIGGER_TOO_SLOW in current_events else None,
+        )
+        result = guided_signal_result(observation)
+        self.guided_trigger_changed.emit(result)
+        return result
+
     def _update_trigger_diagnosis(self, encoder_value: int) -> TriggerDiagnosis | None:
         """Re-diagnose the running external-trigger watch; announce each problem once per watch."""
         watch = self._external_watch
@@ -1136,6 +1225,7 @@ class CcdController(QObject, LogMixin):
         hardware = self.hardware_trigger()
         if self._closed or hardware is None or hardware.mode != TriggerMode.EXTERNAL:
             return
+        self._guided_frames_total += 1
         trigger_seen, self._trigger_seen_since_frame = self._trigger_seen_since_frame, False
         if not self.camera_status().previewing and not self.camera_status().capture_in_progress:
             self._stop_sensor_relay()  # A single capture no longer needs the Sensor.
@@ -1520,15 +1610,27 @@ class CcdController(QObject, LogMixin):
     def _submit_light(self, action: str, settings: LightSettings, steps, reconnect: bool = False):
         """Run one light job on the single light thread; the result returns to the GUI thread."""
         light = self.devices.light
+        protocol = next((p for p in KNOWN_LIGHT_PROTOCOLS if p.brightness_template == settings.brightness_template
+                         and p.line_ending == settings.line_ending), None)
 
         def job() -> LightStatus:
             replies: list[str] = []
+            confirmed = False
+            missing_reply = False
             try:
                 if reconnect or not light.is_connected:
                     light.connect(settings)
                 for index, (label, command) in enumerate(steps):
                     reply = light.send(command, settings.reply_timeout_ms)
                     replies.append(f"{label}：送出 {describe_bytes(command)}" + (f"，回覆 {describe_bytes(reply)}" if reply else "，無回覆"))
+                    if not reply:
+                        missing_reply = True
+                    elif protocol is not None and label.startswith("通道"):
+                        if not protocol.matches(reply):
+                            raise DeviceError(f"{protocol.label} 的回覆格式不符：{describe_bytes(reply)}")
+                        if protocol.key == "ccs" and b"N" in reply:
+                            raise DeviceError(f"{protocol.label} 回覆拒絕指令：{describe_bytes(reply)}")
+                        confirmed = confirmed or protocol.confirms_brightness
                     if settings.command_delay_ms and index < len(steps) - 1:
                         time.sleep(settings.command_delay_ms / 1000.0)
                 if action == "off":
@@ -1536,7 +1638,8 @@ class CcdController(QObject, LogMixin):
             except DeviceError as exc:
                 return LightStatus(light.is_connected, self._light_status.on, tuple(replies), str(exc), action, False)
             on = {"on": True, "off": False}.get(action, self._light_status.on or action == "brightness")
-            return LightStatus(light.is_connected, on, tuple(replies), "", action, True)
+            confirmation = "controller_reply" if confirmed and not missing_reply else "sent_only"
+            return LightStatus(light.is_connected, on, tuple(replies), "", action, True, confirmation)
 
         future = self._light_executor.submit(job)
         future.add_done_callback(lambda done: self._light_done.emit(done.result()))
@@ -1551,6 +1654,8 @@ class CcdController(QObject, LogMixin):
             self._monitor_light_pending = False
             if self._inspection_queue is not None:
                 if status.ok:
+                    if status.confirmation != "controller_reply":
+                        self.notice.emit("光源指令已送出，但未確認控制器接受或實際亮燈；請檢查首張影像亮度。", "warning")
                     self._arm_camera_monitoring()
                 else:
                     # A dark frame would be judged NG, so monitoring does not run without the light.
@@ -1564,7 +1669,8 @@ class CcdController(QObject, LogMixin):
         elif status.action == "test":
             self.notice.emit("光源：" + ("；".join(status.replies) or "已送出"), "info")
         else:
-            self.status_message.emit(f"光源已{label}。" + (status.replies[-1] if status.replies else ""))
+            state = "控制器已回覆，實際亮燈待確認" if status.confirmation == "controller_reply" else "指令已送出，實際亮燈未確認"
+            self.status_message.emit(f"光源{label}：{state}。" + (status.replies[-1] if status.replies else ""))
 
     def _light_on_for_monitoring(self) -> str:
         """Camera-direct monitoring started with the light enabled: switch it on; it goes off when monitoring stops.
@@ -1659,6 +1765,9 @@ class CcdController(QObject, LogMixin):
         """
         if self._light_detecting:
             return None
+        if self.device_check_running:
+            self.notice.emit("設備自檢正在使用光源，請等待自檢完成再自動偵測。", "warning")
+            return None
         if self._light_for_monitoring:
             self.notice.emit("相機直連監控正在使用光源，請先停止監控再偵測。", "warning")
             return None
@@ -1681,9 +1790,6 @@ class CcdController(QObject, LogMixin):
 
     def _finish_light_detect(self, result: LightDetection) -> None:
         self._light_detecting = False
-        # Items of the running device self-check and the keys still waiting for a worker.
-        self._device_check_items: dict[str, CheckItem] | None = None
-        self._device_check_waiting: set[str] = set()
         self.light_detect_running_changed.emit(False)
         # Detection opened and released the port itself, so the light is no longer connected.
         self._light_status = LightStatus(False, False, (), result.error, "detect", not result.error)
@@ -1870,7 +1976,24 @@ class CcdController(QObject, LogMixin):
             self.notice.emit(f"已從原程式套用：{'、'.join(applied)}。", "success")
         if skipped:
             self.notice.emit(f"以下項目未套用：{'、'.join(skipped)}。", "warning")
+        self._legacy_import_selected = tuple(f for f in findings if f.applicable)
+        self._publish_legacy_import_verification()
         return applied
+
+    def _publish_legacy_import_verification(self) -> None:
+        if not self._legacy_import_selected:
+            return
+        try:
+            readbacks = getattr(self.devices.camera, "apply_readbacks", lambda: {})()
+        except DeviceError as exc:
+            self.logger.warning("Legacy import readback unavailable: %s", exc)
+            readbacks = {}
+        rows = verify_import(
+            self._legacy_import_selected, self._machine, self._product,
+            applied_camera_settings=self._applied, camera_readbacks=readbacks,
+            meter_connected=self.devices.meter_wheel.is_connected,
+        )
+        self.legacy_import_verification_changed.emit("\n".join(row.line() for row in rows))
 
     # ------------------------------------------------------------------
     # meter wheel
@@ -1893,6 +2016,7 @@ class CcdController(QObject, LogMixin):
             self.notice.emit(f"米輪已連線（卡片 ID {settings.card_id}）。", "success")
         self._meter_wheel_timer.start()
         self.poll_meter_wheel()
+        self._publish_legacy_import_verification()
         return True
 
     def auto_connect_meter_wheel(self) -> None:
@@ -1908,6 +2032,7 @@ class CcdController(QObject, LogMixin):
         self._end_external_watch()
         self._meter_wheel_timer.stop()
         self.devices.meter_wheel.disconnect()
+        self._publish_legacy_import_verification()
         self._publish_meter_snapshot(MeterWheelSnapshot())
 
     def poll_meter_wheel(self) -> None:
@@ -2289,6 +2414,8 @@ class CcdController(QObject, LogMixin):
         return run_sapera_diagnose
 
     def _on_diagnose_finished(self, report) -> None:
+        if self._closed:
+            return
         self._last_diagnose_report = report
         passed = bool(getattr(report, "passed", False))
         summary = str(getattr(report, "summary", lambda: "")())
@@ -2309,8 +2436,8 @@ class CcdController(QObject, LogMixin):
     def start_device_check(self) -> bool:
         """Check camera, meter wheel, Sensor I/O and light in one pass and write one report.
 
-        Only reads: the light is never switched on and no DO pulse is sent. The meter wheel is left
-        connected (its normal state). A camera that is not connected gets the S1-S8 diagnosis.
+        The light is never switched on and no DO pulse is sent. The meter wheel is left connected.
+        A disconnected camera gets S1-S8, including parameter writes and a Snap.
         """
         if self.device_check_running:
             self.notice.emit("設備自檢正在執行中，請等待完成。", "warning")
@@ -2333,6 +2460,52 @@ class CcdController(QObject, LogMixin):
         future.add_done_callback(lambda done: self._device_check_light_done.emit(self._light_check_result(done)))
         self._start_camera_check()
         return True
+
+    def quick_device_check(self) -> bool:
+        """Report device availability/current connection without opening, writing or probing hardware."""
+        if self.device_check_running or self._light_detecting or self._inspection_queue is not None:
+            self.notice.emit("監控或其他設備檢查執行中，請稍後再檢查。", "warning")
+            return False
+        devices = (
+            (CHECK_CAMERA, self.devices.camera, "相機"),
+            (CHECK_METER_WHEEL, self.devices.meter_wheel, "米輪"),
+            (CHECK_SENSOR_IO, self.devices.digital_io, "Sensor I/O"),
+            (CHECK_LIGHT, self.devices.light, "光源"),
+        )
+        items = {}
+        for key, device, name in devices:
+            availability = device.availability()
+            connected = self.camera_status().connected if key == CHECK_CAMERA else device.is_connected
+            if not availability.available:
+                status = CHECK_FAIL if key == CHECK_CAMERA or (
+                    key == CHECK_SENSOR_IO and self._machine.sensor_relay.enabled
+                ) or (key == CHECK_LIGHT and self._machine.light.enabled) or key == CHECK_METER_WHEEL else CHECK_SKIP
+                detail = f"{name}不可用：{availability.reason}"
+            elif connected:
+                status, detail = CHECK_PASS, f"{name}目前已連線；未讀取訊號。"
+            else:
+                status, detail = CHECK_WARN, f"{name}可用但目前未連線；未嘗試連線。"
+            items[key] = CheckItem(key, status, detail,
+                                   verified=("可用性", "目前連線狀態"),
+                                   not_checked=("硬體讀值", "觸發", "出圖", "實際亮燈"))
+        readiness = camera_monitor_readiness(
+            items, self.camera_monitor_blocker(), sensor_enabled=self._machine.sensor_relay.enabled,
+            light_enabled=self._machine.light.enabled,
+            written_trigger=self._device_check_trigger_text(), pending_write=self.pending_hardware_write(),
+        )
+        report = write_report(build_report(items, self._clock, readiness), self.device_check_log_dir or DEVICE_CHECK_LOG_SUBDIR)
+        self.device_check_finished.emit(report)
+        self.notice.emit(f"快速狀態檢查完成：{report.summary_line()}（報告：{report.report_path}）", "info")
+        return True
+
+    def _device_check_trigger_text(self) -> str:
+        hardware = self.hardware_trigger()
+        if hardware is None:
+            return "未寫入"
+        label = TRIGGER_MODE_LABELS.get(hardware.mode, hardware.mode.value)
+        if hardware.mode == TriggerMode.EXTERNAL:
+            label += "／" + ("單張" if hardware.external_frame_one_frame else "連續線觸發")
+        return label
 
     @staticmethod
     def _light_check_result(done) -> CheckItem:
@@ -2369,7 +2542,9 @@ class CcdController(QObject, LogMixin):
         detail = f"卡片 ID {settings.card_id} 已連線，Encoder {encoder}，Compare {compare}"
         if status == CHECK_WARN:
             detail += "；「自動遞增」為 0，外部觸發只會出一個線脈衝"
-        return CheckItem(CHECK_METER_WHEEL, status, detail + "。", lines)
+        return CheckItem(CHECK_METER_WHEEL, status, detail + "。", lines,
+                         verified=("卡片連線", "Encoder／Compare 單次讀值"),
+                         not_checked=("推動米輪後計數變化", "CMP_OUT 線觸發"))
 
     def _check_sensor_io(self) -> CheckItem:
         settings = self._machine.sensor_relay
@@ -2381,7 +2556,8 @@ class CcdController(QObject, LogMixin):
         if relay is not None:
             stats = relay.stats()
             return CheckItem(
-                CHECK_SENSOR_IO, CHECK_PASS, f"Sensor 中繼執行中：{settings.di_label} 邊緣 {stats.edges} 次、{settings.do_label} 脈衝 {stats.pulses} 次。"
+                CHECK_SENSOR_IO, CHECK_PASS, f"Sensor 中繼執行中：{settings.di_label} 邊緣 {stats.edges} 次、{settings.do_label} 脈衝 {stats.pulses} 次。",
+                verified=("中繼執行狀態",), not_checked=("本次 Sensor 動作", "擷取卡收到觸發")
             )
         probe = SensorRelay(self.devices.digital_io, settings, MODE_FORWARD)
         try:
@@ -2400,7 +2576,8 @@ class CcdController(QObject, LogMixin):
         status = CHECK_PASS if settings.enabled else CHECK_WARN
         if not settings.enabled:
             detail += "；Sensor 中繼未啟用"
-        return CheckItem(CHECK_SENSOR_IO, status, detail + "。", lines)
+        return CheckItem(CHECK_SENSOR_IO, status, detail + "。", lines,
+                         verified=("DI 單次讀值",), not_checked=("Sensor 動作前後電位變化", "DO→擷取卡觸發"))
 
     def _start_camera_check(self) -> None:
         status = self.camera_status()
@@ -2421,7 +2598,9 @@ class CcdController(QObject, LogMixin):
                 lines.append("擷取卡事件：" + "、".join(f"{name} {count}" for name, count in sorted(counts.items())))
             mode = TRIGGER_MODE_LABELS.get(hardware.mode, hardware.mode.value) if hardware is not None else "未知"
             detail = f"已連線（{status.camera_name or '線掃相機'}，{mode}），未另外執行 S1–S8。"
-            self._finish_device_check_item(CheckItem(CHECK_CAMERA, CHECK_PASS, detail, tuple(lines)))
+            self._finish_device_check_item(CheckItem(
+                CHECK_CAMERA, CHECK_PASS, detail, tuple(lines), verified=("相機已連線",),
+                not_checked=("本次 Sensor 觸發", "本次成像", "AOI 檢測")))
             return
         with self._diagnose_lock:
             diagnosing = self._diagnose_running
@@ -2432,6 +2611,8 @@ class CcdController(QObject, LogMixin):
             self._finish_device_check_item(CheckItem(CHECK_CAMERA, CHECK_FAIL, tag("E-7104", "相機未連線，S1–S8 診斷無法啟動（原因見上一則提示）。")))
 
     def _finish_device_check_item(self, item: CheckItem) -> None:
+        if self._closed:
+            return
         items = self._device_check_items
         if items is None or item.key not in self._device_check_waiting:
             return
@@ -2440,7 +2621,12 @@ class CcdController(QObject, LogMixin):
         if self._device_check_waiting:
             return
         self._device_check_items = None
-        report = write_report(build_report(items, self._clock), self.device_check_log_dir or DEVICE_CHECK_LOG_SUBDIR)
+        readiness = camera_monitor_readiness(
+            items, self.camera_monitor_blocker(), sensor_enabled=self._machine.sensor_relay.enabled,
+            light_enabled=self._machine.light.enabled,
+            written_trigger=self._device_check_trigger_text(), pending_write=self.pending_hardware_write(),
+        )
+        report = write_report(build_report(items, self._clock, readiness), self.device_check_log_dir or DEVICE_CHECK_LOG_SUBDIR)
         self.logger.info("Device check %s: %s", report.summary_line(), report.report_path)
         self.device_check_running_changed.emit(False)
         self.device_check_finished.emit(report)
@@ -2539,6 +2725,11 @@ class CcdController(QObject, LogMixin):
         if self._closed:
             return
         self._closed = True
+        if self._device_check_items is not None:
+            self._device_check_items = None
+            self._device_check_waiting.clear()
+            self.device_check_running_changed.emit(False)
+        self._cancel_guided_trigger_check()
         self.detach_inspection_queue()
         self.stop_software_trigger_monitor()
         self._stop_sensor_relay()

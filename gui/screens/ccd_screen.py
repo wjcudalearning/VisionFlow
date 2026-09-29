@@ -257,6 +257,9 @@ class CcdScreen(QWidget):
     light_test_requested = Signal(str)
     light_detect_requested = Signal(object)
     device_check_requested = Signal()
+    quick_device_check_requested = Signal()
+    guided_trigger_start_requested = Signal()
+    guided_trigger_finish_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -322,6 +325,7 @@ class CcdScreen(QWidget):
         right_layout.setSpacing(12)
         right_layout.addWidget(self._build_status_panel())
         right_layout.addWidget(self._build_trigger_diagnosis_panel())
+        right_layout.addWidget(self._build_guided_trigger_panel())
         right_layout.addWidget(self._build_preview_panel(), 1)
         layout.addWidget(right, 1)
 
@@ -338,14 +342,16 @@ class CcdScreen(QWidget):
         panel = Panel(title="設備自檢")
         panel.add_widget(
             _hint(
-                "上機時先按這裡：一次檢查相機（未連線時跑 S1–S8）、米輪、Sensor I/O（PCIe-1730）與光源，"
-                "每項一行結果並存到 outputs/logs/device_check/。只讀取狀態：不開燈、不送 DO 脈衝、不改設定。"
-                "請先關閉原機台程式，拍下或抄回「總結」那一行即可。"
+                "快速狀態檢查只看可用性與目前連線，不連線、不寫入。完整診斷約需一分鐘：相機未連線時 S6 會寫參數、S7 會 Snap；"
+                "米輪可能連線並讀值，Sensor 會讀 DI，未設定光源時探測可能送亮度 0。兩者均不開燈、不送 DO 脈衝。"
+                "請先關閉原機台程式；結果會存到 outputs/logs/device_check/，可抄回總結行。"
             )
         )
-        self.device_check_button = self.gate.register(_button("一鍵設備自檢", "primary", "check"))
+        self.quick_device_check_button = self.gate.register(_button("快速狀態檢查", "secondary", "check"))
+        self.quick_device_check_button.clicked.connect(self.quick_device_check_requested.emit)
+        self.device_check_button = self.gate.register(_button("完整動作診斷", "primary", "check"))
         self.device_check_button.clicked.connect(self.device_check_requested.emit)
-        panel.add_widget(_row(self.device_check_button))
+        panel.add_widget(_row(self.quick_device_check_button, self.device_check_button))
         self.device_check_label = _hint()
         self.device_check_label.setProperty("mono", "true")
         self.device_check_label.setWordWrap(True)
@@ -355,16 +361,20 @@ class CcdScreen(QWidget):
         return panel
 
     def set_device_check_running(self, running: bool) -> None:
-        self.device_check_button.setText("自檢中…" if running else "一鍵設備自檢")
+        self.device_check_button.setText("診斷中…" if running else "完整動作診斷")
         self.gate.set_enabled(self.device_check_button, not running)
+        self.gate.set_enabled(self.quick_device_check_button, not running)
         if running:
             self.device_check_label.setText("正在檢查各設備，請稍候…")
             self.device_check_label.setVisible(True)
 
     def show_device_check(self, report: DeviceCheckReport) -> None:
         lines = [f"總結（優先抄這行）：{report.summary_line()}"]
+        if report.startup_readiness:
+            lines.append("相機直連監控：" + report.startup_readiness)
         for item in report.items:
             lines.append(item.line())
+            lines.extend(f"    {line}" for line in item.evidence_lines())
             lines.extend(f"    {line}" for line in item.lines)
         lines.append(f"報告：{report.report_path}")
         self.device_check_label.setText("\n".join(lines))
@@ -385,8 +395,16 @@ class CcdScreen(QWidget):
         self.legacy_folder_button.clicked.connect(self._choose_legacy_folder)
         self.legacy_scan_label = _hint(color=COLORS["info"])
         panel.add_widget(_row(self.legacy_import_button, self.legacy_folder_button, self.legacy_scan_label))
+        self.legacy_verification_label = _hint()
+        self.legacy_verification_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.legacy_verification_label.setVisible(False)
+        panel.add_widget(self.legacy_verification_label)
         self.legacy_import_panel = panel
         return panel
+
+    def show_legacy_import_verification(self, text: str) -> None:
+        self.legacy_verification_label.setText("套用後核對：\n" + text)
+        self.legacy_verification_label.setVisible(bool(text))
 
     def _choose_legacy_program(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -1072,12 +1090,15 @@ class CcdScreen(QWidget):
 
     def set_light_status(self, status) -> None:
         self.light_status = status
-        if not status.connected:
+        if not status.ok:
+            state = "上次操作失敗（燈狀態未知）"
+        elif not status.connected:
             state = "未連線"
         else:
-            state = "開燈" if status.on else "已連線（未開燈）"
-        if not status.ok:
-            state += "・上次操作失敗"
+            if status.on:
+                state = "控制器已回覆（亮燈待確認）" if status.confirmation == "controller_reply" else "已送開燈指令（亮燈未確認）"
+            else:
+                state = "已連線（未開燈）"
         self.light_state_label.setText(state)
         lines = list(status.replies[-6:])
         if status.message:
@@ -1184,6 +1205,26 @@ class CcdScreen(QWidget):
         self.trigger_diagnosis = None
         panel.setVisible(False)
         return panel
+
+    def _build_guided_trigger_panel(self) -> Panel:
+        panel = Panel(title="引導式觸發檢查")
+        panel.add_widget(_hint("管理模式下，先以外部觸發連線；測試期間人工遮擋 Sensor、推動米輪。程式只觀測 DI、DO 計數、擷取卡事件與影像，不會自動送 DO 測試脈衝。"))
+        self.guided_trigger_start_button = self.gate.register(_button("開始引導檢查", icon_name="check"))
+        self.guided_trigger_finish_button = self.gate.register(_button("完成觀測"))
+        self.gate.set_enabled(self.guided_trigger_finish_button, False)
+        self.guided_trigger_start_button.clicked.connect(self.guided_trigger_start_requested.emit)
+        self.guided_trigger_finish_button.clicked.connect(self.guided_trigger_finish_requested.emit)
+        panel.add_widget(_row(self.guided_trigger_start_button, self.guided_trigger_finish_button))
+        self.guided_trigger_label = _hint()
+        self.guided_trigger_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        panel.add_widget(self.guided_trigger_label)
+        return panel
+
+    def set_guided_trigger_text(self, text: str) -> None:
+        running = text.startswith("引導檢查已開始")
+        self.gate.set_enabled(self.guided_trigger_start_button, not running)
+        self.gate.set_enabled(self.guided_trigger_finish_button, running)
+        self.guided_trigger_label.setText(text)
 
     def set_trigger_diagnosis(self, diagnosis) -> None:
         """Show a `TriggerDiagnosis`, or hide the panel when no external-trigger watch runs."""

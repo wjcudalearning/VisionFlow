@@ -9,6 +9,7 @@ from devices.ccd_models import (
     FrameTriggerInput,
 )
 from devices.trigger_diagnosis import (
+    GuidedSignalObservation,
     ISOLATION_TEST,
     LIKELIHOOD_HIGH,
     LIKELIHOOD_LOW,
@@ -18,7 +19,19 @@ from devices.trigger_diagnosis import (
     diagnose_external_trigger,
     event_delta,
     frame_trigger_readbacks,
+    guided_signal_result,
 )
+
+
+class GuidedSignalTests(unittest.TestCase):
+    def test_names_first_observed_gap_without_claiming_aoi_was_checked(self):
+        base = dict(di_before=False, di_after=True, relay_running=True, relay_edges=1,
+                    relay_pulses=1, frame_triggers=1, encoder_delta=200, frames=1)
+        self.assertIn("尚未驗證 AOI", guided_signal_result(GuidedSignalObservation(**base)))
+        self.assertIn("DO→擷取卡接線", guided_signal_result(GuidedSignalObservation(**{**base, "frame_triggers": 0, "frames": 0})))
+        self.assertIn("DI 沒有變化", guided_signal_result(GuidedSignalObservation(**{**base, "di_after": False})))
+        self.assertIn("未回報", guided_signal_result(GuidedSignalObservation(**{**base, "frame_triggers": None})))
+        self.assertIn("移動量不足", guided_signal_result(GuidedSignalObservation(**{**base, "frames": 0, "encoder_delta": 20, "expected_counts": 200})))
 
 TTL_RISING = FrameTriggerInput(enabled=1, source=1, detection_raw=4, detection="RISING_EDGE", level_raw=1, level="LEVEL_TTL")
 V24_RISING = FrameTriggerInput(enabled=1, source=2, detection_raw=4, detection="RISING_EDGE", level_raw=4, level="LEVEL_24VOLTS")

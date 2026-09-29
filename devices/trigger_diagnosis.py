@@ -211,6 +211,56 @@ class TriggerDiagnosis:
         return "\n".join(lines)
 
 
+@dataclass(frozen=True)
+class GuidedSignalObservation:
+    """Two operator-controlled snapshots around a Sensor and meter-wheel movement."""
+
+    di_before: bool | None
+    di_after: bool | None
+    relay_running: bool
+    relay_edges: int
+    relay_pulses: int
+    frame_triggers: int | None
+    encoder_delta: int | None
+    frames: int
+    expected_counts: int | None = None
+    line_errors: int | None = None
+
+
+def guided_signal_result(observation: GuidedSignalObservation) -> str:
+    """Name the first unproven link; unknown event sources remain unknown, not failures."""
+    o = observation
+    facts = [
+        f"DI 起點／遮擋後：{o.di_before if o.di_before is not None else '未讀到'}／"
+        f"{o.di_after if o.di_after is not None else '未讀到'}",
+        f"中繼邊緣／DO 脈衝：{o.relay_edges}／{o.relay_pulses}" if o.relay_running else "Sensor 中繼未執行",
+        f"擷取卡 Frame Trigger：{o.frame_triggers if o.frame_triggers is not None else '未回報'}",
+        f"米輪變化：{o.encoder_delta if o.encoder_delta is not None else '未讀到'}；完成影像：{o.frames}",
+        f"一張所需米輪格數：約 {o.expected_counts if o.expected_counts is not None else '未知'}；線觸發錯誤：{o.line_errors if o.line_errors is not None else '未回報'}",
+    ]
+    if o.di_before is None or o.di_after is None:
+        action = "DI 無法核對；先確認 PCIe-1730 裝置、port／bit 與原機台程式已關閉。"
+    elif o.di_before == o.di_after:
+        action = "DI 沒有變化；確認遮擋時 Sensor 指示燈、DI bit 與有效電位。"
+    elif not o.relay_running:
+        action = "DI 有變化，但 Sensor 中繼未執行；確認已啟用並開始接收觸發。"
+    elif o.relay_edges == 0 or o.relay_pulses == 0:
+        action = "DI 有變化，但中繼沒有送出 DO 脈衝；檢查中繼模式與脈衝設定。"
+    elif o.frame_triggers == 0 and o.frames == 0:
+        action = "DO 已送出，擷取卡未收到 Frame Trigger；檢查 DO→擷取卡接線及 CCF 輸入。"
+    elif o.encoder_delta is not None and o.encoder_delta == 0:
+        action = "Frame Trigger 已到，但米輪計數未變；檢查 Encoder 與 CMP_OUT 線觸發接線。"
+    elif o.frames == 0 and o.expected_counts is not None and o.encoder_delta is not None and o.encoder_delta < o.expected_counts:
+        action = "米輪移動量不足一張所需線數；繼續推動米輪，再核對 CMP_OUT 與 Length。"
+    elif o.frames == 0 and o.line_errors:
+        action = "擷取卡回報線觸發時序錯誤；檢查米輪速度、CMP_OUT 與 CCF 線觸發設定。"
+    elif o.frames == 0:
+        action = "觸發與米輪有活動，但沒有完成影像；核對 Length、線數及擷取卡時序。"
+    else:
+        action = "已完成影像；本次引導測試尚未驗證 AOI 檢測結果。"
+    return "\n".join(("觀測：" + "；".join(facts), "下一步：" + action))
+
+
 # ---- rules ----------------------------------------------------------------------------------
 def _facts(e: TriggerEvidence) -> tuple[str, ...]:
     facts = [

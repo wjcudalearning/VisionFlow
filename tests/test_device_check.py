@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 import time
 import unittest
 from dataclasses import replace
@@ -19,6 +20,7 @@ from devices.ccd_models import (
     MeterWheelSettings,
     SensorRelaySettings,
     TriggerSettings,
+    TriggerMode,
 )
 from devices.ccd_settings_store import CcdMachineSettingsStore
 from devices.device_check import (
@@ -32,6 +34,7 @@ from devices.device_check import (
     WARN,
     CheckItem,
     build_report,
+    camera_monitor_readiness,
     camera_item_from_diagnose,
     check_light,
     write_report,
@@ -92,6 +95,18 @@ class LightCheckTests(unittest.TestCase):
 
 
 class ReportTests(unittest.TestCase):
+    def test_monitor_readiness_distinguishes_start_conditions_from_production_proof(self):
+        items = {key: CheckItem(key, PASS, "可讀取") for key in (CAMERA, METER_WHEEL, SENSOR_IO, LIGHT)}
+        ready = camera_monitor_readiness(items, "", sensor_enabled=True, light_enabled=True)
+        self.assertIn("前置條件通過", ready)
+        self.assertIn("仍需實際運轉驗證", ready)
+        self.assertIn("無法啟動", camera_monitor_readiness(items, "相機未連線", sensor_enabled=True, light_enabled=True))
+        items[SENSOR_IO] = CheckItem(SENSOR_IO, SKIP, "未測")
+        self.assertIn("Sensor I/O", camera_monitor_readiness(items, "", sensor_enabled=True, light_enabled=False))
+        self.assertIn("前置條件通過", camera_monitor_readiness(items, "", sensor_enabled=False, light_enabled=False))
+        items[LIGHT] = CheckItem(LIGHT, SKIP, "未測")
+        self.assertIn("光源", camera_monitor_readiness(items, "", sensor_enabled=False, light_enabled=True))
+
     def test_summary_order_text_and_file(self):
         items = {
             LIGHT: CheckItem(LIGHT, WARN, "尚未設定光源"),
@@ -165,6 +180,8 @@ class ControllerDeviceCheckTests(unittest.TestCase):
         self.assertEqual(report.item(SENSOR_IO).status, PASS)
         self.assertFalse(self.io.is_connected)
         self.assertEqual(report.item(LIGHT).status, PASS)
+        self.assertIn("未確認：開燈指令、實際亮燈", report.text())
+        self.assertIn("無法啟動", report.startup_readiness)
         self.assertEqual(self.light.sent, [])
         self.assertTrue(Path(report.report_path).exists())
         self.assertIn("C:FAIL(E-0104) M:PASS D:PASS L:PASS", self.screen.device_check_label.text())
@@ -181,6 +198,17 @@ class ControllerDeviceCheckTests(unittest.TestCase):
         self.assertEqual(report.item(SENSOR_IO).status, WARN, "the relay is not enabled")
         self.assertEqual(report.item(LIGHT).status, WARN, "no light configured")
 
+    def test_quick_check_only_reads_availability_and_connection_state(self):
+        self.controller.diagnose_runner = lambda **_kwargs: self.fail("quick check must not run S1-S8")
+        self.screen.quick_device_check_button.click()
+        self.assertEqual(len(self.reports), 1)
+        self.assertEqual(len(self.reports[0].items), 4)
+        self.assertFalse(self.controller.camera_status().connected)
+        self.assertFalse(self.meter_wheel.is_connected)
+        self.assertFalse(self.io.is_connected)
+        self.assertEqual(self.light.sent, [])
+        self.assertIn("未確認：硬體讀值", self.reports[0].text())
+
     def test_refused_while_monitoring_and_admin_only(self):
         self.controller._inspection_queue = CameraFrameQueue()
         self.assertFalse(self.controller.start_device_check())
@@ -188,6 +216,79 @@ class ControllerDeviceCheckTests(unittest.TestCase):
         self.controller._inspection_queue = None
         self.screen.set_mode("eng")
         self.assertFalse(self.screen.device_check_button.isEnabled())
+
+    def test_readiness_uses_written_trigger_for_each_capture_case(self):
+        cases = (
+            (TriggerMode.CONTINUOUS, False, "連續取像", "無法啟動"),
+            (TriggerMode.EXTERNAL, False, "連續線觸發", "尚未就緒"),
+            (TriggerMode.EXTERNAL, True, "單張", "尚未就緒"),
+            (TriggerMode.SOFTWARE, False, "軟體觸發", "尚未就緒"),
+        )
+        for mode, one_frame, mode_text, outcome in cases:
+            with self.subTest(mode=mode, one_frame=one_frame):
+                if self.controller.camera_status().connected:
+                    self.camera.disconnect()
+                trigger = TriggerSettings(mode=mode, external_frame_one_frame=one_frame)
+                self.camera.connect(CameraConnectionSettings(), AcquisitionSettings(), trigger)
+                self.controller._applied = (CameraConnectionSettings(), AcquisitionSettings(), trigger)
+                self.assertTrue(self.controller.quick_device_check())
+                text = self.reports[-1].startup_readiness
+                self.assertIn(mode_text, text)
+                self.assertIn(outcome, text)
+
+    def test_guided_check_requires_admin_and_manual_observation(self):
+        trigger = TriggerSettings(mode=TriggerMode.EXTERNAL)
+        self.camera.connect(CameraConnectionSettings(), AcquisitionSettings(), trigger)
+        self.controller._applied = (CameraConnectionSettings(), AcquisitionSettings(), trigger)
+        self.screen.set_mode("eng")
+        self.assertFalse(self.screen.guided_trigger_start_button.isEnabled())
+        self.screen.set_mode("admin")
+        self.screen.guided_trigger_start_button.click()
+        self.assertTrue(self.screen.guided_trigger_finish_button.isEnabled())
+        self.assertIn("遮擋 Sensor", self.screen.guided_trigger_label.text())
+        self.assertEqual(self.io.writes, [])
+        self.screen.guided_trigger_finish_button.click()
+        self.assertIn("下一步", self.screen.guided_trigger_label.text())
+        self.assertFalse(self.screen.guided_trigger_finish_button.isEnabled())
+        self.assertEqual(self.io.writes, [])
+
+    def test_light_detection_cannot_interrupt_running_device_check(self):
+        release = threading.Event()
+
+        def diagnose(**_kwargs):
+            release.wait(3)
+            return _diagnose()
+
+        self.controller.diagnose_runner = diagnose
+        try:
+            self.assertTrue(self.controller.start_device_check())
+            self.assertTrue(self.controller.device_check_running)
+            self.assertIsNone(self.controller.detect_light(LightSettings(port="COM3")))
+            self.assertIn("設備自檢", self.notices[-1][0])
+            self.assertTrue(self.controller.device_check_running)
+        finally:
+            release.set()
+        self.assertTrue(_wait_until(self.app, lambda: self.reports))
+        self.assertEqual(len(self.reports[-1].items), 4)
+        self.assertFalse(self.controller.device_check_running)
+        self.assertTrue(self.screen.device_check_button.isEnabled())
+
+    def test_close_during_check_restores_buttons_without_partial_report(self):
+        release = threading.Event()
+        def diagnose(**_kwargs):
+            release.wait(2)
+            return _diagnose()
+        self.controller.diagnose_runner = diagnose
+        self.assertTrue(self.controller.start_device_check())
+        try:
+            self.controller.close()
+        finally:
+            release.set()
+        self.app.processEvents()
+        self.assertFalse(self.controller.device_check_running)
+        self.assertTrue(self.screen.device_check_button.isEnabled())
+        self.assertTrue(self.screen.quick_device_check_button.isEnabled())
+        self.assertFalse(self.reports)
 
 
 if __name__ == "__main__":

@@ -220,6 +220,26 @@ class LightControllerCase(unittest.TestCase):
 
 class ControllerLightTests(LightControllerCase):
 
+    def test_known_protocol_reply_is_checked_before_confirmation(self):
+        ccs = apply_protocol(LightSettings(enabled=True, port="COM3", reply_timeout_ms=0), protocol_by_key("ccs"))
+        steps = self.controller._light_steps(ccs, "on")
+        for _label, command in steps:
+            self.light.replies[command] = b"@01O\r"
+        self.wait(self.controller._submit_light("on", ccs, steps, reconnect=True))
+        self.assertEqual(self.controller.light_status.confirmation, "controller_reply")
+        self.assertIn("控制器已回覆", self.screen.light_state_label.text())
+
+        self.light.replies[steps[-1][1]] = b"BAD"
+        self.wait(self.controller._submit_light("on", ccs, steps, reconnect=True))
+        self.assertFalse(self.controller.light_status.ok)
+        self.assertIn("回覆格式不符", self.controller.light_status.message)
+
+        self.light.replies[steps[-1][1]] = b"@01N\r"
+        self.wait(self.controller._submit_light("on", ccs, steps, reconnect=True))
+        self.assertFalse(self.controller.light_status.ok)
+        self.assertIn("拒絕指令", self.controller.light_status.message)
+
+
     def test_monitoring_turns_the_light_on_and_off(self):
         self.wait(self.controller.apply_light_settings(replace_enabled(LIGHT, False)))
         self.controller.attach_inspection_queue(CameraFrameQueue())
@@ -233,7 +253,8 @@ class ControllerLightTests(LightControllerCase):
         self.wait(self.controller._light_executor.submit(lambda: None))
         self.assertEqual(self.light.sent, [b"@00L1\r\n", b"@01F10078\r\n", render_brightness(TEMPLATE, "2", 50, "\r\n")])
         self.assertTrue(self.controller.light_status.on)
-        self.assertEqual(self.screen.light_state_label.text(), "開燈")
+        self.assertEqual(self.controller.light_status.confirmation, "sent_only")
+        self.assertEqual(self.screen.light_state_label.text(), "已送開燈指令（亮燈未確認）")
 
         self.light.sent.clear()
         self.controller.detach_inspection_queue()
