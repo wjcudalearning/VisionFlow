@@ -393,7 +393,7 @@ class Lsi8181LoadingTests(unittest.TestCase):
 
         meter_wheel = Lsi8181MeterWheel(loader=loader)
         for _ in range(3):
-            self.assertEqual(meter_wheel.availability().reason, "no driver")
+            self.assertEqual(meter_wheel.availability().reason, "[E-3101] no driver")
         self.assertEqual(len(attempts), 1)
 
 

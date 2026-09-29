@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 from devices.ccd_models import DeviceError, LightSettings
+from devices.error_codes import codes_in, ensure_tag, tag
 from devices.interfaces import LightController
 from devices.light_protocols import detect_light_protocol
 
@@ -45,6 +46,16 @@ class CheckItem:
     def line(self) -> str:
         return f"{self.key} {self.status} {self.title}：{self.detail}"
 
+    @property
+    def codes(self) -> tuple[str, ...]:
+        """Error codes in the detail and lines (device E-2xxx-E-7xxx and Sapera E-0xxx)."""
+        return codes_in("\n".join((self.detail, *self.lines)))
+
+    def summary(self) -> str:
+        """M:FAIL(E-3102): the status plus the first code of a non-PASS item."""
+        codes = self.codes if self.status != PASS else ()
+        return f"{self.key}:{self.status}" + (f"({codes[0]})" if codes else "")
+
 
 @dataclass(frozen=True)
 class DeviceCheckReport:
@@ -57,7 +68,7 @@ class DeviceCheckReport:
 
     def summary_line(self) -> str:
         """The row to copy first: every device and its status."""
-        return " ".join(f"{item.key}:{item.status}" for item in self.items)
+        return " ".join(item.summary() for item in self.items)
 
     @property
     def passed(self) -> bool:
@@ -122,13 +133,13 @@ def check_light(light: LightController, settings: LightSettings) -> CheckItem:
     availability = light.availability()
     if not availability.available:
         status = FAIL if settings.enabled else SKIP
-        return CheckItem(LIGHT, status, f"光源控制無法使用：{availability.reason}")
+        return CheckItem(LIGHT, status, ensure_tag("E-2101", f"光源控制無法使用：{availability.reason}"))
     ports = light.ports()
     lines = [f"本機 COM port：{'、'.join(ports) if ports else '（找不到）'}"]
     configured = settings.controls_brightness or bool(settings.on_commands)
     if ports and settings.port not in ports:
         status = FAIL if settings.enabled or configured else WARN
-        return CheckItem(LIGHT, status, f"設定的 {settings.port} 不在本機 COM port 清單中；請確認光源接在哪個 COM port。", tuple(lines))
+        return CheckItem(LIGHT, status, tag("E-2103", f"設定的 {settings.port} 不在本機 COM port 清單中；請確認光源接在哪個 COM port。"), tuple(lines))
     if light.is_connected:
         return CheckItem(LIGHT, PASS, f"{settings.port} 已連線使用中，未另外測試。", tuple(lines))
     if configured:
@@ -154,4 +165,4 @@ def check_light(light: LightController, settings: LightSettings) -> CheckItem:
             f"尚未設定光源；{settings.port} 偵測到 {result.protocol.label}，Baud rate {result.baud_rate}。請到「光源」面板按「自動偵測」套用。",
             tuple(lines),
         )
-    return CheckItem(LIGHT, WARN, f"尚未設定光源；{settings.port} 沒有偵測到已知格式（試了 {result.attempts} 種組合）。", tuple(lines))
+    return CheckItem(LIGHT, WARN, tag("E-2108", f"尚未設定光源；{settings.port} 沒有偵測到已知格式（試了 {result.attempts} 種組合）。"), tuple(lines))

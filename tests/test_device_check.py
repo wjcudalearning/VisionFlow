@@ -167,7 +167,7 @@ class ControllerDeviceCheckTests(unittest.TestCase):
         self.assertEqual(report.item(LIGHT).status, PASS)
         self.assertEqual(self.light.sent, [])
         self.assertTrue(Path(report.report_path).exists())
-        self.assertIn("C:FAIL M:PASS D:PASS L:PASS", self.screen.device_check_label.text())
+        self.assertIn("C:FAIL(E-0104) M:PASS D:PASS L:PASS", self.screen.device_check_label.text())
         self.assertTrue(self.screen.device_check_button.isEnabled())
         self.assertEqual(self.notices[-1][1], "error")
 

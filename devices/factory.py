@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from devices.error_codes import ensure_tag
 from devices.advantech_dio import AdvantechDigitalIo
 from devices.ccd_models import (
     AcquisitionSettings,
@@ -102,7 +103,7 @@ class UnavailableLineScanCamera(LineScanCamera):
 
 class UnavailableMeterWheel(MeterWheel):
     def __init__(self, reason: str):
-        self._reason = reason
+        self._reason = ensure_tag("E-3101", reason)
 
     def availability(self) -> DeviceAvailability:
         return DeviceAvailability(False, self._reason)
@@ -153,7 +154,7 @@ class UnavailableMeterWheel(MeterWheel):
 
 class UnavailableDigitalIo(DigitalIo):
     def __init__(self, reason: str = "此機台未設定 I/O 卡。"):
-        self._reason = reason
+        self._reason = ensure_tag("E-4101", reason)
 
     def availability(self) -> DeviceAvailability:
         return DeviceAvailability(False, self._reason)
@@ -180,7 +181,7 @@ class UnavailableDigitalIo(DigitalIo):
 
 class UnavailableLight(LightController):
     def __init__(self, reason: str = "此機台未設定光源控制器。"):
-        self._reason = reason
+        self._reason = ensure_tag("E-2101", reason)
 
     def availability(self) -> DeviceAvailability:
         return DeviceAvailability(False, self._reason)

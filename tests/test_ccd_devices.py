@@ -437,7 +437,7 @@ class FactoryTests(unittest.TestCase):
 
     def test_unavailable_meter_wheel_placeholder_rejects_every_operation(self):
         meter_wheel = UnavailableMeterWheel("沒有驅動")
-        self.assertEqual(meter_wheel.availability().reason, "沒有驅動")
+        self.assertEqual(meter_wheel.availability().reason, "[E-3101] 沒有驅動")
         with self.assertRaises(DeviceError):
             meter_wheel.connect(MeterWheelSettings())
         with self.assertRaises(DeviceError):

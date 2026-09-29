@@ -6,6 +6,7 @@ import time
 from collections.abc import Callable
 
 from devices.ccd_models import DeviceAvailability, DeviceError, LightSettings
+from devices.error_codes import tag
 from devices.interfaces import LightController
 
 # ============================================================
@@ -51,7 +52,7 @@ def _latin1(text: str, original: str) -> bytes:
     try:
         return text.encode("latin-1")
     except UnicodeEncodeError as exc:
-        raise DeviceError(f"光源指令含有無法送出的字元：{original!r}") from exc
+        raise DeviceError(tag("E-2107", f"光源指令含有無法送出的字元：{original!r}")) from exc
 
 
 def encode_command(text: str, line_ending: str = "") -> bytes:
@@ -88,9 +89,9 @@ def render_brightness(template: str, channel: str, value: int, line_ending: str 
             try:
                 out += _latin1(format(argument, spec), template)
             except (TypeError, ValueError) as exc:
-                raise DeviceError(f"亮度指令範本的格式「{{{name}:{spec}}}」無法套用到 {argument!r}。") from exc
+                raise DeviceError(tag("E-2107", f"亮度指令範本的格式「{{{name}:{spec}}}」無法套用到 {argument!r}。")) from exc
         else:
-            raise DeviceError(f"亮度指令範本有不認得的欄位「{{{name}}}」；可用 channel、value、checksum、xor、crc16。")
+            raise DeviceError(tag("E-2107", f"亮度指令範本有不認得的欄位「{{{name}}}」；可用 channel、value、checksum、xor、crc16。"))
         position = match.end()
     out += _latin1(unescape(template[position:]) + line_ending, template)
     return bytes(out)
@@ -155,10 +156,11 @@ def open_failure_text(port: str, exc: BaseException, ports: tuple[str, ...]) -> 
     text = f"{type(exc).__name__}: {str(exc)}"
     present = "、".join(ports) if ports else "（找不到任何 COM port）"
     if "UnauthorizedAccess" in text or "denied" in text or "拒絕" in text:
-        return f"無法開啟光源 {port}：COM port 正被其他程式使用（通常是原機台程式），請先關閉它再試。"
+        return tag("E-2102", f"無法開啟光源 {port}：COM port 正被其他程式使用（通常是原機台程式），請先關閉它再試。")
     if (ports and port not in ports) or "does not exist" in text or "不存在" in text:
-        return f"無法開啟光源 {port}：這台電腦沒有 {port}。本機的 COM port：{present}；請在光源面板選對 COM port。"
-    return (
+        return tag("E-2103", f"無法開啟光源 {port}：這台電腦沒有 {port}。本機的 COM port：{present}；請在光源面板選對 COM port。")
+    return tag(
+        "E-2104",
         f"無法開啟光源 {port}：{type(exc).__name__}: {first_line(exc)}。本機的 COM port：{present}。"
         "請確認 COM port 編號與接線，並確認原機台程式已關閉（COM port 同時只能一個程式使用）。"
     )
@@ -184,7 +186,7 @@ class DotNetSerialLight(LightController):
 
     def availability(self) -> DeviceAvailability:
         if self._type() is None:
-            return DeviceAvailability(False, f"無法載入 .NET 串列埠（{self._load_error}）；光源控制停用。")
+            return DeviceAvailability(False, tag("E-2101", f"無法載入 .NET 串列埠（{self._load_error}）；光源控制停用。"))
         return DeviceAvailability(True)
 
     def ports(self) -> tuple[str, ...]:
@@ -237,13 +239,13 @@ class DotNetSerialLight(LightController):
         with self._lock:
             port = self._port
             if port is None:
-                raise DeviceError("光源未連線。")
+                raise DeviceError(tag("E-2105", "光源未連線。"))
             try:
                 port.DiscardInBuffer()
                 buffer = list(bytes(command))
                 port.Write(self._to_bytes(buffer), 0, len(buffer))
             except Exception as exc:  # noqa: BLE001
-                raise DeviceError(f"送出光源指令失敗：{type(exc).__name__}: {first_line(exc)}") from exc
+                raise DeviceError(tag("E-2105", f"送出光源指令失敗：{type(exc).__name__}: {first_line(exc)}")) from exc
             deadline = time.monotonic() + max(0, reply_timeout_ms) / 1000.0
             reply = bytearray()
             while time.monotonic() < deadline:

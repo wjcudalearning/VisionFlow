@@ -20,6 +20,7 @@ from devices.ccd_models import (
     MeterWheelSettings,
     MultipleRate,
 )
+from devices.error_codes import ensure_tag
 from devices.interfaces import MeterWheel
 
 # ============================================================
@@ -223,7 +224,7 @@ class Lsi8181MeterWheel(MeterWheel):
                 except Lsi8181LoadError as exc:
                     self._load_error = str(exc)
             if self._library is None:
-                return DeviceAvailability(False, self._load_error)
+                return DeviceAvailability(False, ensure_tag("E-3101", self._load_error))
             return DeviceAvailability(True)
 
     @property

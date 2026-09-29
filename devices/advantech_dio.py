@@ -139,6 +139,7 @@ class AdvantechDigitalIo(DigitalIo):
             return DeviceAvailability(True)
         return DeviceAvailability(
             False,
+            "[E-4101] "
             f"找不到研華 DAQNavi 的 {ASSEMBLY_FILE_NAME}（{reason}）；"
             "請在 Sensor 中繼面板按「瀏覽」選取這個 DLL，或選取它所在的資料夾。",
         )

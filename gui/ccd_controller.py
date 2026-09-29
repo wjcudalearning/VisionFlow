@@ -58,6 +58,7 @@ from devices.legacy_program_import import (
     LegacyImportReport,
     scan_legacy_program,
 )
+from devices.error_codes import ensure_tag, tag
 from devices.device_check import (
     CAMERA as CHECK_CAMERA,
     DEVICE_CHECK_LOG_SUBDIR,
@@ -601,7 +602,7 @@ class CcdController(QObject, LogMixin):
             return
         failure = self._light_on_for_monitoring()
         if failure:
-            self._fail_camera_monitoring(failure)
+            self._fail_camera_monitoring(tag("E-6105", failure))
 
     def _arm_camera_monitoring(self) -> None:
         if self._inspection_queue is None or self._closed:
@@ -609,23 +610,23 @@ class CcdController(QObject, LogMixin):
         hardware = self.hardware_trigger()
         status = self.camera_status()
         if hardware is None or not status.connected:
-            self._fail_camera_monitoring("相機未連線。")
+            self._fail_camera_monitoring(tag("E-6101", "相機未連線。"))
             return
         if hardware.mode == TriggerMode.SOFTWARE:
             if not self.software_trigger_monitor_running:
                 if not self.start_software_trigger_monitor():
-                    self._fail_camera_monitoring("無法開始軟體觸發（原因見上一則提示）。")
+                    self._fail_camera_monitoring(tag("E-6102", "無法開始軟體觸發（原因見上一則提示）。"))
                     return
                 self._monitor_started_acquisition = True
             text = "相機直連監控中：軟體觸發已啟動，等待觸發。"
         else:
             if status.state == CameraState.CAPTURING:
-                self._fail_camera_monitoring("相機正在擷取一張影像，請等它完成後再啟動監控。")
+                self._fail_camera_monitoring(tag("E-6104", "相機正在擷取一張影像，請等它完成後再啟動監控。"))
                 return
             if status.state == CameraState.IDLE:
                 self.start_preview()
                 if self.camera_status().state != CameraState.PREVIEWING:
-                    self._fail_camera_monitoring("無法開始接收外部觸發（原因見上一則提示）。")
+                    self._fail_camera_monitoring(tag("E-6103", "無法開始接收外部觸發（原因見上一則提示）。"))
                     return
                 self._monitor_started_acquisition = True
             text = "相機直連監控中：已開始接收外部觸發，等待 Sensor。"
@@ -741,7 +742,7 @@ class CcdController(QObject, LogMixin):
     def _finish_connect(self, settings, status, error, resume_preview: bool) -> None:
         if error is not None:
             self._applied = None
-            self.notice.emit(f"相機連線失敗：{error}", "error")
+            self.notice.emit(tag("E-7101", f"相機連線失敗：{error}"), "error")
             self.camera_settings_changed.emit(self.camera_settings_view())
             self.refresh_camera_status()
             return
@@ -766,7 +767,7 @@ class CcdController(QObject, LogMixin):
 
         def finish(_result, error) -> None:
             if error is not None:
-                self.notice.emit(f"相機中斷連線失敗：{error}", "error")
+                self.notice.emit(tag("E-7102", f"相機中斷連線失敗：{error}"), "error")
             self._applied = None
             self._auto_save_requests.clear()
             self.camera_settings_changed.emit(self.camera_settings_view())
@@ -892,7 +893,7 @@ class CcdController(QObject, LogMixin):
         try:
             command()
         except DeviceError as exc:
-            self.notice.emit(f"{failure_prefix}：{exc}", "error")
+            self.notice.emit(tag("E-7103", f"{failure_prefix}：{exc}"), "error")
             self.refresh_camera_status()
             return False
         self.refresh_camera_status()
@@ -988,7 +989,7 @@ class CcdController(QObject, LogMixin):
             if actions.encoder_value is not None:
                 meter_wheel.set_encoder(actions.encoder_value)
         except DeviceError as exc:
-            self.notice.emit(f"外部觸發的米輪動作失敗：{exc}", "error")
+            self.notice.emit(tag("E-3104", f"外部觸發的米輪動作失敗：{exc}"), "error")
             return
         message = f"外部觸發：已寫入 Compare {compare_value}"
         if actions.encoder_value is not None:
@@ -1032,7 +1033,7 @@ class CcdController(QObject, LogMixin):
                 meter_wheel.set_compare(armed)
         except DeviceError as exc:
             self._end_external_watch()
-            self.notice.emit(f"外部觸發偵測無法讀寫米輪：{exc}", "error")
+            self.notice.emit(tag("E-3103", f"外部觸發偵測無法讀寫米輪：{exc}"), "error")
             return
         waits = hardware.external_frame_one_frame
         self._trigger_seen_since_frame = False
@@ -1121,7 +1122,7 @@ class CcdController(QObject, LogMixin):
             try:
                 self.devices.meter_wheel.set_compare(finding.rearm_compare)
             except DeviceError as exc:
-                self.notice.emit(f"自動改寫 Compare 失敗：{exc}", "error")
+                self.notice.emit(tag("E-3104", f"自動改寫 Compare 失敗：{exc}"), "error")
                 return
         if finding.code in DIAGNOSED_WATCH_CODES:
             return  # The trigger diagnosis announces these with ranked causes.
@@ -1320,7 +1321,7 @@ class CcdController(QObject, LogMixin):
         if availability.available:
             self.notice.emit(f"已設定 DAQNavi DLL：{settings.assembly_path or '（預設安裝位置）'}", "success")
         else:
-            self.notice.emit(f"DAQNavi DLL 仍無法使用：{availability.reason}", "warning")
+            self.notice.emit(ensure_tag("E-4101", f"DAQNavi DLL 仍無法使用：{availability.reason}"), "warning")
         return availability.available
 
     def _start_forward_relay(self) -> None:
@@ -1345,7 +1346,7 @@ class CcdController(QObject, LogMixin):
         try:
             relay.start()
         except DeviceError as exc:
-            self.notice.emit(f"Sensor 中繼無法啟動（{MODE_LABELS[mode]}）：{exc}", "error")
+            self.notice.emit(tag("E-4104", f"Sensor 中繼無法啟動（{MODE_LABELS[mode]}）：{exc}"), "error")
             self.logger.warning("Sensor relay start failed: %s", exc)
             return False
         self._sensor_relay = relay
@@ -1389,7 +1390,7 @@ class CcdController(QObject, LogMixin):
             self.stop_software_trigger_monitor()
         else:
             self._stop_sensor_relay()
-        self.notice.emit(f"Sensor 中繼失敗，已停止：{message}", "error")
+        self.notice.emit(tag("E-4105", f"Sensor 中繼失敗，已停止：{message}"), "error")
 
     def _request_sensor_capture(self) -> None:
         # Relay thread: drop edges while one is still waiting for the GUI thread.
@@ -1443,7 +1444,7 @@ class CcdController(QObject, LogMixin):
             if armed is not None:
                 meter_wheel.set_compare(armed)
         except DeviceError as exc:
-            self.notice.emit(f"Sensor 觸發前無法讀寫米輪：{exc}", "error")
+            self.notice.emit(tag("E-3103", f"Sensor 觸發前無法讀寫米輪：{exc}"), "error")
 
     def _with_sensor_card(self, action: Callable[[SensorRelay], object], failure_prefix: str):
         """Run a manual I/O test on the GUI thread; the card is released afterwards."""
@@ -1463,7 +1464,7 @@ class CcdController(QObject, LogMixin):
     def read_sensor_input(self) -> bool | None:
         """Read the Sensor DI once; returns whether it is active, or None on failure."""
         settings = self._machine.sensor_relay
-        result = self._with_sensor_card(lambda probe: probe.read_input(), "讀取 Sensor DI 失敗")
+        result = self._with_sensor_card(lambda probe: probe.read_input(), tag("E-4102", "讀取 Sensor DI 失敗"))
         if result is None:
             return None
         active, raw = result
@@ -1476,7 +1477,7 @@ class CcdController(QObject, LogMixin):
     def pulse_sensor_output(self) -> bool:
         """Send one test pulse on the grabber DO, as the relay would for a Sensor edge."""
         settings = self._machine.sensor_relay
-        if self._with_sensor_card(lambda probe: probe.pulse_once() or True, "DO 測試脈衝失敗") is None:
+        if self._with_sensor_card(lambda probe: probe.pulse_once() or True, tag("E-4103", "DO 測試脈衝失敗")) is None:
             return False
         self.notice.emit(
             f"已由 {settings.do_label} 送出 {settings.pulse_ms:g} ms 測試脈衝。若相機正以外部觸發單張等待，"
@@ -1553,7 +1554,7 @@ class CcdController(QObject, LogMixin):
                     self._arm_camera_monitoring()
                 else:
                     # A dark frame would be judged NG, so monitoring does not run without the light.
-                    self._fail_camera_monitoring(f"光源開燈失敗：{status.message}")
+                    self._fail_camera_monitoring(tag("E-6105", f"光源開燈失敗：{status.message}"))
                 return
         labels = {"on": "開燈", "off": "關燈", "brightness": "設定亮度", "test": "送出測試指令"}
         label = labels.get(status.action, status.action)
@@ -1580,7 +1581,7 @@ class CcdController(QObject, LogMixin):
             return f"光源已啟用但無法使用：{availability.reason}"
         steps = self._light_steps(settings, "on")
         if not steps:
-            return "光源已啟用但沒有開燈指令或亮度指令範本；請先設定光源，或取消「啟用光源控制」。"
+            return tag("E-2106", "光源已啟用但沒有開燈指令或亮度指令範本；請先設定光源，或取消「啟用光源控制」。")
         self._light_for_monitoring = True
         self._monitor_light_pending = True
         self.status_message.emit("相機直連監控：正在開燈…")
@@ -1591,7 +1592,7 @@ class CcdController(QObject, LogMixin):
         settings = self._machine.light
         steps = self._light_steps(settings, "on")
         if not steps:
-            self.notice.emit("光源沒有開燈指令，也沒有亮度指令範本；請先在「光源」面板設定或從原程式匯入。", "warning")
+            self.notice.emit(tag("E-2106", "光源沒有開燈指令，也沒有亮度指令範本；請先在「光源」面板設定或從原程式匯入。"), "warning")
             return None
         return self._submit_light("on", settings, steps, reconnect=True)
 
@@ -1695,7 +1696,7 @@ class CcdController(QObject, LogMixin):
         elif result.found:
             self.notice.emit(f"{result.port} 偵測到 {result.protocol.label}，Baud rate {result.baud_rate}；已填入設定，請套用後按「開燈」確認有亮。", "success")
         else:
-            self.notice.emit(f"{result.port} 沒有偵測到已知格式的光源控制器（試了 {result.attempts} 種組合）。", "warning")
+            self.notice.emit(tag("E-2108", f"{result.port} 沒有偵測到已知格式的光源控制器（試了 {result.attempts} 種組合）。"), "warning")
         self.logger.info("Light detection on %s: %s at %s, unknown replies %s", result.port, result.protocol.key if result.found else "none", result.baud_rate, result.unknown_replies)
 
     def _close_light(self) -> None:
@@ -1736,10 +1737,10 @@ class CcdController(QObject, LogMixin):
         try:
             return scan_legacy_program(path), "", ""
         except LegacyImportError as exc:
-            return None, str(exc), "warning"
+            return None, ensure_tag("E-5102", str(exc)), "warning"
         except Exception as exc:  # noqa: BLE001 - an unexpected parser failure must reach the operator
             self.logger.exception("Legacy program import failed: %s", path)
-            return None, f"分析原程式時發生錯誤：{type(exc).__name__}: {exc}（詳細內容已寫入 log）", "error"
+            return None, tag("E-5101", f"分析原程式時發生錯誤：{type(exc).__name__}: {exc}（詳細內容已寫入 log）"), "error"
 
     def _finish_legacy_scan(self, future) -> None:
         if future is not self._legacy_scan:
@@ -1752,7 +1753,7 @@ class CcdController(QObject, LogMixin):
             report, message, level = future.result()
         except Exception as exc:  # noqa: BLE001 - include cancelled or unexpected worker failures
             self.logger.exception("Legacy program import worker failed")
-            self.notice.emit(f"分析原程式時發生錯誤：{type(exc).__name__}: {exc}", "error")
+            self.notice.emit(tag("E-5101", f"分析原程式時發生錯誤：{type(exc).__name__}: {exc}"), "error")
             return
         if report is None:
             self.notice.emit(message, level)
@@ -1774,7 +1775,7 @@ class CcdController(QObject, LogMixin):
     def report_legacy_import_error(self, message: str) -> None:
         """The screen could not show the confirmation table."""
         self.logger.error("Legacy import dialog failed: %s", message)
-        self.notice.emit(f"無法顯示匯入確認表：{message}", "error")
+        self.notice.emit(tag("E-5103", f"無法顯示匯入確認表：{message}"), "error")
 
     def legacy_current_values(self) -> dict[str, str]:
         wheel = self._machine.meter_wheel
@@ -1885,7 +1886,7 @@ class CcdController(QObject, LogMixin):
         except DeviceError as exc:
             kind = "warning" if quiet else "error"
             prefix = "米輪自動連線失敗" if quiet else "米輪連線失敗"
-            self.notice.emit(f"{prefix}：{exc}", kind)
+            self.notice.emit(tag("E-3102", f"{prefix}：{exc}"), kind)
             self.logger.warning("Meter wheel connect failed: %s", exc)
             return False
         if not quiet:
@@ -1926,7 +1927,7 @@ class CcdController(QObject, LogMixin):
             self.stop_software_trigger_monitor()
             self._meter_wheel_timer.stop()
             meter_wheel.disconnect()
-            self.notice.emit(f"米輪讀值失敗，已中斷連線：{exc}", "error")
+            self.notice.emit(tag("E-3103", f"米輪讀值失敗，已中斷連線：{exc}"), "error")
             snapshot = MeterWheelSnapshot()
             self._end_external_watch()
         self._publish_meter_snapshot(snapshot)
@@ -1981,12 +1982,12 @@ class CcdController(QObject, LogMixin):
 
     def _meter_wheel_write(self, command: Callable[[], None]) -> None:
         if not self.devices.meter_wheel.is_connected:
-            self.notice.emit("米輪未連線。", "warning")
+            self.notice.emit(tag("E-3105", "米輪未連線。"), "warning")
             return
         try:
             command()
         except DeviceError as exc:
-            self.notice.emit(f"米輪寫入失敗：{exc}", "error")
+            self.notice.emit(tag("E-3104", f"米輪寫入失敗：{exc}"), "error")
             return
         self.poll_meter_wheel()
 
@@ -2033,7 +2034,7 @@ class CcdController(QObject, LogMixin):
         if availability.available:
             self.notice.emit(f"米輪 DLL 載入成功：{settings.dll_path}", "success")
         else:
-            self.notice.emit(f"米輪 DLL 仍無法載入：{availability.reason}", "error")
+            self.notice.emit(ensure_tag("E-3101", f"米輪 DLL 仍無法載入：{availability.reason}"), "error")
         self.refresh_availability()
         return availability.available
 
@@ -2273,7 +2274,7 @@ class CcdController(QObject, LogMixin):
             self._diagnose_worker = None
             self.sapera_diagnose_running_changed.emit(False)
             self.diagnose_finished.emit(False)
-            self.notice.emit(f"相機診斷無法啟動：{exc}", "error")
+            self.notice.emit(tag("E-7104", f"相機診斷無法啟動：{exc}"), "error")
             return False
         return True
 
@@ -2338,7 +2339,7 @@ class CcdController(QObject, LogMixin):
         try:
             return done.result()
         except Exception as exc:  # noqa: BLE001 - one broken check must not stop the report
-            return CheckItem(CHECK_LIGHT, CHECK_FAIL, f"光源檢查發生錯誤：{type(exc).__name__}: {exc}")
+            return CheckItem(CHECK_LIGHT, CHECK_FAIL, tag("E-2104", f"光源檢查發生錯誤：{type(exc).__name__}: {exc}"))
 
     def _check_meter_wheel(self) -> CheckItem:
         meter_wheel = self.devices.meter_wheel
@@ -2347,17 +2348,17 @@ class CcdController(QObject, LogMixin):
         if not availability.available:
             report = self.meter_wheel_diagnosis()
             lines = tuple(report.lines()) if report is not None else ()
-            return CheckItem(CHECK_METER_WHEEL, CHECK_FAIL, f"米輪無法使用：{availability.reason}", lines)
+            return CheckItem(CHECK_METER_WHEEL, CHECK_FAIL, ensure_tag("E-3101", f"米輪無法使用：{availability.reason}"), lines)
         if not meter_wheel.is_connected:
             try:
                 meter_wheel.connect(settings)
             except DeviceError as exc:
-                return CheckItem(CHECK_METER_WHEEL, CHECK_FAIL, f"卡片 ID {settings.card_id} 連線失敗：{exc}")
+                return CheckItem(CHECK_METER_WHEEL, CHECK_FAIL, tag("E-3102", f"卡片 ID {settings.card_id} 連線失敗：{exc}"))
             self._meter_wheel_timer.start()
         try:
             encoder, compare = meter_wheel.read_encoder(), meter_wheel.read_compare()
         except DeviceError as exc:
-            return CheckItem(CHECK_METER_WHEEL, CHECK_FAIL, f"卡片 ID {settings.card_id} 讀值失敗：{exc}")
+            return CheckItem(CHECK_METER_WHEEL, CHECK_FAIL, tag("E-3103", f"卡片 ID {settings.card_id} 讀值失敗：{exc}"))
         finally:
             self.poll_meter_wheel()
         lines = (
@@ -2375,7 +2376,7 @@ class CcdController(QObject, LogMixin):
         availability = self.devices.digital_io.availability()
         if not availability.available:
             status = CHECK_FAIL if settings.enabled else CHECK_SKIP
-            return CheckItem(CHECK_SENSOR_IO, status, f"PCIe-1730（DAQNavi）無法使用：{availability.reason}")
+            return CheckItem(CHECK_SENSOR_IO, status, ensure_tag("E-4101", f"PCIe-1730（DAQNavi）無法使用：{availability.reason}"))
         relay = self._sensor_relay
         if relay is not None:
             stats = relay.stats()
@@ -2387,7 +2388,7 @@ class CcdController(QObject, LogMixin):
             self.devices.digital_io.connect(probe.settings)
             active, raw = probe.read_input()
         except DeviceError as exc:
-            return CheckItem(CHECK_SENSOR_IO, CHECK_FAIL, f"讀取 {settings.di_label} 失敗：{exc}")
+            return CheckItem(CHECK_SENSOR_IO, CHECK_FAIL, tag("E-4102", f"讀取 {settings.di_label} 失敗：{exc}"))
         finally:
             self.devices.digital_io.disconnect()
         lines = (
@@ -2428,7 +2429,7 @@ class CcdController(QObject, LogMixin):
             self._finish_device_check_item(CheckItem(CHECK_CAMERA, CHECK_SKIP, "相機診斷正在執行，結果請看「Sapera 診斷」面板。"))
             return
         if not self.start_camera_diagnose():
-            self._finish_device_check_item(CheckItem(CHECK_CAMERA, CHECK_FAIL, "相機未連線，S1–S8 診斷無法啟動（原因見上一則提示）。"))
+            self._finish_device_check_item(CheckItem(CHECK_CAMERA, CHECK_FAIL, tag("E-7104", "相機未連線，S1–S8 診斷無法啟動（原因見上一則提示）。")))
 
     def _finish_device_check_item(self, item: CheckItem) -> None:
         items = self._device_check_items
@@ -2520,7 +2521,7 @@ class CcdController(QObject, LogMixin):
         try:
             self.store.save(settings)
         except OSError as exc:
-            self.notice.emit(f"CCD 機台設定檔寫入失敗：{self.store.path}（{exc}）", "error")
+            self.notice.emit(tag("E-7201", f"CCD 機台設定檔寫入失敗：{self.store.path}（{exc}）"), "error")
             return False
         self._machine = settings
         return True

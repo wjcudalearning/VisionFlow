@@ -521,7 +521,7 @@ class MainWindowCameraMonitorTests(unittest.TestCase):
                 # An enabled light that cannot be switched on stops monitoring before any frame is inspected.
                 window.ccd_controller._machine = replace(window.ccd_controller._machine, light=LightSettings(enabled=True))
                 window._start_monitoring()
-                self.assertIn("相機直連監控無法開始：光源", window.notice_bar.label.text())
+                self.assertIn("相機直連監控無法開始：[E-6105] 光源", window.notice_bar.label.text())
                 self.assertTrue(_wait_until(lambda: not window.monitor_running))
                 self.assertIsNone(window.ccd_controller._inspection_queue)
                 self.assertEqual(camera.status().state, CameraState.IDLE)
