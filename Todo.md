@@ -995,6 +995,15 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 
 ### GUI／CCD 與 CUDA 條件式量測
 
+#### 設備智慧導入與智慧診斷後續優化（2026-09-29 盤點）
+
+- [ ] **修正設備自檢與光源自動偵測的交錯執行**：`CcdController._finish_light_detect()` 目前會清空 `_device_check_items`／`_device_check_waiting`，若自檢尚在等待相機診斷，結果可能永遠收不齊。移除非自檢流程對自檢狀態的重置，明確處理兩者互斥或序列化；測試涵蓋自檢中啟動光源偵測、光源先完成／相機後完成、關窗與失敗路徑，確認按鈕必定恢復且只產生一份完整報告。
+- [ ] **設備自檢改為分層驗證與情境就緒判定**：目前已連線相機、讀到一次米輪／Sensor 值或可開啟光源 COM port 即可能顯示 PASS，`DeviceCheckReport.passed` 也把所有 SKIP 視為通過。報告逐項標明實際驗證層級（連線、訊號、觸發、出圖、檢測）與未測步驟；依當前 Recipe、實際寫入的 Trigger 模式及啟用設備判定「相機直連監控能否啟動」，必要設備 SKIP 不得顯示整體就緒。保持原始證據、短碼與錯誤碼可抄回，補齊四種 Trigger 模式與選配設備的測試矩陣；實機結論仍待現場驗收。
+- [ ] **智慧導入增加套用後驗證閉環**：保留現有來源、衝突與「可能只是預設值」確認表；操作者套用後，比對預期設定、機台／Recipe 儲存值、重新連線後的相機與米輪實際讀回值，將「待寫入」「已寫入但未讀回」「讀回不符」「已驗證」分開呈現。匯入與 Recipe 載入不得自行連線或寫硬體；Sensor DI/DO、光源亮滅與影像比例仍列為現場動作驗證，不因程式碼推定而自動標為成功。
+- [ ] **智慧診斷串成引導式訊號鏈驗證**：重用 `devices/trigger_diagnosis.py` 的既有證據與原因排序，依實際接線引導遮擋 Sensor、推動米輪並觀察 DI 邊緣、DO 脈衝、擷取卡 Frame Trigger、線數與完成影像；指出最早失效的一段、觀測值、無法觀測的項目及下一步。診斷動作須由管理模式明確啟動，不自動送 DO 測試脈衝或繞過既有監控前置條件；以模擬事件序列與相機機台逐段驗收。
+- [ ] **光源狀態區分指令送出與實際確認**：`_submit_light()` 目前只要 `send()` 未拋錯，即使沒有控制器回覆也回報 `on=True`／`ok=True`，相機直連監控接著開始收圖。依協定能力標示「已送出、未確認」與「回覆確認」，對可回覆協定驗證回覆內容；無法確認亮燈時勿宣稱已亮，可在首張影像提供可配置的過暗提示，避免直接把正常品判為 NG。正式判定門檻須由相機機台與產品影像驗證，不能用固定灰階值猜測。
+- [ ] **修正設備自檢的操作說明與執行範圍**：CCD 頁和 README 現稱自檢「只讀取、不改設定」，但未連線相機的 S6 會寫硬體參數、S7 會 Snap；部分光源協定探測會送通道亮度 0。將純狀態檢查與完整動作診斷的硬體動作、預期耗時及結果範圍清楚呈現；現有安全限制（不自動開燈、不送 DO 脈衝、不可與原機台程式共用卡片）保持一致，更新文件與 GUI 測試。
+
 - [ ] **合併相機 frame 到達時的 UI 狀態更新**：每個 frame 都觸發 camera status refresh；若相機高 frame rate 下 UI event／paint 成本可見，以 timer 合併狀態刷新並保留正確線數與最新狀態。版本資訊目前不在此 frame callback 重建，勿重複登錄該說法。
 - [ ] **讓 Sapera 診斷 Stop 真正可取消**：`SaperaDiagnoseWorker.stop_requested` 目前沒有傳入診斷步驟或被 worker 使用；加入可合作取消的檢查點，並驗證關窗不需等完整診斷逾時、原生相機資源安全釋放。
 - [ ] **關窗前排空相機 lifecycle 工作**：Sapera connect／disconnect 在 daemon thread 執行，但 `CcdController.close()` 會直接關閉 device 而未持有／等待該 thread。管理單一 lifecycle worker 的完成狀態，確保不會與 `devices.close()` 同時碰原生 driver；涵蓋成功、例外及關窗競態。
@@ -1207,6 +1216,7 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 - [ ] 加速不得犧牲 GUI 回應、打包啟動、結果追溯、錯誤訊息或 CPU fallback。
 
 ## 完成紀錄
+- [x] 2026-09-29：依現行 v1.11.2 的 `devices/`、CCD 頁、智慧導入與智慧診斷流程，盤點並新增六項設備優化待辦：自檢／光源偵測競態、分層驗證與情境就緒、導入後讀回閉環、引導式訊號鏈診斷、光源指令與亮燈確認分離、自檢操作說明修正。米輪讀取對 GUI 的阻塞、相機 lifecycle／診斷取消與大影像記憶體量測沿用既有待辦；本次僅更新 roadmap，未修改執行行為，也未宣稱實機驗收完成。
 - [x] 2026-09-29：正式發布 VisionFlow AOI `v1.11.2` Windows x64 CUDA-enabled 修正版。annotated tag `v1.11.2` → `cea9451`（位於 `origin/main`），GitHub Release 為 Latest、非 draft／prerelease：<https://github.com/wjcudalearning/VisionFlow/releases/tag/v1.11.2>。公開 ZIP `VisionFlow-AOI-v1.11.2-windows-x64.zip` 為 122,848,142 bytes、SHA-256 `F997F6E623E14D715C144BC5FF887D90B52E93B2B9BA85AFE7CE3776F6867E1A`；從 GitHub 重新下載後位元組數與 SHA-256 完全相同，389 files、7 recipes、1 CUDA DLL，ZIP 路徑皆為正斜線。以 `cea9451` 乾淨 worktree 建置，provenance `dirty=false`；CUDA 13.3／MSVC 14.51 x64／`sm_86` 重新建置 DLL（1,491,456 bytes、SHA-256 `0EC07D0099CC52A01C13BFB5604B4F2C2DFF35B1C03EDD224B381E6482AF9B25`），`build_cuda_dll.ps1 -RunTests` 的 RTX 3090 native smoke 與完整 Python CUDA validator（含 benchmark）通過；dist 與獨立解壓 ZIP 的 packaged `--smoke-test` 都 exit 0。完整 1137 tests、compileall、CUDA source／ABI preflight、CLI 合成影像 smoke、GUI offscreen smoke 通過。未執行真實產品影像、相機機台與長時間 stress 驗收；錯誤代碼、光源連線與 Sensor bit 推定的現場確認仍列於【實物】項目。
 - [x] 2026-09-29：準備 VisionFlow AOI `v1.11.2` Windows x64 修正版：設備錯誤代碼與對照表、光源 COM port 開不了時只顯示一句原因，以及從原機台程式匯入時由整個 port 讀取推定 Sensor DI bit。GUI Pipeline 版本、README 最新發行版與 release notes 索引同步為 1.11.2；套件、tag 與 GitHub Release 的驗證結果另於發布後記錄。
 - [x] 2026-09-29：新增設備錯誤代碼（使用者需求：現場回報數字比較快）。`devices/error_codes.py` 集中定義 31 個代碼：E-21xx 光源、E-31xx 米輪、E-41xx Sensor I/O、E-51xx 原程式匯入、E-61xx 相機直連監控、E-71xx／E-72xx 相機與機台設定（Sapera S1–S8 維持 E-01xx～E-09xx）。CCD 頁與監控的錯誤訊息前面帶 `[E-xxxx]`，巢狀原因保留自己的代碼（例如 `[E-6105] 光源開燈失敗：[E-2102] …`）；一鍵設備自檢總結行帶出每個異常設備的第一個代碼（例如 `L:FAIL(E-2102)`）。對照表 `docs/device-error-codes.md` 由代碼表產生，`tests/test_device_error_codes.py` 檢查程式用到的代碼都已登記、文件逐一列出且沒有過時代碼。
