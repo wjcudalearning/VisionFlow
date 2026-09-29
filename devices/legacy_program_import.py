@@ -964,6 +964,12 @@ class LegacyProgramAnalyzer:
         found += self._sensor_relay()
         found += self._sapera()
         found += self._light()
+        # Everything else the program writes to the hardware, and its Sensor-trigger sequence.
+        from devices.legacy_hardware_inventory import lsi_inventory, sapera_inventory, sensor_flow  # noqa: PLC0415
+
+        found += sensor_flow(self)
+        found += lsi_inventory(self)
+        found += sapera_inventory(self)
         return [f for f in found if f is not None]
 
     # --- LSI-8181 meter wheel ---------------------------------------------------------

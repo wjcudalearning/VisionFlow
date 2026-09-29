@@ -93,6 +93,7 @@ from devices.sensor_relay import MODE_FORWARD, MODE_LABELS, MODE_SNAP, SensorRel
 from devices.trigger_automation import (
     SOFTWARE_TRIGGER_POLL_SEC,
     AutoSaveRequests,
+    COUNTER_MAX,
     CaptureWatchFinding,
     ExternalCaptureWatch,
     ExternalTriggerActions,
@@ -1566,7 +1567,11 @@ class CcdController(QObject, LogMixin):
             if encoder is None:
                 return
             self._sensor_capture_start_encoder = encoder
-            self._sensor_capture_expected_counts = self._applied[1].length_lines * self._machine.meter_wheel.compare_increment
+            # The frame needs its start offset (when the imported sequence sets one) plus Length lines.
+            self._sensor_capture_expected_counts = (
+                self._machine.sensor_relay.snap_compare_offset
+                + self._applied[1].length_lines * self._machine.meter_wheel.compare_increment
+            )
             self._sensor_capture_in_flight = True
             self._sensor_capture_started_at = time.monotonic()
             self._sensor_busy_noticed = False
@@ -1641,10 +1646,22 @@ class CcdController(QObject, LogMixin):
         if self._machine.meter_wheel.compare_increment <= 0:
             self.notice.emit("Sensor 已觸發，但米輪自動遞增為 0；未開始取像，請設定每行格數。", "error")
             return None
+        relay = self._machine.sensor_relay
         try:
+            increment = self._machine.meter_wheel.compare_increment
+            if relay.snap_encoder_reset or relay.snap_compare_offset > 0:
+                # The original program's sequence (imported or typed in the Sensor panel): optionally
+                # reset the encoder, then start the frame a fixed number of counts after the Sensor.
+                if relay.snap_encoder_reset:
+                    meter_wheel.set_encoder(relay.snap_encoder_value)
+                    encoder_value = relay.snap_encoder_value
+                else:
+                    encoder_value = meter_wheel.read_encoder()
+                offset = relay.snap_compare_offset if relay.snap_compare_offset > 0 else increment
+                meter_wheel.set_compare(min(COUNTER_MAX, encoder_value + offset))
+                return encoder_value
             encoder_value = meter_wheel.read_encoder()
             compare_value = meter_wheel.read_compare()
-            increment = self._machine.meter_wheel.compare_increment
             armed = compare_arm_value(
                 encoder_value, compare_value, increment
             )
@@ -2167,6 +2184,9 @@ class CcdController(QObject, LogMixin):
             "sensor_relay.do_bit": str(relay.do_bit),
             "sensor_relay.do_active_low": "是" if relay.do_active_low else "否",
             "sensor_relay.pulse_ms": f"{relay.pulse_ms:g}",
+            "sensor_relay.snap_encoder_reset": "是" if relay.snap_encoder_reset else "否",
+            "sensor_relay.snap_encoder_value": str(relay.snap_encoder_value),
+            "sensor_relay.snap_compare_offset": str(relay.snap_compare_offset),
             "connection.config_file_path": self._machine.connection.config_file_path,
             "acquisition.length_lines": str(acquisition.length_lines),
             "acquisition.exposure_time": f"{acquisition.exposure_time:g}",

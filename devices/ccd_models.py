@@ -299,6 +299,10 @@ SENSOR_POLL_MS_RANGE = (0.0, 20.0)
 DEFAULT_DIO_DEVICE = "PCIe-1730,BID#0"
 
 
+SENSOR_SNAP_ENCODER_RANGE = (-(2**31), 2**31 - 1)
+SENSOR_SNAP_OFFSET_RANGE = (0, 10_000_000)
+
+
 @dataclass(frozen=True)
 class SensorRelaySettings:
     """Machine-level Sensor relay through an Advantech DI/DO card (PCIe-1730).
@@ -322,6 +326,12 @@ class SensorRelaySettings:
     pulse_ms: float = 1.0
     min_interval_ms: int = 50
     poll_interval_ms: float = 1.0
+    # Software Trigger by Sensor, matching the original program's per-trigger sequence:
+    # optionally set the encoder to snap_encoder_value first, then put the compare
+    # snap_compare_offset counts ahead of the encoder (0 = one line ahead, VisionFlow's default).
+    snap_encoder_reset: bool = False
+    snap_encoder_value: int = 0
+    snap_compare_offset: int = 0
     # Automation.BDaq4.dll location; empty means the .NET assembly search (GAC) finds it.
     assembly_path: str = ""
 
@@ -338,6 +348,9 @@ class SensorRelaySettings:
             pulse_ms=float(_clamp(float(self.pulse_ms), SENSOR_PULSE_MS_RANGE)),
             min_interval_ms=int(_clamp(int(self.min_interval_ms), SENSOR_MIN_INTERVAL_MS_RANGE)),
             poll_interval_ms=float(_clamp(float(self.poll_interval_ms), SENSOR_POLL_MS_RANGE)),
+            snap_encoder_reset=bool(self.snap_encoder_reset),
+            snap_encoder_value=int(_clamp(int(self.snap_encoder_value), SENSOR_SNAP_ENCODER_RANGE)),
+            snap_compare_offset=int(_clamp(int(self.snap_compare_offset), SENSOR_SNAP_OFFSET_RANGE)),
             assembly_path=str(self.assembly_path).strip().strip("\"'").strip(),
         )
 

@@ -5,6 +5,7 @@ import os
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 import unittest.mock
 from pathlib import Path
 
@@ -513,6 +514,29 @@ class ControllerSensorRelayTests(unittest.TestCase):
         notices = self._second_edge_during_capture(travel=50)
         self.assertIn("[E-6107]", notices[0])
         self.assertIn("CMP_OUT", notices[0])
+        self.camera.complete_capture()
+
+    def test_imported_trigger_sequence_resets_the_encoder_and_offsets_the_compare(self):
+        relay = replace(ENABLED, snap_encoder_reset=True, snap_encoder_value=0, snap_compare_offset=120)
+        self._setup(TriggerSettings(TriggerMode.SOFTWARE), relay=relay)
+        self.meter_wheel.set_encoder(5000)
+        self.meter_wheel.set_compare(5001)
+        self.screen.preview_button.click()
+        self.assertTrue(_wait_until(lambda: self.controller.sensor_relay_stats.polls > 1))
+        self._edge()
+        self.assertTrue(_wait_until(lambda: self.camera.status().state == CameraState.CAPTURING))
+        self.assertEqual(self.meter_wheel.read_encoder(), 0, "the encoder is reset like the original program")
+        self.assertEqual(self.meter_wheel.read_compare(), 120, "the first line starts 120 counts after the Sensor")
+        self.camera.complete_capture()
+
+    def test_offset_without_reset_is_relative_to_the_encoder_at_the_trigger(self):
+        self._setup(TriggerSettings(TriggerMode.SOFTWARE), relay=replace(ENABLED, snap_compare_offset=30))
+        self.meter_wheel.set_encoder(400)
+        self.screen.preview_button.click()
+        self.assertTrue(_wait_until(lambda: self.controller.sensor_relay_stats.polls > 1))
+        self._edge()
+        self.assertTrue(_wait_until(lambda: self.camera.status().state == CameraState.CAPTURING))
+        self.assertEqual((self.meter_wheel.read_encoder(), self.meter_wheel.read_compare()), (400, 430))
         self.camera.complete_capture()
 
     def test_sensor_does_not_snap_when_meter_disconnects_before_edge(self):

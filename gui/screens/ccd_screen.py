@@ -44,6 +44,8 @@ from devices.ccd_models import (
     SERIAL_PARITIES,
     SERIAL_STOP_BITS,
     SENSOR_MIN_INTERVAL_MS_RANGE,
+    SENSOR_SNAP_ENCODER_RANGE,
+    SENSOR_SNAP_OFFSET_RANGE,
     SENSOR_POLL_MS_RANGE,
     SENSOR_PULSE_MS_RANGE,
     TRIGGER_MODE_LABELS,
@@ -780,6 +782,14 @@ class CcdScreen(QWidget):
         self.sensor_poll_input = self.gate.register(NumStepper(1.0, *SENSOR_POLL_MS_RANGE, step=0.5, decimals=1))
         self.sensor_poll_input.setToolTip("讀取 DI 的間隔，決定程式轉送的延遲上限；0 表示不休息連續讀取（佔用一個 CPU 核心）。")
         form.addRow("DI 讀取間隔（ms）", self.sensor_poll_input)
+        self.sensor_snap_reset_check = self.gate.register(QCheckBox("每次觸發先把 Encoder 設為"))
+        self.sensor_snap_encoder_input = self.gate.register(_fixed_width(NumStepper(0, *SENSOR_SNAP_ENCODER_RANGE), 120))
+        self.sensor_snap_offset_input = self.gate.register(_fixed_width(NumStepper(0, *SENSOR_SNAP_OFFSET_RANGE), 120))
+        self.sensor_snap_offset_input.setToolTip(
+            "Sensor 觸發後米輪再走幾格才拍第一行（Compare = Encoder + 這個值）；0 表示下一格就開始，是 VisionFlow 原本的做法。"
+        )
+        form.addRow("軟體觸發起拍", _row(self.sensor_snap_reset_check, self.sensor_snap_encoder_input, stretch_last=False))
+        form.addRow("起拍偏移（格）", self.sensor_snap_offset_input)
         self.sensor_assembly_edit = self.gate.register(QLineEdit())
         self.sensor_assembly_edit.setProperty("mono", "true")
         self.sensor_assembly_edit.setPlaceholderText("預設：DAQNavi 安裝位置（Automation.BDaq4.dll）")
@@ -829,6 +839,9 @@ class CcdScreen(QWidget):
         self.sensor_pulse_input.setValue(settings.pulse_ms)
         self.sensor_interval_input.setValue(settings.min_interval_ms)
         self.sensor_poll_input.setValue(settings.poll_interval_ms)
+        self.sensor_snap_reset_check.setChecked(settings.snap_encoder_reset)
+        self.sensor_snap_encoder_input.setValue(settings.snap_encoder_value)
+        self.sensor_snap_offset_input.setValue(settings.snap_compare_offset)
         self.sensor_assembly_edit.setText(settings.assembly_path)
 
     def sensor_relay_settings(self) -> SensorRelaySettings:
@@ -844,6 +857,9 @@ class CcdScreen(QWidget):
             pulse_ms=float(self.sensor_pulse_input.value()),
             min_interval_ms=int(self.sensor_interval_input.value()),
             poll_interval_ms=float(self.sensor_poll_input.value()),
+            snap_encoder_reset=self.sensor_snap_reset_check.isChecked(),
+            snap_encoder_value=int(self.sensor_snap_encoder_input.value()),
+            snap_compare_offset=int(self.sensor_snap_offset_input.value()),
             assembly_path=self.sensor_assembly_edit.text(),
         ).normalized()
 
