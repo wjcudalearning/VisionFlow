@@ -1207,6 +1207,7 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 - [ ] 加速不得犧牲 GUI 回應、打包啟動、結果追溯、錯誤訊息或 CPU fallback。
 
 ## 完成紀錄
+- [x] 2026-09-29：準備 VisionFlow AOI `v1.11.2` Windows x64 修正版：設備錯誤代碼與對照表、光源 COM port 開不了時只顯示一句原因，以及從原機台程式匯入時由整個 port 讀取推定 Sensor DI bit。GUI Pipeline 版本、README 最新發行版與 release notes 索引同步為 1.11.2；套件、tag 與 GitHub Release 的驗證結果另於發布後記錄。
 - [x] 2026-09-29：新增設備錯誤代碼（使用者需求：現場回報數字比較快）。`devices/error_codes.py` 集中定義 31 個代碼：E-21xx 光源、E-31xx 米輪、E-41xx Sensor I/O、E-51xx 原程式匯入、E-61xx 相機直連監控、E-71xx／E-72xx 相機與機台設定（Sapera S1–S8 維持 E-01xx～E-09xx）。CCD 頁與監控的錯誤訊息前面帶 `[E-xxxx]`，巢狀原因保留自己的代碼（例如 `[E-6105] 光源開燈失敗：[E-2102] …`）；一鍵設備自檢總結行帶出每個異常設備的第一個代碼（例如 `L:FAIL(E-2102)`）。對照表 `docs/device-error-codes.md` 由代碼表產生，`tests/test_device_error_codes.py` 檢查程式用到的代碼都已登記、文件逐一列出且沒有過時代碼。
 - [x] 2026-09-29：光源 COM port 開不了時的錯誤訊息改為一句原因（使用者現場回報光源連線不上）：原本訊息附上整段 .NET 堆疊，原因被埋住；現在分為「被其他程式使用（通常是原機台程式）」「這台電腦沒有該 COM port，並列出本機 COM port」與其他錯誤（只留第一行）。本機以 .NET `SerialPort` 實測 COM1 可開關、COM9 顯示新訊息；新增訊息分類測試。現場連線失敗的實際原因待使用者回報訊息後確認。
 - [x] 2026-09-29：從原機台程式匯入支援「整個 port 一起讀」的 Sensor DI（使用者現場回報原程式用 `InstantDiCtrl.Read` 讀整個 port）：由 `Read(port, out data)`／`Read(start, count, buffer)` 取得 port（含 `buffer[k]` 位移），並追讀取後同一方法內的位元判斷（`(data >> n) & 1`、`data & 0x08`、`data & (1 << n)`，n 或遮罩可為常數）推定 bit；推定值標為「可能」不預設勾選，同一個 byte 判斷多個 bit 時列為衝突；追不到位元判斷時維持原本的手動確認提示。新增四種寫法與追不到時的回歸測試。
