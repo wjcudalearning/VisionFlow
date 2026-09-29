@@ -41,7 +41,15 @@ function Get-HttpStatusCode {
 }
 
 function Get-GitHubCredentialHeaders {
-    $credentialLines = "protocol=https`nhost=github.com`n`n" | git credential fill
+    # A host whose console input encoding is UTF-8 with BOM prefixes piped stdin with EF BB BF,
+    # which git reads as a missing protocol field; pipe the request without a BOM.
+    $previousInputEncoding = [Console]::InputEncoding
+    try {
+        [Console]::InputEncoding = New-Object System.Text.UTF8Encoding $false
+        $credentialLines = "protocol=https`nhost=github.com`n`n" | git credential fill
+    } finally {
+        [Console]::InputEncoding = $previousInputEncoding
+    }
     if ($LASTEXITCODE -ne 0) {
         throw 'git credential fill failed for github.com'
     }
@@ -134,7 +142,9 @@ if ($null -ne $existingRelease) {
     throw "Release already exists: $($existingRelease.html_url)"
 }
 
-$body = Get-Content -LiteralPath $resolvedBody -Raw -Encoding utf8
+# A plain .NET string: Windows PowerShell 5.1 Get-Content adds PSPath/PSProvider note properties
+# that ConvertTo-Json -Depth serializes into the body object, which GitHub rejects.
+$body = [System.IO.File]::ReadAllText($resolvedBody, [System.Text.Encoding]::UTF8)
 $createPayload = @{
     tag_name = $Tag
     target_commitish = $ExpectedCommit
