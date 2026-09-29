@@ -469,19 +469,70 @@ class ControllerSensorRelayTests(unittest.TestCase):
         self._edge()
         self.assertTrue(_wait_until(lambda: self.camera.status().state == CameraState.CAPTURING))
         self.assertEqual(self.meter_wheel.read_compare(), 41, "compare re-armed ahead of the encoder")
+        self.assertTrue(self.controller._sensor_capture_in_flight)
         self.assertEqual(self.io.writes, [], "Software Trigger never drives the grabber DO")
 
         self._edge(False)
         self.assertTrue(_wait_until(lambda: self.controller.sensor_relay_stats.di_active is False))
         time.sleep(0.06)  # past min_interval_ms
         self._edge()
-        self.assertTrue(_wait_until(lambda: any("上一張仍在擷取" in message for message in self.messages)))
+        self.assertTrue(_wait_until(lambda: any("上一張尚未完成" in message for message in self.messages)))
+        self.assertTrue(any("米輪已走約" in message and "不會補拍" in message for message in self.messages))
 
         self.camera.complete_capture()
+        self.assertTrue(_wait_until(lambda: not self.controller._sensor_capture_in_flight))
         self.screen.stop_button.click()
         self.assertFalse(self.controller.software_trigger_monitor_running)
         self.assertFalse(self.controller.sensor_relay_running)
         self.assertEqual(self.screen.status_values["trigger_monitor"].text(), "未啟動")
+
+    def test_sensor_does_not_snap_when_meter_disconnects_before_edge(self):
+        self._setup(TriggerSettings(TriggerMode.SOFTWARE))
+        self.screen.preview_button.click()
+        self.assertTrue(_wait_until(lambda: self.controller.sensor_relay_stats.polls > 1))
+        self.meter_wheel.disconnect()
+        self._edge()
+        self.assertTrue(_wait_until(lambda: any("米輪未連線" in text for text, _kind in self.notices)))
+        self.assertEqual(self.camera.status().state, CameraState.IDLE)
+        self.assertFalse(self.controller._sensor_capture_in_flight)
+
+    def test_sensor_rearms_compare_left_far_ahead_by_previous_run(self):
+        self._setup(TriggerSettings(TriggerMode.SOFTWARE))
+        self.meter_wheel.set_encoder(40)
+        self.meter_wheel.set_compare(4000)
+        self.screen.preview_button.click()
+        self.assertTrue(_wait_until(lambda: self.controller.sensor_relay_stats.polls > 1))
+        self._edge()
+        self.assertTrue(_wait_until(lambda: self.camera.status().state == CameraState.CAPTURING))
+        self.assertEqual(self.meter_wheel.read_compare(), 41)
+
+    def test_sensor_does_not_snap_when_compare_write_fails(self):
+        self._setup(TriggerSettings(TriggerMode.SOFTWARE))
+        self.meter_wheel.set_encoder(40)
+        self.meter_wheel.set_compare(0)
+        self.screen.preview_button.click()
+        self.assertTrue(_wait_until(lambda: self.controller.sensor_relay_stats.polls > 1))
+        with unittest.mock.patch.object(self.meter_wheel, "set_compare", side_effect=DeviceError("寫入失敗")):
+            self._edge()
+            self.assertTrue(_wait_until(lambda: any("未開始取像" in text for text, _kind in self.notices)))
+        self.assertEqual(self.camera.status().state, CameraState.IDLE)
+        self.assertFalse(self.controller._sensor_capture_in_flight)
+
+    def test_sensor_recovers_if_camera_ends_without_a_frame_callback(self):
+        self._setup(TriggerSettings(TriggerMode.SOFTWARE))
+        self.screen.preview_button.click()
+        self.assertTrue(_wait_until(lambda: self.controller.sensor_relay_stats.polls > 1))
+        self._edge()
+        self.assertTrue(_wait_until(lambda: self.controller._sensor_capture_in_flight))
+        self.camera._state = CameraState.IDLE
+        self.controller._sensor_capture_started_at -= 2.0
+        self._edge(False)
+        self.assertTrue(_wait_until(lambda: self.controller.sensor_relay_stats.di_active is False))
+        time.sleep(0.06)
+        self._edge()
+        self.assertTrue(_wait_until(lambda: any("已解除 Sensor 忙碌狀態" in text for text, _kind in self.notices)))
+        self.assertEqual(self.camera.status().state, CameraState.CAPTURING)
+        self.assertTrue(self.controller._sensor_capture_in_flight)
 
     def test_relay_start_failure_is_reported_and_software_trigger_does_not_start(self):
         self.controller.devices = CcdDevices(self.camera, self.meter_wheel, SimulatedDigitalIo(False, "找不到卡"))

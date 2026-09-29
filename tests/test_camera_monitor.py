@@ -33,6 +33,7 @@ from devices.ccd_models import (
     CameraRecipeSettings,
     CameraState,
     ImageSaveFormat,
+    LightChannel,
     LightSettings,
     TriggerMode,
     TriggerSettings,
@@ -418,7 +419,7 @@ class MonitorStartTests(unittest.TestCase):
         self.assertFalse(self.controller.software_trigger_monitor_running)
 
     def test_frames_wait_for_the_light_and_a_light_failure_stops_monitoring(self):
-        light = LightSettings(enabled=True, brightness_template="L{channel}{value:03}", line_ending="", command_delay_ms=0, reply_timeout_ms=0)
+        light = LightSettings(enabled=True, brightness_template="L{channel}{value:03}", channels=(LightChannel("1", 128),), line_ending="", command_delay_ms=0, reply_timeout_ms=0)
         self._use_light(light)
         self._connect(TriggerMode.EXTERNAL)
         queue = CameraFrameQueue()
@@ -427,7 +428,7 @@ class MonitorStartTests(unittest.TestCase):
         self.camera.emit_frame()
         self.assertEqual(queue.pending(), 0, "a frame before the light is on is not inspected")
         self._drain_light()
-        self.assertEqual(self.light.sent, [b"L1000"])
+        self.assertEqual(self.light.sent, [b"L1128"])
         self.assertEqual(self.camera.status().state, CameraState.PREVIEWING)
         self.camera.emit_frame()
         self.assertEqual(queue.pending(), 1)

@@ -251,7 +251,7 @@ class CcdScreen(QWidget):
     legacy_import_apply_requested = Signal(object)
     legacy_import_failed = Signal(str)
     light_settings_applied = Signal(object)
-    light_on_requested = Signal()
+    light_on_requested = Signal(object)
     light_off_requested = Signal()
     light_brightness_applied = Signal(object)
     light_test_requested = Signal(str)
@@ -869,24 +869,24 @@ class CcdScreen(QWidget):
         panel.add_widget(
             _hint(
                 "啟用後，相機直連監控開始時自動開燈並送出各通道亮度，停止監控時關燈；其他時候用「開燈／關燈」手動測試，關閉程式時若燈仍開著會關燈。指令照原機台程式送的內容設定（可用「從原機台程式匯入」帶入）；"
-                "原機台程式也會佔用這個 COM port，兩者不可同時開啟。"
+                "原機台程式也會佔用這個 COM port，兩者不可同時開啟。測試時可取消「啟用光源控制」並手動開燈，相機取像不會因亮度 0 被阻止。"
             )
         )
         self.light_state_label = _mono_value("未連線")
         self.light_on_button = self.gate.register(_button("開燈", "primary", "play"), ACCESS_ENGINEER)
         self.light_off_button = self.gate.register(_button("關燈", "danger-ghost", "x"), ACCESS_ENGINEER)
-        self.light_on_button.clicked.connect(self.light_on_requested.emit)
+        self.light_on_button.clicked.connect(lambda: self.light_on_requested.emit(self.light_channels()))
         self.light_off_button.clicked.connect(self.light_off_requested.emit)
         panel.add_widget(_row(self.light_on_button, self.light_off_button, self.light_state_label))
 
-        panel.add_widget(_section("亮度"))
+        panel.add_widget(_section("目標亮度（0–255；實際亮度須看控制器／光源）"))
         self.light_channels_widget = QWidget()
         self.light_channels_layout = QGridLayout(self.light_channels_widget)
         self.light_channels_layout.setContentsMargins(0, 0, 0, 0)
         self.light_channels_layout.setHorizontalSpacing(10)
         panel.add_widget(self.light_channels_widget)
         self.light_brightness_inputs: dict[str, NumStepper] = {}
-        self.light_brightness_button = self.gate.register(_button("套用亮度", icon_name="check"))
+        self.light_brightness_button = self.gate.register(_button("儲存並送出亮度", icon_name="check"), ACCESS_ENGINEER)
         self.light_brightness_button.clicked.connect(lambda: self.light_brightness_applied.emit(self.light_channels()))
         panel.add_widget(_row(self.light_brightness_button))
 
@@ -988,7 +988,7 @@ class CcdScreen(QWidget):
                 item.widget().deleteLater()
         self.light_brightness_inputs = {}
         for row, channel in enumerate(settings.channels):
-            stepper = self.gate.register(NumStepper(channel.brightness, 0, settings.brightness_max))
+            stepper = self.gate.register(NumStepper(channel.brightness, 0, settings.brightness_max), ACCESS_ENGINEER)
             stepper.setAccessibleName(f"通道 {channel.channel} 亮度")
             self.light_channels_layout.addWidget(QLabel(f"通道 {channel.channel}"), row, 0)
             self.light_channels_layout.addWidget(stepper, row, 1)
@@ -1046,7 +1046,7 @@ class CcdScreen(QWidget):
             text = f"偵測失敗：{result.error}"
         elif result.found:
             protocol = result.protocol
-            text = f"偵測到：{protocol.label}，Baud rate {result.baud_rate}，8N1。\n{protocol.note}\n已填入下方設定（尚未保存）：按「套用光源設定」後再按「開燈」確認燈有亮。"
+            text = f"候選協定：{protocol.label}，Baud rate {result.baud_rate}，8N1。\n{protocol.note}\n這只表示控制器有回覆，尚未證明此型號使用該協定。若要測試自動亮燈，請輸入非零目標亮度，按「套用光源設定」後再按「開燈」，現場確認有亮。"
             if not protocol.confirms_brightness:
                 text += "\n注意：這只確認了通訊格式，亮度暫存器位址可能不同，燈沒反應時請改「通道」欄位再試。"
             self.light_protocol_combo.setCurrentIndex(max(0, self.light_protocol_combo.findData(protocol.key)))

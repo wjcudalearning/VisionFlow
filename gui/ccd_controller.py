@@ -342,6 +342,10 @@ class CcdController(QObject, LogMixin):
         self._sensor_relay: SensorRelay | None = None
         self._last_relay_stats = SensorRelayStats()
         self._sensor_skipped_busy = 0
+        self._sensor_capture_in_flight = False
+        self._sensor_capture_start_encoder: int | None = None
+        self._sensor_capture_expected_counts = 0
+        self._sensor_capture_started_at = 0.0
         # One thread owns every serial exchange with the light, so commands never interleave.
         self._light_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ccd-light")
         self._light_status = LightStatus()
@@ -393,6 +397,7 @@ class CcdController(QObject, LogMixin):
         # Queued even when a driver emits on the GUI thread, so status is read after the device updates it.
         self._frame_arrived.connect(self.refresh_camera_status, Qt.ConnectionType.QueuedConnection)
         self._frame_arrived.connect(self._watch_frame_arrived, Qt.ConnectionType.QueuedConnection)
+        self._frame_arrived.connect(self._sensor_frame_completed, Qt.ConnectionType.QueuedConnection)
         # Driver and monitor threads only hand work to the GUI thread, which owns camera and meter-wheel commands.
         queued = Qt.ConnectionType.QueuedConnection
         self._external_trigger_arrived.connect(self._apply_external_trigger_meter_wheel_actions, queued)
@@ -615,6 +620,12 @@ class CcdController(QObject, LogMixin):
         self._monitor_started_acquisition = False
         self._inspection_queue = queue
         if not self._machine.light.enabled:
+            self._arm_camera_monitoring()
+            return
+        if self._machine.light.controls_brightness and not any(
+            channel.brightness > 0 for channel in self._machine.light.channels
+        ):
+            self.notice.emit("光源目標亮度全為 0；本次略過自動光源指令，取像仍會開始。若燈已手動打開，請現場確認影像亮度。", "warning")
             self._arm_camera_monitoring()
             return
         failure = self._light_on_for_monitoring()
@@ -1455,6 +1466,9 @@ class CcdController(QObject, LogMixin):
 
     def _stop_sensor_relay(self) -> None:
         relay, self._sensor_relay = self._sensor_relay, None
+        self._sensor_capture_in_flight = False
+        self._sensor_capture_start_encoder = None
+        self._sensor_capture_started_at = 0.0
         if relay is None:
             return
         relay.stop()
@@ -1502,39 +1516,94 @@ class CcdController(QObject, LogMixin):
                 or hardware.mode != TriggerMode.SOFTWARE
             ):
                 return
-            if self.camera_status().capture_in_progress:
+            capture_busy = self.camera_status().capture_in_progress
+            if (
+                self._sensor_capture_in_flight
+                and not capture_busy
+                and time.monotonic() - self._sensor_capture_started_at > 1.0
+            ):
+                self._sensor_capture_in_flight = False
+                self._sensor_capture_start_encoder = None
+                self.notice.emit("上一張取像已結束但沒有收到影像；已解除 Sensor 忙碌狀態，請檢查擷取卡影像讀取。", "warning")
+            if self._sensor_capture_in_flight or capture_busy:
                 self._sensor_skipped_busy += 1
                 self.status_message.emit(
-                    f"Sensor 觸發時上一張仍在擷取，這次略過（累計 {self._sensor_skipped_busy} 次）。"
+                    self._sensor_busy_message()
                 )
                 return
-            self._arm_compare_for_sensor_capture()
+            encoder = self._arm_compare_for_sensor_capture()
+            if encoder is None:
+                return
+            self._sensor_capture_start_encoder = encoder
+            self._sensor_capture_expected_counts = self._applied[1].length_lines * self._machine.meter_wheel.compare_increment
+            self._sensor_capture_in_flight = True
+            self._sensor_capture_started_at = time.monotonic()
             try:
                 self.devices.camera.capture_frame()
             except DeviceError as exc:
+                self._sensor_capture_in_flight = False
+                self._sensor_capture_start_encoder = None
+                self._sensor_capture_started_at = 0.0
                 self.status_message.emit(f"Sensor 觸發無法開始擷取：{exc}")
             else:
-                self.status_message.emit("Sensor 觸發：開始擷取一張。")
+                self.status_message.emit(
+                    f"Sensor 觸發：已開始擷取一張；等待米輪走約 {self._sensor_capture_expected_counts} 格"
+                    f"（Length {self._applied[1].length_lines} 行）。"
+                )
         finally:
             with self._software_capture_lock:
                 self._software_capture_queued = False
             self.refresh_camera_status()
 
-    def _arm_compare_for_sensor_capture(self) -> None:
+    def _sensor_frame_completed(self) -> None:
+        if not self._sensor_capture_in_flight or self.camera_status().capture_in_progress:
+            return
+        self._sensor_capture_in_flight = False
+        self._sensor_capture_start_encoder = None
+        self._sensor_capture_started_at = 0.0
+        self.status_message.emit("Sensor 觸發影像已完成；可接收下一次 Sensor 觸發。")
+
+    def _sensor_busy_message(self) -> str:
+        message = f"上一張尚未完成，這次 Sensor 觸發已略過（累計 {self._sensor_skipped_busy} 次，不會補拍）。"
+        start = self._sensor_capture_start_encoder
+        if start is None or not self.devices.meter_wheel.is_connected:
+            return message + "請確認米輪持續轉動、CMP_OUT 線脈衝與相機 Length。"
+        try:
+            moved = abs(self.devices.meter_wheel.read_encoder() - start)
+        except DeviceError as exc:
+            return message + f"米輪讀值失敗：{exc}。"
+        expected = self._sensor_capture_expected_counts
+        lines = (
+            min(self._applied[1].length_lines, moved // max(1, self._machine.meter_wheel.compare_increment))
+            if self._applied else 0
+        )
+        return message + f"米輪已走約 {moved}/{expected} 格（約 {lines} 行）；若已足夠仍未出圖，檢查 CMP_OUT→擷取卡線觸發、CCF 與 CROP_HEIGHT。"
+
+    def _arm_compare_for_sensor_capture(self) -> int | None:
         """Keep the compare ahead of the encoder so CMP_OUT supplies the frame's line pulses."""
         meter_wheel = self.devices.meter_wheel
         if not meter_wheel.is_connected:
-            self.status_message.emit("米輪未連線：影像收不到線觸發脈衝，不會完成。")
-            return
+            self.notice.emit("Sensor 已觸發，但米輪未連線；未開始取像，請先連線米輪。", "error")
+            return None
+        if self._machine.meter_wheel.compare_increment <= 0:
+            self.notice.emit("Sensor 已觸發，但米輪自動遞增為 0；未開始取像，請設定每行格數。", "error")
+            return None
         try:
             encoder_value = meter_wheel.read_encoder()
+            compare_value = meter_wheel.read_compare()
+            increment = self._machine.meter_wheel.compare_increment
             armed = compare_arm_value(
-                encoder_value, meter_wheel.read_compare(), self._machine.meter_wheel.compare_increment
+                encoder_value, compare_value, increment
             )
+            # A compare left far ahead by an earlier run also starves the new frame of line pulses.
+            if armed is None and compare_value - encoder_value > increment:
+                armed = compare_arm_value(encoder_value, encoder_value, increment)
             if armed is not None:
                 meter_wheel.set_compare(armed)
         except DeviceError as exc:
-            self.notice.emit(tag("E-3103", f"Sensor 觸發前無法讀寫米輪：{exc}"), "error")
+            self.notice.emit(tag("E-3103", f"Sensor 觸發前無法讀寫米輪，未開始取像：{exc}"), "error")
+            return None
+        return encoder_value
 
     def _with_sensor_card(self, action: Callable[[SensorRelay], object], failure_prefix: str):
         """Run a manual I/O test on the GUI thread; the card is released afterwards."""
@@ -1694,8 +1763,15 @@ class CcdController(QObject, LogMixin):
         self._submit_light("on", settings, steps, reconnect=True)
         return ""
 
-    def light_on(self):
+    def light_on(self, channels: Sequence[LightChannel] | None = None):
         settings = self._machine.light
+        if channels is not None and tuple(channels) != settings.channels:
+            settings = replace(settings, channels=tuple(channels)).normalized()
+            if not self._save_machine(replace(self._machine, light=settings)):
+                return None
+            self.light_settings_changed.emit(settings)
+        if settings.controls_brightness and not any(channel.brightness > 0 for channel in settings.channels):
+            self.notice.emit("光源目標亮度全為 0；仍會送出開燈指令，但控制器可能維持暗燈。可輸入非零亮度，或手動開燈測試。", "warning")
         steps = self._light_steps(settings, "on")
         if not steps:
             self.notice.emit(tag("E-2106", "光源沒有開燈指令，也沒有亮度指令範本；請先在「光源」面板設定或從原程式匯入。"), "warning")
@@ -1737,6 +1813,11 @@ class CcdController(QObject, LogMixin):
             return None
         self.light_settings_changed.emit(settings)
         self.notice.emit("光源設定已保存。", "success")
+        if settings.enabled and settings.controls_brightness and not any(
+            channel.brightness > 0 for channel in settings.channels
+        ):
+            self.notice.emit("光源目標亮度全為 0；設定已保存，略過自動開燈與亮度指令。仍可手動開燈並測試取像。", "warning")
+            return None
         connection_changed = (previous.port, previous.baud_rate, previous.data_bits, previous.parity, previous.stop_bits) != (
             settings.port, settings.baud_rate, settings.data_bits, settings.parity, settings.stop_bits
         )
@@ -1800,7 +1881,7 @@ class CcdController(QObject, LogMixin):
         if result.error:
             self.notice.emit(f"光源偵測失敗：{result.error}", "error")
         elif result.found:
-            self.notice.emit(f"{result.port} 偵測到 {result.protocol.label}，Baud rate {result.baud_rate}；已填入設定，請套用後按「開燈」確認有亮。", "success")
+            self.notice.emit(f"{result.port} 收到類似 {result.protocol.label} 的回覆，Baud rate {result.baud_rate}；僅填入候選設定，請輸入非零亮度、套用並現場確認有亮。", "warning")
         else:
             self.notice.emit(tag("E-2108", f"{result.port} 沒有偵測到已知格式的光源控制器（試了 {result.attempts} 種組合）。"), "warning")
         self.logger.info("Light detection on %s: %s at %s, unknown replies %s", result.port, result.protocol.key if result.found else "none", result.baud_rate, result.unknown_replies)

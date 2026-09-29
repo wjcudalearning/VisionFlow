@@ -85,9 +85,11 @@ KNOWN_LIGHT_PROTOCOLS: tuple[LightProtocol, ...] = (
         brightness_template="$3{channel}{value:03X}{xor}",
         channels=("1",),
         probe="$4{channel}000{xor}",
-        matches=_pattern(rb"^\$"),
+        # A lone '$' is not a command acknowledgement; several unrelated controllers echo it.
+        matches=_pattern(rb"^\$[0-9A-Fa-f]{4,}"),
         on_commands=("$1{channel}000{xor}",),
         off_commands=("$2{channel}000{xor}",),
+        confirms_brightness=False,
     ),
     LightProtocol(
         key="sa",

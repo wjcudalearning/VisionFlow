@@ -5,6 +5,8 @@ import os
 import tempfile
 import textwrap
 import unittest
+from dataclasses import replace
+from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -220,6 +222,41 @@ class LightControllerCase(unittest.TestCase):
 
 class ControllerLightTests(LightControllerCase):
 
+    def test_zero_brightness_warns_without_blocking_capture_and_screen_value_is_sent(self):
+        ccs = apply_protocol(LightSettings(enabled=True, port="COM3", reply_timeout_ms=0), protocol_by_key("ccs"))
+        self.wait(self.controller.apply_light_settings(ccs))
+        self.assertTrue(any("亮度全為 0" in text for text, _kind in self.notices))
+        self.assertEqual(self.light.sent, [], "saving zero brightness must not overwrite a manually lit controller")
+        self.wait(self.controller.light_off())
+        self.light.sent.clear()
+        with patch.object(self.controller, "_arm_camera_monitoring") as arm:
+            self.controller.attach_inspection_queue(CameraFrameQueue())
+            arm.assert_called_once()
+        self.assertEqual(self.light.sent, [], "zero brightness does not overwrite a manually lit controller")
+        self.controller.detach_inspection_queue()
+
+        self.screen.light_brightness_inputs["1"].setValue(128)
+        self.screen.light_on_button.click()
+        self.wait(self.controller._light_executor.submit(lambda: None))
+        self.assertIn(render_brightness(ccs.brightness_template, "1", 128, ccs.line_ending), self.light.sent)
+        self.assertEqual(self.store.load().light.channels[0].brightness, 128)
+
+    def test_zero_brightness_monitor_keeps_a_manually_lit_controller(self):
+        ccs = apply_protocol(LightSettings(enabled=True, port="COM3", reply_timeout_ms=0), protocol_by_key("ccs"))
+        self.wait(self.controller.apply_light_settings(replace(ccs, channels=(LightChannel("1", 128),))))
+        self.assertTrue(self.light.is_connected)
+        self.assertTrue(self.controller.light_status.on)
+        self.light.sent.clear()
+        zero = replace(ccs, channels=(LightChannel("1", 0),))
+        self.wait(self.controller.apply_light_settings(zero))
+        with patch.object(self.controller, "_arm_camera_monitoring") as arm:
+            self.controller.attach_inspection_queue(CameraFrameQueue())
+            arm.assert_called_once()
+        self.controller.detach_inspection_queue()
+        self.assertEqual(self.light.sent, [], "automatic monitoring must not darken or turn off a manual light")
+        self.assertTrue(self.light.is_connected)
+        self.assertTrue(self.controller.light_status.on)
+
     def test_known_protocol_reply_is_checked_before_confirmation(self):
         ccs = apply_protocol(LightSettings(enabled=True, port="COM3", reply_timeout_ms=0), protocol_by_key("ccs"))
         steps = self.controller._light_steps(ccs, "on")
@@ -316,10 +353,13 @@ class ControllerLightTests(LightControllerCase):
         self.screen.set_mode("eng")
         self.assertTrue(self.screen.light_on_button.isEnabled())
         self.assertTrue(self.screen.light_off_button.isEnabled())
-        for widget in (self.screen.light_apply_button, self.screen.light_template_edit, self.screen.light_test_button, self.screen.light_brightness_button):
+        self.assertTrue(self.screen.light_brightness_button.isEnabled())
+        self.assertTrue(self.screen.light_brightness_inputs["1"].isEnabled())
+        for widget in (self.screen.light_apply_button, self.screen.light_template_edit, self.screen.light_test_button):
             self.assertFalse(widget.isEnabled())
         self.screen.set_mode("op")
         self.assertFalse(self.screen.light_on_button.isEnabled())
+        self.assertFalse(self.screen.light_brightness_button.isEnabled())
 
 
 def replace_enabled(settings: LightSettings, enabled: bool) -> LightSettings:
@@ -435,6 +475,8 @@ class LightProtocolTests(unittest.TestCase):
         self.assertEqual(ccs.off_commands, (render_brightness("@00L0{checksum}", "1", 0).decode(),))
         opt = protocol_by_key("opt")
         self.assertEqual(render_brightness(opt.brightness_template, "1", 255), b"$310FF16")
+        self.assertFalse(opt.matches(b"$"))
+        self.assertFalse(opt.confirms_brightness)
         self.assertEqual(protocol_by_key("sa").probe_bytes(), b"SA#")
         self.assertEqual(render_brightness(protocol_by_key("sa").brightness_template, "B", 255), b"SB0255#")
         for protocol in KNOWN_LIGHT_PROTOCOLS:
@@ -461,6 +503,14 @@ class LightProtocolTests(unittest.TestCase):
         self.assertEqual(light.bauds, [9600, 19200, 38400, 115200, 38400], "each protocol's common rates are tried first")
         for command in light.sent:
             self.assertNotIn(command, (b"@00L11D\r\n",), "a probe never switches the light on")
+
+    def test_lone_dollar_reply_does_not_identify_opt_protocol(self):
+        light = BaudLight(9600)
+        opt = protocol_by_key("opt")
+        light.replies[opt.probe_bytes()] = b"$"
+        result = detect_light_protocol(light, LightSettings(), protocols=[opt], bauds=[9600], reply_timeout_ms=0)
+        self.assertFalse(result.found)
+        self.assertIn("opt: $", result.unknown_replies[0])
 
     def test_modbus_reply_needs_a_valid_crc(self):
         light = BaudLight(9600)
@@ -534,7 +584,7 @@ class ControllerLightDetectionTests(LightControllerCase):
         form = self.screen.light_settings()
         self.assertEqual((form.port, form.baud_rate, form.brightness_template), ("COM3", 19200, "@{channel:02}F{value:03}{checksum}"))
         self.assertEqual(self.store.load().light, LightSettings(), "detection never saves settings")
-        self.assertEqual(self.notices[-1][1], "success")
+        self.assertEqual(self.notices[-1][1], "warning")
         self.assertFalse(light.is_connected)
 
     def test_detection_refused_while_monitoring_uses_the_light(self):
