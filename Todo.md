@@ -922,7 +922,7 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 
 ## P12：PLC 通訊（接收 PLC 命令與回送檢測結果）
 
-2026-09-18 使用者需求：VisionFlow 需要與產線 PLC 通訊，方向有二。**方向一（接收）**：PLC 發訊號過來，要求啟動監控模式中的相機串流。**方向二（發送）**：每張照片檢測完成後，把 matrix CSV 的內容送給 PLC。細節尚未確定。
+2026-09-18 使用者需求：VisionFlow 需要與產線 PLC 通訊，方向有二。**方向一（接收）**：PLC 發訊號過來，要求啟動監控模式中的相機串流。**方向二（發送）**：每張照片檢測完成後，把 matrix CSV 的內容送給 PLC。2026-09-29 補充方向一：PLC 先選一份已核准的 Recipe，再要求啟動相機直連監控；PLC 不逐項修改檢測參數。通訊協定與結果回送格式仍待產線確認。
 
 **原「逐排（橫排）EIP 訊號」方案已由使用者於 2026-09-18 駁回**，因此 `docs/reports/Phase2_改動一_PLC逐排訊號評估.md`、`docs/reports/Phase2_簡報逐頁講解與問答準備.md` 與 `簡報/phase2/Phase2_改動一_PLC逐排訊號.pptx` 中關於 PLC 的規劃與 24–41 週工期**均已失效**，不得再作為依據。本節描述的是取代它的方案；因為兩個方向都是「整張圖做完才動作」，逐排方案最大的代價（整圖產物原子性被破壞、逐排事件的不可逆風險、部分完成結果的追溯）都不存在。
 
@@ -930,12 +930,13 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 
 **本節目前只規劃，尚未實作任何程式；所有實作項目均未勾選。**
 
-### 已確認決策（2026-09-18；僅決策，尚未實作）
+### 已確認決策（2026-09-18、2026-09-29；僅決策，尚未實作）
 
 - [x] **設定歸屬採機台層**：PLC 的 IP／port／協定／timeout／register map／命令與結果的 word 位址存機台設定檔（`config/plc_machine.json`，schema `visionflow-plc-machine/v1`），**不進 Recipe**。理由比照相機：IP 是機器接線而非產品屬性，Recipe 必須能跨機台使用。
-- [x] **連線模式採按需**：使用者進入 PLC 頁才建立連線，不在啟動時常駐連線。
+- [x] **診斷連線採按需；生產命令接收須先就緒**：使用者進入 PLC 頁才建立診斷連線。機台啟用 PLC 控制時，應用程式須在監控開始前啟動命令接收與斷線重連，否則收不到 PLC 的啟動命令；不得把命令接收綁在監控 worker 的生命週期。
 - [x] **OP 完全看不到 PLC 頁**：比照 CCD 控制。工程模式可連線、測試與檢視；管理模式才能改參數。新增控制項比照 Detector 參數 fail-closed，未分類一律只給管理模式。
-- [x] **診斷連線與生產連線分離**：PLC 頁擁有的是按需的診斷 session；方向一與方向二的生產收發必須由檢測生命週期擁有。兩者失敗語意相反——診斷連不上只報錯，生產連不上**必須繼續檢測**。
+- [x] **診斷連線與生產連線分離**：PLC 頁擁有按需的診斷 session；應用程式層的 PLC controller 擁有監控前就須運作的命令接收，結果回送隨檢測工作啟用。診斷連不上只報錯；生產連線中斷時仍須繼續既有檢測，並向 OP 顯示 PLC 命令不可用或結果未送出的狀態。
+- [x] **PLC 只選整份 Recipe**：機台層維護 PLC Recipe 編號與已核准 Recipe 的對照；PLC 不傳任意檔案路徑、不逐項寫入 Detector 或相機參數。啟動前須驗證對照、Recipe 內容與相機監控前置條件，並回報實際載入的 Recipe 編號或拒絕原因。
 - [x] **PLC 斷線狀態必須顯示在 OP 看得到的地方**：PLC 頁對 OP 不可見，因此連線狀態與「結果未送出」要以 inline notice 與狀態列事件呈現，不能只藏在 PLC 頁（狀態不得只靠顏色）。
 - [x] **PLC 是選配能力，比照 CUDA DLL 與相機**：沒有 PLC 時 GUI、CLI、batch、monitor 照常啟動，PLC 頁顯示不可用原因；方向一與方向二在未連線時為 no-op。
 
@@ -948,6 +949,8 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 - [ ] 是否需要缺陷類型對照表（type → code）？由誰維護？可接受的類型數上限？
 - [ ] 方向二可提供幾個連續 word？（逐格 bitmap 在 16384×13000、tile 512／overlap 64 下需 73 words，**已超過 `eiptest/` 展示配置的 64-word 寫入區**）
 - [ ] 方向一用哪個 word 的哪個 bit 下命令？**誰負責清 bit**（我方回寫 ack 或 PLC 自行清除）？
+- [ ] PLC Recipe 編號的資料型別、可用範圍與對照表由誰維護？Recipe 編號與啟動命令如何以同一筆命令序號／握手交付，避免讀到新舊值混合？
+- [ ] PLC 與操作員同時下啟停命令時的優先順序、手動停止後是否允許 PLC 立即重啟，以及斷線重連後如何避免重放舊命令？
 - [ ] 輪詢週期 50–200 ms 是否可接受？（上位鏈結為 request/response，PLC 無法主動 push，命令只能以輪詢實現）
 - [ ] 可否提供一個**控制區以外的安全測試位址**供寫入回讀診斷使用？
 - [ ] PLC 掃描週期？（用於驗證多 word 讀取一致性規則）
@@ -956,18 +959,18 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 ### 實作項目（規劃，尚未開工）
 
 - [ ] **傳輸層 `devices/plc/`**：KV 上位鏈結 request/response（`?K` 型號查詢、`RDS`／`WRS` 批次讀寫）、連線生命週期、讀寫耗時統計；CIP 路徑要嘛實作要嘛移除，不得留下選了卻沒作用的協定選項（`eiptest/electron/plc_service.js` 目前存了 `protocol` 卻一律送 ASCII 指令）。無 Qt import，比照 `devices/` 契約。
-- [ ] **機台層設定 store `devices/plc_settings_store.py`**：`config/plc_machine.json`、schema `visionflow-plc-machine/v1`、`.tmp` 原子寫入、損毀或型別錯誤回預設並保留原檔與提示，比照 `devices/ccd_settings_store.py`。
+- [ ] **機台層設定 store `devices/plc_settings_store.py`**：`config/plc_machine.json`、schema `visionflow-plc-machine/v1`、`.tmp` 原子寫入、損毀或型別錯誤回預設並保留原檔與提示，比照 `devices/ccd_settings_store.py`；納入 PLC 控制啟用開關及 Recipe 編號 → 已核准 Recipe 對照，驗證編號唯一、路徑存在且位於允許的 Recipe 範圍。
 - [ ] **模擬器與注入**：`VISIONFLOW_PLC_SIMULATOR=1` 提供假 PLC（比照 `devices/factory.py` 的 `VISIONFLOW_CCD_SIMULATOR`），`MainWindow` 可注入 client 與設定 store，無硬體與 CI 可測。
 - [ ] **register map 必須是設定值，不得寫死**：不沿用 `eiptest/` 的 `W000~W03F` 讀／`W040~W07F` 寫；所有位址相對於機台層設定的 base address，並在頁面上可讀回。
 - [ ] **診斷 `devices/plc_diagnose.py` 與 `main.py --plc-diagnose`**：分步（設定有效性 → TCP 可達 → `?K` 型號 → 讀取測試 → 寫入回讀 → 延遲基準），永不拋出、前一步失敗後續 SKIP、UTF-8 txt＋JSON 寫到 `outputs/logs/`，比照 `devices/sapera_diagnose.py` 的短碼與錯誤碼表做法。**打包 EXE 是視窗版、沒有主控台**，因此必須同時提供 GUI 入口與 CLI 參數。
 - [ ] **診斷的寫入測試不得指向控制區**：`eiptest/` 會把測試樣式寫進 `W040~W07F`（GUI 批次寫入更會寫滿整個控制區），此行為**不得移植為預設**；改為讀機台層設定的安全測試位址，未設定就 SKIP。
-- [ ] **GUI：`gui/screens/plc_screen.py` 與 `gui/plc_controller.py`**，controller 由 `MainWindow` 擁有；內容含設定、型號、連線狀態、register map 與診斷面板。另需四處既有檔案註冊：`gui/widgets/rail.py` 的 `NAV_ITEMS`、`gui/widgets/topbar.py` 的標題對照表、`gui/main_window.py` 的 `SCREEN_INDEX`／`stack.addWidget` 順序／`_visible_screens_for_mode()`／`_apply_mode_permissions()`。（`NAV_ITEMS` 顯示順序與 `SCREEN_INDEX` 堆疊順序是兩份不同順序，不可假設一致。）
+- [ ] **GUI：`gui/screens/plc_screen.py` 與 `gui/plc_controller.py`**，controller 由 `MainWindow` 擁有；側邊欄名稱用「PLC 通訊」（協定確認前不限定為 EIP），頁面含設定、Recipe 編號對照、型號、連線狀態、register map 與診斷面板。OP 看不到 PLC 頁，但監控頁須顯示目前 Recipe 編號／名稱、PLC 控制狀態與拒絕原因。另需四處既有檔案註冊：`gui/widgets/rail.py` 的 `NAV_ITEMS`、`gui/widgets/topbar.py` 的標題對照表、`gui/main_window.py` 的 `SCREEN_INDEX`／`stack.addWidget` 順序／`_visible_screens_for_mode()`／`_apply_mode_permissions()`。（`NAV_ITEMS` 顯示順序與 `SCREEN_INDEX` 堆疊順序是兩份不同順序，不可假設一致。）
 - [ ] **方向二：結果回送**。payload 依待確認項目定案；**不得依賴 matrix CSV 檔案**（`save_matrix_csv` 是可關的輸出開關，且寫檔是額外 I/O），直接由記憶體中的 `result["tiles"]` 以 `MatrixCsvExporter.ng_cell_text` 的同一套邏輯計算。`status` 需含第三態 ERROR（pipeline 有 tile error），否則 PLC 會把「未跑完」誤判為 PASS。
 - [ ] **方向二：多 word 讀取一致性**：寫入順序為先寫資料、**最後才寫序號 `seq`**，PLC 以 `seq` 變更判斷新資料，避免讀到更新到一半的混合狀態。
 - [ ] **方向二：送出時機與模式**：確認涵蓋單張、相機直連監控、資料夾監控與批量；批量預設關閉（1000 張會寫 PLC 1000 次，且批量屬離線作業）。送出失敗不阻擋檢測、不重送過期結果，並累計失敗次數與最後錯誤原因。
-- [ ] **方向一：命令接收**：輪詢約定的命令 word ＋**上升緣偵測**（持續為 1 不重複啟動）＋握手回寫（`stream_active`／`command_rejected`／心跳）。**不得因 PLC 要求而繞過既存前置條件**（相機未連線、非觸發模式連線、`CcdController.camera_monitor_blocker()`、OP 模式限制）：無法執行時回報拒絕原因，且該原因要顯示在 OP 看得到的地方。
-- [ ] **自動測試（無硬體）**：以假 PLC／模擬器覆蓋連線與斷線、批次讀寫、payload 編碼與 word 佈局、`seq` 一致性、上升緣只觸發一次、拒絕語意、PLC 不可達時檢測仍完成且結果不誤報、設定檔損毀回預設、OP 模式不可見。
-- [ ] 【實物】實機驗收（需 PLC 在場，未實測不得勾選）：型號查詢、讀寫延遲、payload 來回正確（含列方向與類型對照表）、PLC 斷線與恢復、命令啟動相機串流、連續生產下的穩定性。
+- [ ] **方向一：Recipe 選擇與命令接收**：監控前接收 PLC Recipe 編號與啟停命令，使用命令序號／握手避免重複、斷線後重放或編號與命令不一致；依對照載入完整 Recipe，確認相機設定已實際寫入硬體且 `CcdController.camera_monitor_blocker()` 等前置條件均通過，才呼叫既有相機直連監控入口。回寫所選／已套用 Recipe 編號、`stream_active`、`command_rejected`、拒絕原因與心跳；無效編號、Recipe 載入失敗、相機待重連或忙碌時拒絕並讓 OP 看見原因。監控中不得切換 Recipe；需停止並完成已接收影像後才可載入下一份。PLC 命令不得繞過既有權限與相機前置條件。
+- [ ] **自動測試（無硬體）**：以假 PLC／模擬器覆蓋連線與斷線、批次讀寫、payload 編碼與 word 佈局、`seq` 一致性、Recipe 編號對照與無效編號、命令去重與斷線重連、載入／相機套用失敗、監控中拒絕換 Recipe、PLC 不可達時檢測仍完成且結果不誤報、設定檔損毀回預設、OP 模式不可見但可見狀態。
+- [ ] 【實物】實機驗收（需 PLC 在場，未實測不得勾選）：型號查詢、讀寫延遲、payload 來回正確（含列方向與類型對照表）、PLC 斷線與恢復、Recipe 編號選擇與相機設定套用後啟動監控、監控中換 Recipe 被拒絕、連續生產下的穩定性。
 
 ### 風險與注意事項
 
@@ -1224,6 +1227,8 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 - [ ] 加速不得犧牲 GUI 回應、打包啟動、結果追溯、錯誤訊息或 CPU fallback。
 
 ## 完成紀錄
+- [x] 2026-09-29：依使用者確認的 PLC 選擇整份 Recipe 需求更新 P12 規劃（僅 Todo，未實作）：PLC Recipe 編號對照納入機台設定；啟動前驗證並確認相機設定已套用，監控中拒絕換 Recipe；診斷連線按需，生產命令接收須在監控前運作；PLC 通訊頁供工程／管理操作，OP 在監控頁看目前 Recipe 與命令結果。補命令序號、重連、操作權限與實機驗收待辦，所有實作與實機項目維持未勾選。
+- [x] 2026-09-29：準備 VisionFlow AOI `v1.11.5` Windows x64 修正版：智慧匯入追得到以參數／屬性傳遞的 SerialPort、`BaseStream.Write` 與完整型別名稱建立的光源指令，依指令內容判斷開關，略過空字串，說明只靠亮度開燈的控制器，確認表不再留白。GUI Pipeline 版本、README 最新發行版與 release notes 索引同步為 1.11.5；套件、tag 與 GitHub Release 的驗證結果另於發布後記錄。
 - [x] 2026-09-29：修正智慧匯入光源指令漏判與確認表留白（使用者現場回報：匯入後「原程式沒有開燈指令」、確認表該列留白）。SerialPort 以參數、屬性傳遞（`Send(SerialPort sp, …)`）、`new System.IO.Ports.SerialPort` 與 `BaseStream.Write` 都能追到指令；開／關先依指令內容（ON／OFF、開／關）判斷再看方法名稱；指令變數的初始空字串不再被當成指令；「其他光源指令」直接列出指令內容；原程式只靠送亮度開燈時說明「開燈指令留空即可」，追不到指令內容時提示改用「逐一試亮」。確認表的空白值顯示原因，「目前值」未設定時顯示「（未設定）」。補對應回歸測試。
 - [x] 2026-09-29：正式發布 VisionFlow AOI `v1.11.4` Windows x64 CUDA-enabled 版本。annotated tag `v1.11.4` → `d4fa26e`（位於 `origin/main`），GitHub Release 為 Latest、非 draft／prerelease：<https://github.com/wjcudalearning/VisionFlow/releases/tag/v1.11.4>。公開 ZIP `VisionFlow-AOI-v1.11.4-windows-x64.zip` 為 122,887,988 bytes、SHA-256 `3E1FA09F86AC2AC3289DC3714F4A6FD61DD19795C1E48959B8B945D263919F21`；從 GitHub 重新下載後位元組數與 SHA-256 完全相同，389 files、7 recipes、1 CUDA DLL，ZIP 路徑皆為正斜線。以 `d4fa26e` 乾淨 worktree 建置，provenance `dirty=false`；CUDA 13.3／MSVC 14.51 x64／`sm_86` 重新建置 DLL（1,491,456 bytes、SHA-256 `450FB99815E25DABD64205CA77C0E2398E33B6B4CDA4A971C4AB5929FDEBB41E`），`build_cuda_dll.ps1 -RunTests` 的 RTX 3090 native smoke 與完整 Python CUDA validator（含 benchmark）通過；dist 與獨立解壓 ZIP 的 packaged `--smoke-test` 都 exit 0。完整 1167 tests、compileall、CUDA source／ABI preflight、CLI 合成影像 smoke、GUI offscreen smoke 通過。未執行真實產品影像、相機機台與長時間 stress 驗收；原程式參數總表、Sensor 觸發流程與軟體觸發起拍的現場確認仍列於【實物】項目。
 - [x] 2026-09-29：準備 VisionFlow AOI `v1.11.4` Windows x64 版本：智慧匯入新增原程式參數總表（LSI8181 含 CMP_OUT、Sapera 參數與 feature）與 Sensor 觸發流程，Sensor 中繼新增可匯入的「軟體觸發起拍」與「帶入米輪 Encoder／Compare Set 值」。GUI Pipeline 版本、README 最新發行版與 release notes 索引同步為 1.11.4；套件、tag 與 GitHub Release 的驗證結果另於發布後記錄。
