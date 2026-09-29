@@ -68,6 +68,7 @@ from devices.ccd_models import (
     TriggerSettings,
 )
 from devices.frame_writer import SaveQueueStats
+from devices.light_protocols import KNOWN_LIGHT_PROTOCOLS, LightDetection, apply_protocol, protocol_by_key
 from devices.sensor_relay import MODE_LABELS as SENSOR_RELAY_MODE_LABELS
 from devices.trigger_diagnosis import SEVERITY_LABELS as TRIGGER_DIAGNOSIS_SEVERITY_LABELS
 from gui import icons
@@ -253,6 +254,7 @@ class CcdScreen(QWidget):
     light_off_requested = Signal()
     light_brightness_applied = Signal(object)
     light_test_requested = Signal(str)
+    light_detect_requested = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -832,6 +834,25 @@ class CcdScreen(QWidget):
         panel.add_widget(_row(self.light_brightness_button))
 
         panel.add_widget(_section("控制器設定"))
+        panel.add_widget(
+            _hint(
+                "不知道控制器協定時，選好 COM port 按「自動偵測」：程式會用常見的光源協定與 Baud rate 逐一詢問控制器（約 5–10 秒，"
+                "只送讀取或把通道 1 設為 0 的指令）。控制器不回話時偵測不到，可在「協定範本」逐一選擇、套用後按「開燈」看燈有沒有亮。"
+            )
+        )
+        self.light_detect_button = self.gate.register(_button("自動偵測", icon_name="eye"))
+        self.light_detect_button.clicked.connect(lambda: self.light_detect_requested.emit(self.light_settings()))
+        self.light_protocol_combo = self.gate.register(QComboBox())
+        self.light_protocol_combo.addItem("協定範本…", "")
+        for protocol in KNOWN_LIGHT_PROTOCOLS:
+            self.light_protocol_combo.addItem(protocol.label, protocol.key)
+            self.light_protocol_combo.setItemData(self.light_protocol_combo.count() - 1, protocol.note, Qt.ItemDataRole.ToolTipRole)
+        self.light_protocol_combo.activated.connect(self._fill_light_protocol)
+        panel.add_widget(_row(self.light_detect_button, self.light_protocol_combo, stretch_last=False))
+        self.light_detect_label = _hint(color=COLORS["text_2"])
+        self.light_detect_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.light_detect_label.setVisible(False)
+        panel.add_widget(self.light_detect_label)
         self.light_enabled_check = self.gate.register(QCheckBox("啟用光源控制"))
         panel.add_widget(self.light_enabled_check)
         form = _form()
@@ -862,7 +883,7 @@ class CcdScreen(QWidget):
         self.light_template_edit.setPlaceholderText("例如 @{channel:02}F{value:03}{checksum}")
         self.light_template_edit.setToolTip(
             "{channel} 通道、{value} 亮度，冒號後可指定格式（{value:03} 補零三位、{value:02X} 十六進位）；"
-            "{checksum}／{xor} 為前面所有位元組的 8-bit 和／XOR（兩位十六進位）。\\r \\n \\xNN 可寫控制字元。"
+            "{checksum}／{xor} 為前面所有位元組的 8-bit 和／XOR（兩位十六進位），{crc16} 為 Modbus CRC（兩個位元組）。\\r \\n \\xNN 可寫控制字元。"
         )
         form.addRow("亮度指令範本", self.light_template_edit)
         self.light_max_input = self.gate.register(NumStepper(255, *LIGHT_BRIGHTNESS_MAX_RANGE))
@@ -943,6 +964,45 @@ class CcdScreen(QWidget):
         self.light_reply_input.setValue(settings.reply_timeout_ms)
         self._set_light_channel_rows(settings)
         self.gate.set_mode(self.gate.mode)
+
+    def _fill_light_protocol(self, index: int = -1, baud_rate: int | None = None) -> None:
+        """Fill the controller form with a protocol family; nothing is saved until "套用光源設定"."""
+        protocol = protocol_by_key(str(self.light_protocol_combo.currentData() or ""))
+        if protocol is None:
+            return
+        filled = apply_protocol(self.light_settings(), protocol, baud_rate)
+        current = self._light_settings
+        self.set_light_settings(filled)
+        # The form now shows unsaved values; keep the saved settings as the reference.
+        self._light_settings = current
+
+    def set_light_detect_running(self, running: bool) -> None:
+        self.light_detect_button.setText("偵測中…" if running else "自動偵測")
+        self.gate.set_enabled(self.light_detect_button, not running)
+        self.gate.set_enabled(self.light_protocol_combo, not running)
+        if running:
+            self.light_detect_label.setText("正在逐一詢問控制器，請稍候…")
+            self.light_detect_label.setVisible(True)
+
+    def show_light_detection(self, result: LightDetection) -> None:
+        if result.error:
+            text = f"偵測失敗：{result.error}"
+        elif result.found:
+            protocol = result.protocol
+            text = f"偵測到：{protocol.label}，Baud rate {result.baud_rate}，8N1。\n{protocol.note}\n已填入下方設定（尚未保存）：按「套用光源設定」後再按「開燈」確認燈有亮。"
+            if not protocol.confirms_brightness:
+                text += "\n注意：這只確認了通訊格式，亮度暫存器位址可能不同，燈沒反應時請改「通道」欄位再試。"
+            self.light_protocol_combo.setCurrentIndex(max(0, self.light_protocol_combo.findData(protocol.key)))
+            self._fill_light_protocol(baud_rate=result.baud_rate)
+        else:
+            text = (
+                f"{result.port} 沒有偵測到已知格式（試了 {result.attempts} 種協定與 Baud rate 組合）。"
+                "請確認接線、COM port 與控制器電源，並確認原機台程式沒有佔用 COM port；也可以在「協定範本」逐一試亮。"
+            )
+        if result.unknown_replies:
+            text += "\n有回應但格式不認得（可提供給工程師判斷協定）：\n" + "\n".join(result.unknown_replies[:8])
+        self.light_detect_label.setText(text)
+        self.light_detect_label.setVisible(True)
 
     def light_channels(self) -> tuple[LightChannel, ...]:
         return tuple(LightChannel(name, int(stepper.value())) for name, stepper in self.light_brightness_inputs.items())

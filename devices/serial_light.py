@@ -64,7 +64,8 @@ def render_brightness(template: str, channel: str, value: int, line_ending: str 
 
     Placeholders: `{channel}` and `{value}` with an optional Python format spec (`{value:03}`,
     `{channel:02X}`); `{checksum}` / `{xor}` insert the 8-bit sum / XOR of every byte before them as
-    two uppercase hex digits (`{checksum:d}` for decimal, `{checksum:c}` for the raw byte).
+    two uppercase hex digits (`{checksum:d}` for decimal, `{checksum:c}` for the raw byte);
+    `{crc16}` appends the Modbus RTU CRC-16 of every byte before it as two raw bytes, low first.
     """
     channel_value: int | str = int(channel) if str(channel).isdigit() else str(channel)
     out = bytearray()
@@ -72,7 +73,9 @@ def render_brightness(template: str, channel: str, value: int, line_ending: str 
     for match in _PLACEHOLDER.finditer(template):
         out += _latin1(unescape(template[position : match.start()]), template)
         name, spec = match.group(1), match.group(2) or ""
-        if name in ("checksum", "xor"):
+        if name == "crc16":
+            out += modbus_crc16(bytes(out)).to_bytes(2, "little")
+        elif name in ("checksum", "xor"):
             total = 0
             for byte in out:
                 total = (total + byte) & 0xFF if name == "checksum" else total ^ byte
@@ -87,10 +90,20 @@ def render_brightness(template: str, channel: str, value: int, line_ending: str 
             except (TypeError, ValueError) as exc:
                 raise DeviceError(f"亮度指令範本的格式「{{{name}:{spec}}}」無法套用到 {argument!r}。") from exc
         else:
-            raise DeviceError(f"亮度指令範本有不認得的欄位「{{{name}}}」；可用 channel、value、checksum、xor。")
+            raise DeviceError(f"亮度指令範本有不認得的欄位「{{{name}}}」；可用 channel、value、checksum、xor、crc16。")
         position = match.end()
     out += _latin1(unescape(template[position:]) + line_ending, template)
     return bytes(out)
+
+
+def modbus_crc16(data: bytes) -> int:
+    """Modbus RTU CRC-16 (polynomial 0xA001 reflected, initial 0xFFFF)."""
+    crc = 0xFFFF
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0xA001 if crc & 1 else crc >> 1
+    return crc
 
 
 def describe_bytes(data: bytes) -> str:

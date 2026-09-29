@@ -57,6 +57,7 @@ from devices.legacy_program_import import (
     LegacyImportReport,
     scan_legacy_program,
 )
+from devices.light_protocols import LightDetection, detect_light_protocol
 from devices.serial_light import describe_bytes, encode_command, render_brightness
 from devices.sensor_relay import MODE_FORWARD, MODE_LABELS, MODE_SNAP, SensorRelay, relay_mode
 from devices.trigger_automation import (
@@ -246,6 +247,9 @@ class CcdController(QObject, LogMixin):
     #: `LightStatus` after every light job; `LightSettings` after a save.
     light_changed = Signal(object)
     light_settings_changed = Signal(object)
+    #: True while a light auto-detection runs; LightDetection when it ends.
+    light_detect_running_changed = Signal(bool)
+    light_detected = Signal(object)
     sapera_versions_changed = Signal(object)
     #: `TriggerDiagnosis` while an external-trigger watch runs, None when it ends.
     trigger_diagnosis_changed = Signal(object)
@@ -264,6 +268,7 @@ class CcdController(QObject, LogMixin):
     _sensor_capture_requested = Signal()
     _sensor_relay_failed = Signal(str)
     _light_done = Signal(object)
+    _light_detect_done = Signal(object)
     _legacy_scan_done = Signal(object)
     _auto_save_rejected = Signal()
     _auto_save_fallback_used = Signal()
@@ -302,6 +307,7 @@ class CcdController(QObject, LogMixin):
         self._light_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ccd-light")
         self._light_status = LightStatus()
         self._light_for_monitoring = False
+        self._light_detecting = False
         self._legacy_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ccd-legacy-import")
         self._legacy_scan = None
         # External-trigger capture watch (GUI thread) and whether the grabber reported trigger events.
@@ -346,6 +352,7 @@ class CcdController(QObject, LogMixin):
         self._sensor_capture_requested.connect(self._execute_sensor_capture, queued)
         self._sensor_relay_failed.connect(self._on_sensor_relay_failed, queued)
         self._light_done.connect(self._finish_light, queued)
+        self._light_detect_done.connect(self._finish_light_detect, queued)
         self._legacy_scan_done.connect(self._finish_legacy_scan, queued)
         self._auto_save_rejected.connect(self._on_auto_save_rejected, queued)
         self._auto_save_fallback_used.connect(self._on_auto_save_fallback_used, queued)
@@ -408,6 +415,7 @@ class CcdController(QObject, LogMixin):
         screen.light_off_requested.connect(self.light_off)
         screen.light_brightness_applied.connect(self.set_light_brightness)
         screen.light_test_requested.connect(self.send_light_test)
+        screen.light_detect_requested.connect(self.detect_light)
 
         self.camera_status_changed.connect(screen.set_camera_status)
         self.camera_busy_changed.connect(screen.set_camera_busy)
@@ -427,6 +435,8 @@ class CcdController(QObject, LogMixin):
         self.legacy_scan_running_changed.connect(screen.set_legacy_scan_running)
         self.light_changed.connect(screen.set_light_status)
         self.light_settings_changed.connect(screen.set_light_settings)
+        self.light_detect_running_changed.connect(screen.set_light_detect_running)
+        self.light_detected.connect(screen.show_light_detection)
 
         self._publish_availability()
         screen.set_camera_settings(self.camera_settings_view())
@@ -1505,6 +1515,47 @@ class CcdController(QObject, LogMixin):
             self.notice.emit(str(exc), "error")
             return None
         return self._submit_light("test", settings, [("測試指令", command)])
+
+    def detect_light(self, settings: LightSettings):
+        """Probe the chosen COM port with the known protocol families on the light thread.
+
+        Nothing is saved: the screen fills the form with a match and the operator applies it
+        after checking that the light really changes.
+        """
+        if self._light_detecting:
+            return None
+        if self._light_for_monitoring:
+            self.notice.emit("相機直連監控正在使用光源，請先停止監控再偵測。", "warning")
+            return None
+        availability = self.devices.light.availability()
+        if not availability.available:
+            self.notice.emit(f"無法偵測光源：{availability.reason}", "error")
+            return None
+        settings = settings.normalized()
+        light = self.devices.light
+        self._light_detecting = True
+        self.light_detect_running_changed.emit(True)
+        self.status_message.emit(f"正在偵測 {settings.port} 上的光源控制器…")
+        future = self._light_executor.submit(detect_light_protocol, light, settings, should_stop=lambda: self._closed)
+        future.add_done_callback(lambda done: self._light_detect_done.emit(done.result()))
+        return future
+
+    def _finish_light_detect(self, result: LightDetection) -> None:
+        self._light_detecting = False
+        self.light_detect_running_changed.emit(False)
+        # Detection opened and released the port itself, so the light is no longer connected.
+        self._light_status = LightStatus(False, False, (), result.error, "detect", not result.error)
+        self.light_changed.emit(self._light_status)
+        if self._closed:
+            return
+        self.light_detected.emit(result)
+        if result.error:
+            self.notice.emit(f"光源偵測失敗：{result.error}", "error")
+        elif result.found:
+            self.notice.emit(f"{result.port} 偵測到 {result.protocol.label}，Baud rate {result.baud_rate}；已填入設定，請套用後按「開燈」確認有亮。", "success")
+        else:
+            self.notice.emit(f"{result.port} 沒有偵測到已知格式的光源控制器（試了 {result.attempts} 種組合）。", "warning")
+        self.logger.info("Light detection on %s: %s at %s, unknown replies %s", result.port, result.protocol.key if result.found else "none", result.baud_rate, result.unknown_replies)
 
     def _close_light(self) -> None:
         """Turn the light off before exit, waiting briefly for the serial writes."""

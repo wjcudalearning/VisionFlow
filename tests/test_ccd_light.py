@@ -17,7 +17,8 @@ from devices.ccd_models import CcdMachineSettings, DeviceError, LightChannel, Li
 from devices.ccd_settings_store import CcdMachineSettingsStore, settings_from_dict, settings_to_dict
 from devices.factory import CcdDevices, UnavailableLight
 from devices.legacy_program_import import STATUS_PARTIAL, STATUS_READY, scan_legacy_program
-from devices.serial_light import DotNetSerialLight, describe_bytes, encode_command, render_brightness
+from devices.light_protocols import KNOWN_LIGHT_PROTOCOLS, apply_protocol, detect_light_protocol, protocol_by_key
+from devices.serial_light import DotNetSerialLight, describe_bytes, encode_command, modbus_crc16, render_brightness
 from devices.simulated import SimulatedDigitalIo, SimulatedLight, SimulatedLineScanCamera, SimulatedMeterWheel
 from gui.ccd_controller import CcdController
 from gui.screens.ccd_screen import CcdScreen
@@ -164,7 +165,7 @@ class DotNetSerialLightTests(unittest.TestCase):
         self.assertFalse(UnavailableLight().availability().available)
 
 
-class ControllerLightTests(unittest.TestCase):
+class LightControllerCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
@@ -172,7 +173,7 @@ class ControllerLightTests(unittest.TestCase):
     def setUp(self):
         self._temp = tempfile.TemporaryDirectory()
         self.addCleanup(self._temp.cleanup)
-        self.light = SimulatedLight()
+        self.light = self.make_light()
         self.store = CcdMachineSettingsStore(Path(self._temp.name) / "ccd.json")
         self.screen = CcdScreen()
         self.screen.set_mode("admin")
@@ -187,11 +188,17 @@ class ControllerLightTests(unittest.TestCase):
     def tearDown(self):
         self.controller.close()
 
+    def make_light(self):
+        return SimulatedLight()
+
     def wait(self, future):
         if future is not None:
             future.result(timeout=5)
         self.app.processEvents()
         self.app.processEvents()
+
+
+class ControllerLightTests(LightControllerCase):
 
     def test_monitoring_turns_the_light_on_and_off(self):
         self.wait(self.controller.apply_light_settings(replace_enabled(LIGHT, False)))
@@ -338,6 +345,118 @@ class LightImportTests(unittest.TestCase):
         self.assertEqual(values["light.on_commands"], (STATUS_PARTIAL, (r"@00L1\r\n",)))
         self.assertEqual(values["light.off_commands"], (STATUS_PARTIAL, (r"@00L0\r\n",)))
         self.assertEqual(values["light.brightness_template"], (STATUS_PARTIAL, r"@{channel:02}F{value:03}{checksum}\r\n"))
+
+
+class BaudLight(SimulatedLight):
+    """Answers `replies` only at `baud`, like a controller on a line at one fixed rate."""
+
+    def __init__(self, baud: int, **kwargs):
+        super().__init__(**kwargs)
+        self.baud = baud
+        self.bauds: list[int] = []
+
+    def connect(self, settings: LightSettings) -> None:
+        super().connect(settings)
+        self.bauds.append(settings.baud_rate)
+
+    def send(self, command: bytes, reply_timeout_ms: int) -> bytes:
+        reply = super().send(command, reply_timeout_ms)
+        return reply if self.settings.baud_rate == self.baud else b""
+
+
+class LightProtocolTests(unittest.TestCase):
+    def test_crc16_and_protocol_command_bytes(self):
+        self.assertEqual(modbus_crc16(bytes.fromhex("010300000001")), 0x0A84)
+        self.assertEqual(protocol_by_key("modbus").probe_bytes(), bytes.fromhex("010300000001840A"))
+        self.assertEqual(render_brightness(r"\x01\x06\x00{channel:c}\x00{value:c}{crc16}", "0", 255), bytes.fromhex("0106000000FF") + modbus_crc16(bytes.fromhex("0106000000FF")).to_bytes(2, "little"))
+        ccs = protocol_by_key("ccs")
+        self.assertEqual(ccs.probe_bytes(), b"@01F00077\r\n")
+        self.assertEqual(ccs.on_commands, (render_brightness("@00L1{checksum}", "1", 0).decode(),))
+        self.assertEqual(ccs.off_commands, (render_brightness("@00L0{checksum}", "1", 0).decode(),))
+        opt = protocol_by_key("opt")
+        self.assertEqual(render_brightness(opt.brightness_template, "1", 255), b"$310FF16")
+        self.assertEqual(protocol_by_key("sa").probe_bytes(), b"SA#")
+        self.assertEqual(render_brightness(protocol_by_key("sa").brightness_template, "B", 255), b"SB0255#")
+        for protocol in KNOWN_LIGHT_PROTOCOLS:
+            self.assertEqual(protocol.brightness_max, 255)
+
+    def test_apply_protocol_keeps_port_enable_and_matching_channels(self):
+        base = LightSettings(enabled=True, port="COM5", parity="even", command_delay_ms=30, channels=(LightChannel("1", 120), LightChannel("7", 9)))
+        filled = apply_protocol(base, protocol_by_key("ccs"), 19200)
+        self.assertEqual((filled.enabled, filled.port, filled.baud_rate, filled.parity, filled.command_delay_ms), (True, "COM5", 19200, "none", 30))
+        self.assertEqual(filled.channels, (LightChannel("1", 120),))
+        self.assertEqual(filled.brightness_template, "@{channel:02}F{value:03}{checksum}")
+        modbus = apply_protocol(base, protocol_by_key("modbus"))
+        self.assertEqual((modbus.baud_rate, modbus.line_ending, modbus.channels), (9600, "", (LightChannel("0", 0),)))
+
+    def test_detects_protocol_and_rate_then_releases_the_port(self):
+        light = BaudLight(38400)
+        light.replies[protocol_by_key("opt").probe_bytes()] = b"$1000"
+        light.replies[protocol_by_key("ccs").probe_bytes()] = b"garbage"
+        result = detect_light_protocol(light, LightSettings(port="COM4"), reply_timeout_ms=0)
+        self.assertTrue(result.found)
+        self.assertEqual((result.protocol.key, result.baud_rate, result.port), ("opt", 38400, "COM4"))
+        self.assertIn("38400 ccs: garbage", result.unknown_replies)
+        self.assertFalse(light.is_connected)
+        self.assertEqual(light.bauds, [9600, 19200, 38400, 115200, 38400], "each protocol's common rates are tried first")
+        for command in light.sent:
+            self.assertNotIn(command, (b"@00L11D\r\n",), "a probe never switches the light on")
+
+    def test_modbus_reply_needs_a_valid_crc(self):
+        light = BaudLight(9600)
+        probe = protocol_by_key("modbus").probe_bytes()
+        body = bytes.fromhex("01030200FF")
+        light.replies[probe] = body + b"\x00\x00"
+        result = detect_light_protocol(light, LightSettings(), protocols=[protocol_by_key("modbus")], bauds=[9600], reply_timeout_ms=0)
+        self.assertFalse(result.found)
+        light.replies[probe] = body + modbus_crc16(body).to_bytes(2, "little")
+        result = detect_light_protocol(light, LightSettings(), protocols=[protocol_by_key("modbus")], bauds=[9600], reply_timeout_ms=0)
+        self.assertEqual(result.protocol.key, "modbus")
+        self.assertFalse(result.protocol.confirms_brightness)
+
+    def test_silent_port_open_failure_and_cancel(self):
+        light = BaudLight(9600)
+        result = detect_light_protocol(light, LightSettings(), bauds=[9600, 19200], reply_timeout_ms=0)
+        self.assertFalse(result.found)
+        self.assertEqual(result.attempts, 2 * len(KNOWN_LIGHT_PROTOCOLS))
+        missing = detect_light_protocol(SimulatedLight(False, "COM 被佔用"), LightSettings(), reply_timeout_ms=0)
+        self.assertEqual(missing.error, "COM 被佔用")
+        cancelled = detect_light_protocol(light, LightSettings(), reply_timeout_ms=0, should_stop=lambda: True)
+        self.assertTrue(cancelled.cancelled)
+        self.assertFalse(light.is_connected)
+
+
+class ControllerLightDetectionTests(LightControllerCase):
+    def make_light(self):
+        return BaudLight(19200)
+
+    def test_detection_fills_the_form_without_saving(self):
+        light = self.light
+        light.replies[protocol_by_key("ccs").probe_bytes()] = b"@01O00\r\n"
+        self.screen.light_port_combo.setCurrentText("COM3")
+        self.screen.light_detect_button.click()
+        self.assertFalse(self.screen.light_detect_button.isEnabled())
+        self.wait(self.controller._light_executor.submit(lambda: None))
+        self.assertTrue(self.screen.light_detect_button.isEnabled())
+        self.assertIn("CCS", self.screen.light_detect_label.text())
+        form = self.screen.light_settings()
+        self.assertEqual((form.port, form.baud_rate, form.brightness_template), ("COM3", 19200, "@{channel:02}F{value:03}{checksum}"))
+        self.assertEqual(self.store.load().light, LightSettings(), "detection never saves settings")
+        self.assertEqual(self.notices[-1][1], "success")
+        self.assertFalse(light.is_connected)
+
+    def test_detection_refused_while_monitoring_uses_the_light(self):
+        self.controller._light_for_monitoring = True
+        self.assertIsNone(self.controller.detect_light(LightSettings()))
+        self.assertIn("停止監控", self.notices[-1][0])
+
+    def test_protocol_template_and_detect_are_admin_only(self):
+        self.screen.light_protocol_combo.setCurrentIndex(self.screen.light_protocol_combo.findData("sa"))
+        self.screen._fill_light_protocol()
+        self.assertEqual(self.screen.light_settings().brightness_template, "S{channel}{value:04}#")
+        self.screen.set_mode("eng")
+        self.assertFalse(self.screen.light_detect_button.isEnabled())
+        self.assertFalse(self.screen.light_protocol_combo.isEnabled())
 
 
 if __name__ == "__main__":
