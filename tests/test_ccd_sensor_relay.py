@@ -486,6 +486,35 @@ class ControllerSensorRelayTests(unittest.TestCase):
         self.assertFalse(self.controller.sensor_relay_running)
         self.assertEqual(self.screen.status_values["trigger_monitor"].text(), "未啟動")
 
+    def _second_edge_during_capture(self, travel: int) -> list[str]:
+        self.screen.preview_button.click()
+        self.assertTrue(_wait_until(lambda: self.controller.sensor_relay_stats.polls > 1))
+        self._edge()
+        self.assertTrue(_wait_until(lambda: self.controller._sensor_capture_in_flight))
+        self.meter_wheel.set_encoder(self.meter_wheel.read_encoder() + travel)
+        self._edge(False)
+        self.assertTrue(_wait_until(lambda: self.controller.sensor_relay_stats.di_active is False))
+        time.sleep(0.06)
+        self._edge()
+        self.assertTrue(_wait_until(lambda: any("E-610" in text for text, _kind in self.notices)))
+        return [text for text, _kind in self.notices if "E-610" in text]
+
+    def test_a_frame_longer_than_the_product_pitch_names_the_length_to_use(self):
+        self._setup(TriggerSettings(TriggerMode.SOFTWARE), length=100)
+        notices = self._second_edge_during_capture(travel=40)
+        self.assertEqual(len(notices), 1, "one conclusion per capture, not one per skipped edge")
+        self.assertIn("[E-6106]", notices[0])
+        self.assertIn("只走 40 格", notices[0])
+        self.assertIn("Length 改為 40 行以內", notices[0])
+        self.camera.complete_capture()
+
+    def test_enough_travel_without_a_frame_points_at_the_line_trigger(self):
+        self._setup(TriggerSettings(TriggerMode.SOFTWARE), length=10)
+        notices = self._second_edge_during_capture(travel=50)
+        self.assertIn("[E-6107]", notices[0])
+        self.assertIn("CMP_OUT", notices[0])
+        self.camera.complete_capture()
+
     def test_sensor_does_not_snap_when_meter_disconnects_before_edge(self):
         self._setup(TriggerSettings(TriggerMode.SOFTWARE))
         self.screen.preview_button.click()

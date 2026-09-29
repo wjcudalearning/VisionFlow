@@ -69,7 +69,7 @@ from devices.ccd_models import (
 )
 from devices.device_check import DeviceCheckReport
 from devices.frame_writer import SaveQueueStats
-from devices.light_protocols import KNOWN_LIGHT_PROTOCOLS, LightDetection, apply_protocol, protocol_by_key
+from devices.light_protocols import KNOWN_LIGHT_PROTOCOLS, TRIAL_LEVEL_DEFAULT, LightDetection, apply_protocol, protocol_by_key
 from devices.sensor_relay import MODE_LABELS as SENSOR_RELAY_MODE_LABELS
 from devices.trigger_diagnosis import SEVERITY_LABELS as TRIGGER_DIAGNOSIS_SEVERITY_LABELS
 from gui import icons
@@ -256,6 +256,9 @@ class CcdScreen(QWidget):
     light_brightness_applied = Signal(object)
     light_test_requested = Signal(str)
     light_detect_requested = Signal(object)
+    light_trial_requested = Signal(object, int)
+    light_trial_answered = Signal(bool)
+    light_trial_stop_requested = Signal()
     device_check_requested = Signal()
     quick_device_check_requested = Signal()
     guided_trigger_start_requested = Signal()
@@ -905,7 +908,28 @@ class CcdScreen(QWidget):
             self.light_protocol_combo.addItem(protocol.label, protocol.key)
             self.light_protocol_combo.setItemData(self.light_protocol_combo.count() - 1, protocol.note, Qt.ItemDataRole.ToolTipRole)
         self.light_protocol_combo.activated.connect(self._fill_light_protocol)
-        panel.add_widget(_row(self.light_detect_button, self.light_protocol_combo, stretch_last=False))
+        self.light_trial_button = self.gate.register(_button("逐一試亮", "primary", "play"))
+        self.light_trial_button.setToolTip("依序用目前設定與各種常見協定開燈，每組由你看燈有沒有亮；按「有亮」就保存那一組。")
+        self.light_trial_button.clicked.connect(
+            lambda: self.light_trial_requested.emit(self.light_settings(), self._light_trial_level())
+        )
+        panel.add_widget(_row(self.light_trial_button, self.light_detect_button, self.light_protocol_combo, stretch_last=False))
+        self.light_trial_widget = QWidget()
+        trial_layout = QVBoxLayout(self.light_trial_widget)
+        trial_layout.setContentsMargins(0, 0, 0, 0)
+        self.light_trial_label = _mono_value("", 13)
+        self.light_trial_label.setWordWrap(True)
+        self.light_trial_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        trial_layout.addWidget(self.light_trial_label)
+        self.light_trial_lit_button = self.gate.register(_button("有亮", "primary", "check"))
+        self.light_trial_dark_button = self.gate.register(_button("沒亮，下一個", icon_name="play"))
+        self.light_trial_stop_button = self.gate.register(_button("停止", "danger-ghost", "x"))
+        self.light_trial_lit_button.clicked.connect(lambda: self.light_trial_answered.emit(True))
+        self.light_trial_dark_button.clicked.connect(lambda: self.light_trial_answered.emit(False))
+        self.light_trial_stop_button.clicked.connect(self.light_trial_stop_requested.emit)
+        trial_layout.addWidget(_row(self.light_trial_lit_button, self.light_trial_dark_button, self.light_trial_stop_button))
+        self.light_trial_widget.setVisible(False)
+        panel.add_widget(self.light_trial_widget)
         self.light_detect_label = _hint(color=COLORS["text_2"])
         self.light_detect_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.light_detect_label.setVisible(False)
@@ -1032,6 +1056,24 @@ class CcdScreen(QWidget):
         self.set_light_settings(filled)
         # The form now shows unsaved values; keep the saved settings as the reference.
         self._light_settings = current
+
+    def _light_trial_level(self) -> int:
+        """The brightest level typed in the panel, or a clearly visible default when all are 0."""
+        levels = [int(stepper.value()) for stepper in self.light_brightness_inputs.values()]
+        return max(levels) if levels and max(levels) > 0 else TRIAL_LEVEL_DEFAULT
+
+    def show_light_trial(self, step) -> None:
+        running = step is not None
+        self.light_trial_widget.setVisible(running)
+        self.gate.set_enabled(self.light_trial_button, not running)
+        self.gate.set_enabled(self.light_detect_button, not running)
+        if not running:
+            return
+        lines = [f"第 {step.index + 1}／{step.total} 組：{step.label}", "現在燈有亮嗎？"]
+        if step.error:
+            lines.append(f"這組送不出去：{step.error}（請按「沒亮，下一個」）")
+        lines.extend(step.replies[-4:])
+        self.light_trial_label.setText("\n".join(lines))
 
     def set_light_detect_running(self, running: bool) -> None:
         self.light_detect_button.setText("偵測中…" if running else "自動偵測")

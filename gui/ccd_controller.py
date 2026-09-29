@@ -80,7 +80,14 @@ from devices.device_check import (
     check_light,
     write_report,
 )
-from devices.light_protocols import KNOWN_LIGHT_PROTOCOLS, LightDetection, detect_light_protocol
+from devices.light_protocols import (
+    KNOWN_LIGHT_PROTOCOLS,
+    TRIAL_LEVEL_DEFAULT,
+    LightDetection,
+    LightTrialCandidate,
+    detect_light_protocol,
+    trial_candidates,
+)
 from devices.serial_light import describe_bytes, encode_command, render_brightness, render_switch_command
 from devices.sensor_relay import MODE_FORWARD, MODE_LABELS, MODE_SNAP, SensorRelay, relay_mode
 from devices.trigger_automation import (
@@ -241,6 +248,17 @@ class LightStatus:
 
 
 @dataclass(frozen=True)
+class LightTrialStep:
+    """The candidate currently switched on during 逐一試亮, waiting for the operator's answer."""
+
+    label: str
+    index: int
+    total: int
+    replies: tuple[str, ...] = ()
+    error: str = ""
+
+
+@dataclass(frozen=True)
 class CcdCameraSettingsView:
     connection: CameraConnectionSettings
     product: CameraRecipeSettings
@@ -280,6 +298,8 @@ class CcdController(QObject, LogMixin):
     light_detect_running_changed = Signal(bool)
     light_detected = Signal(object)
     #: Camera monitoring is accepting frames (progress text) / cannot run (reason); the owner stops it.
+    #: `LightTrialStep` while 逐一試亮 waits for an answer, None when the trial ends.
+    light_trial_changed = Signal(object)
     camera_monitor_armed = Signal(str)
     camera_monitor_failed = Signal(str)
     #: True while the one-click device self-check runs; DeviceCheckReport when it ends.
@@ -305,6 +325,7 @@ class CcdController(QObject, LogMixin):
     _sensor_relay_failed = Signal(str)
     _light_done = Signal(object)
     _light_detect_done = Signal(object)
+    _light_trial_done = Signal(object)
     _device_check_light_done = Signal(object)
     _legacy_scan_done = Signal(object)
     _auto_save_rejected = Signal()
@@ -346,11 +367,16 @@ class CcdController(QObject, LogMixin):
         self._sensor_capture_start_encoder: int | None = None
         self._sensor_capture_expected_counts = 0
         self._sensor_capture_started_at = 0.0
+        self._sensor_busy_noticed = False
         # One thread owns every serial exchange with the light, so commands never interleave.
         self._light_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ccd-light")
         self._light_status = LightStatus()
         self._light_for_monitoring = False
         self._light_detecting = False
+        # 逐一試亮: candidates, the index switched on now, and whether an answer is awaited.
+        self._light_trial: list[LightTrialCandidate] | None = None
+        self._light_trial_index = 0
+        self._light_trial_waiting = False
         # Items of the running device self-check and the keys still waiting for a worker.
         self._device_check_items: dict[str, CheckItem] | None = None
         self._device_check_waiting: set[str] = set()
@@ -407,6 +433,7 @@ class CcdController(QObject, LogMixin):
         self._sensor_relay_failed.connect(self._on_sensor_relay_failed, queued)
         self._light_done.connect(self._finish_light, queued)
         self._light_detect_done.connect(self._finish_light_detect, queued)
+        self._light_trial_done.connect(self._show_light_trial_step, queued)
         self._device_check_light_done.connect(self._finish_device_check_item, queued)
         self._legacy_scan_done.connect(self._finish_legacy_scan, queued)
         self._auto_save_rejected.connect(self._on_auto_save_rejected, queued)
@@ -475,6 +502,9 @@ class CcdController(QObject, LogMixin):
         screen.light_brightness_applied.connect(self.set_light_brightness)
         screen.light_test_requested.connect(self.send_light_test)
         screen.light_detect_requested.connect(self.detect_light)
+        screen.light_trial_requested.connect(self.start_light_trial)
+        screen.light_trial_answered.connect(self.answer_light_trial)
+        screen.light_trial_stop_requested.connect(self.stop_light_trial)
         screen.device_check_requested.connect(self.start_device_check)
         screen.quick_device_check_requested.connect(self.quick_device_check)
 
@@ -498,6 +528,7 @@ class CcdController(QObject, LogMixin):
         self.light_settings_changed.connect(screen.set_light_settings)
         self.light_detect_running_changed.connect(screen.set_light_detect_running)
         self.light_detected.connect(screen.show_light_detection)
+        self.light_trial_changed.connect(screen.show_light_trial)
         self.device_check_running_changed.connect(screen.set_device_check_running)
         self.device_check_finished.connect(screen.show_device_check)
 
@@ -1538,6 +1569,7 @@ class CcdController(QObject, LogMixin):
             self._sensor_capture_expected_counts = self._applied[1].length_lines * self._machine.meter_wheel.compare_increment
             self._sensor_capture_in_flight = True
             self._sensor_capture_started_at = time.monotonic()
+            self._sensor_busy_noticed = False
             try:
                 self.devices.camera.capture_frame()
             except DeviceError as exc:
@@ -1573,11 +1605,32 @@ class CcdController(QObject, LogMixin):
         except DeviceError as exc:
             return message + f"米輪讀值失敗：{exc}。"
         expected = self._sensor_capture_expected_counts
-        lines = (
-            min(self._applied[1].length_lines, moved // max(1, self._machine.meter_wheel.compare_increment))
-            if self._applied else 0
-        )
-        return message + f"米輪已走約 {moved}/{expected} 格（約 {lines} 行）；若已足夠仍未出圖，檢查 CMP_OUT→擷取卡線觸發、CCF 與 CROP_HEIGHT。"
+        increment = max(1, self._machine.meter_wheel.compare_increment)
+        length = self._applied[1].length_lines if self._applied else 0
+        lines = min(length, moved // increment)
+        if not self._sensor_busy_noticed:
+            # The encoder travel between two Sensor edges is the product pitch: say which side is wrong once.
+            self._sensor_busy_noticed = True
+            if moved < expected:
+                self.notice.emit(
+                    tag(
+                        "E-6106",
+                        f"一張影像比產品間距長：兩次 Sensor 之間米輪只走 {moved} 格，但 Length {length} 行 × 每行 {increment} 格"
+                        f" = {expected} 格，影像會延伸到下一個產品，下一個 Sensor 只能略過。請把 Length 改為 {max(1, moved // increment)} 行以內，"
+                        "或確認米輪「自動遞增」（每行格數）。",
+                    ),
+                    "warning",
+                )
+            else:
+                self.notice.emit(
+                    tag(
+                        "E-6107",
+                        f"米輪已走 {moved} 格（一張需要 {expected} 格），影像仍未完成：擷取卡沒收到足夠的線觸發。"
+                        "請檢查米輪 CMP_OUT→擷取卡的接線、CCF 的線觸發設定與 CROP_HEIGHT。",
+                    ),
+                    "warning",
+                )
+        return message + f"米輪已走約 {moved}/{expected} 格（約 {lines} 行）。"
 
     def _arm_compare_for_sensor_capture(self) -> int | None:
         """Keep the compare ahead of the encoder so CMP_OUT supplies the frame's line pulses."""
@@ -1885,6 +1938,139 @@ class CcdController(QObject, LogMixin):
         else:
             self.notice.emit(tag("E-2108", f"{result.port} 沒有偵測到已知格式的光源控制器（試了 {result.attempts} 種組合）。"), "warning")
         self.logger.info("Light detection on %s: %s at %s, unknown replies %s", result.port, result.protocol.key if result.found else "none", result.baud_rate, result.unknown_replies)
+
+    # ------------------------------------------------------------------
+    # 逐一試亮: switch each candidate command set on and let a person judge the light
+    # ------------------------------------------------------------------
+    @property
+    def light_trial_running(self) -> bool:
+        return self._light_trial is not None
+
+    def start_light_trial(self, settings: LightSettings, level: int = TRIAL_LEVEL_DEFAULT):
+        """Try the configured commands, then every known protocol and rate, one at a time.
+
+        A controller that only echoes a byte cannot be identified from its reply, so each set is
+        switched on at `level` and the operator answers 有亮／沒亮. Nothing is saved until 有亮.
+        """
+        if self._light_trial is not None:
+            return None
+        blocker = ""
+        if self._inspection_queue is not None:
+            blocker = "相機直連監控正在使用光源，請先停止監控再試亮。"
+        elif self._light_detecting or self.device_check_running:
+            blocker = "光源偵測或設備自檢執行中，請等待完成再試亮。"
+        elif self.devices.light.is_connected:
+            blocker = "光源目前已連線，請先按「關燈」再試亮。"
+        availability = self.devices.light.availability()
+        if not blocker and not availability.available:
+            blocker = ensure_tag("E-2101", f"無法試亮：{availability.reason}")
+        if blocker:
+            self.notice.emit(blocker, "warning")
+            return None
+        self._light_trial = trial_candidates(settings.normalized(), level)
+        self._light_trial_index = 0
+        self.notice.emit(
+            f"逐一試亮開始：共 {len(self._light_trial)} 組指令，每組開燈後請看燈有沒有亮，再按「有亮」或「沒亮，下一個」。",
+            "info",
+        )
+        return self._switch_trial_candidate()
+
+    def _trial_job(self, settings: LightSettings, steps, disconnect: bool):
+        """Send every step without judging replies (a lone '$' must not stop the trial)."""
+        light = self.devices.light
+
+        def job() -> tuple[tuple[str, ...], str]:
+            replies: list[str] = []
+            try:
+                light.connect(settings)
+                for index, (label, command) in enumerate(steps):
+                    reply = light.send(command, settings.reply_timeout_ms)
+                    replies.append(f"{label}：送出 {describe_bytes(command)}" + (f"，回覆 {describe_bytes(reply)}" if reply else "，無回覆"))
+                    if settings.command_delay_ms and index < len(steps) - 1:
+                        time.sleep(settings.command_delay_ms / 1000.0)
+            except DeviceError as exc:
+                return tuple(replies), str(exc)
+            finally:
+                if disconnect:
+                    light.disconnect()
+            return tuple(replies), ""
+
+        return self._light_executor.submit(job)
+
+    def _switch_trial_candidate(self):
+        candidates = self._light_trial
+        if candidates is None:
+            return None
+        if self._light_trial_index >= len(candidates):
+            self._end_light_trial()
+            self.notice.emit(
+                tag("E-2109", f"逐一試亮：{len(candidates)} 組指令都沒有亮。請把光源面板下方的送出／回覆內容拍回來，或確認控制器的 RS-232 接線與電源。"),
+                "warning",
+            )
+            return None
+        candidate = candidates[self._light_trial_index]
+        index, total = self._light_trial_index, len(candidates)
+        try:
+            steps = self._light_steps(candidate.settings, "on")
+        except DeviceError as exc:
+            self._light_trial_done.emit(LightTrialStep(candidate.label, index, total, (), str(exc)))
+            return None
+        self._light_trial_waiting = False
+        future = self._trial_job(candidate.settings, steps, disconnect=False)
+        future.add_done_callback(
+            lambda done: self._light_trial_done.emit(LightTrialStep(candidate.label, index, total, *done.result()))
+        )
+        return future
+
+    def _show_light_trial_step(self, step: LightTrialStep) -> None:
+        if self._light_trial is None or self._closed or step.index != self._light_trial_index:
+            return
+        self._light_trial_waiting = True
+        self._light_status = LightStatus(self.devices.light.is_connected, not step.error, step.replies, step.error, "trial", not step.error)
+        self.light_changed.emit(self._light_status)
+        self.light_trial_changed.emit(step)
+
+    def answer_light_trial(self, lit: bool):
+        """有亮: keep the light on and save this set. 沒亮: switch it off and try the next one."""
+        candidates = self._light_trial
+        if candidates is None or not self._light_trial_waiting:
+            return None
+        candidate = candidates[self._light_trial_index]
+        if lit:
+            settings = replace(candidate.settings, enabled=self._machine.light.enabled).normalized()
+            self._end_light_trial(keep_on=True)
+            if self._save_machine(replace(self._machine, light=settings)):
+                self.light_settings_changed.emit(settings)
+                self.notice.emit(f"已確認會亮：{candidate.label}。這組設定已保存為光源設定。", "success")
+            return None
+        self._light_trial_waiting = False
+        try:
+            off_steps = self._light_steps(candidate.settings, "off")
+        except DeviceError:
+            off_steps = []
+        self._trial_job(candidate.settings, off_steps, disconnect=True)
+        self._light_trial_index += 1
+        return self._switch_trial_candidate()
+
+    def stop_light_trial(self):
+        candidates = self._light_trial
+        if candidates is None:
+            return None
+        settings = candidates[min(self._light_trial_index, len(candidates) - 1)].settings
+        self._end_light_trial()
+        try:
+            off_steps = self._light_steps(settings, "off")
+        except DeviceError:
+            off_steps = []
+        self.notice.emit("逐一試亮已停止，光源設定沒有變更。", "info")
+        return self._trial_job(settings, off_steps, disconnect=True)
+
+    def _end_light_trial(self, keep_on: bool = False) -> None:
+        self._light_trial = None
+        self._light_trial_waiting = False
+        self._light_status = LightStatus(keep_on and self.devices.light.is_connected, keep_on, self._light_status.replies, "", "trial", True)
+        self.light_changed.emit(self._light_status)
+        self.light_trial_changed.emit(None)
 
     def _close_light(self) -> None:
         """Turn the light off before exit, waiting briefly for the serial writes."""

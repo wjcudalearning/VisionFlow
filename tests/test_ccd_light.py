@@ -19,7 +19,7 @@ from devices.ccd_models import CcdMachineSettings, DeviceError, LightChannel, Li
 from devices.ccd_settings_store import CcdMachineSettingsStore, settings_from_dict, settings_to_dict
 from devices.factory import CcdDevices, UnavailableLight
 from devices.legacy_program_import import STATUS_PARTIAL, STATUS_READY, scan_legacy_program
-from devices.light_protocols import KNOWN_LIGHT_PROTOCOLS, apply_protocol, detect_light_protocol, protocol_by_key
+from devices.light_protocols import KNOWN_LIGHT_PROTOCOLS, apply_protocol, detect_light_protocol, protocol_by_key, trial_candidates
 from devices.serial_light import (
     DotNetSerialLight,
     describe_bytes,
@@ -560,6 +560,76 @@ class OptSwitchControllerTests(LightControllerCase):
         self.assertIsNone(self.controller.apply_light_settings(LightSettings(on_commands=("{channel:02X}",), channels=(LightChannel("A", 0),))))
         self.assertIn("光源設定未保存", self.notices[-1][0])
         self.assertEqual(self.store.load().light, LightSettings())
+
+
+class LightTrialTests(LightControllerCase):
+    IMPORTED = LightSettings(port="COM3", baud_rate=19200, line_ending="\r", on_commands=("ON",), brightness_template="B{value:03}",
+                             channels=(LightChannel("1", 0),), command_delay_ms=0, reply_timeout_ms=0)
+
+    def drain(self):
+        self.wait(self.controller._light_executor.submit(lambda: None))
+
+    def test_candidates_start_with_the_configured_commands_at_a_visible_level(self):
+        candidates = trial_candidates(self.IMPORTED, 180)
+        self.assertIn("目前設定", candidates[0].label)
+        self.assertEqual(candidates[0].settings.baud_rate, 19200)
+        self.assertTrue(all(c.brightness == 180 for cand in candidates for c in cand.settings.channels))
+        keys = {(c.settings.baud_rate, c.settings.brightness_template) for c in candidates}
+        self.assertEqual(len(keys), len(candidates), "no duplicate candidates")
+        self.assertEqual(trial_candidates(LightSettings())[0].label.split("，")[0], KNOWN_LIGHT_PROTOCOLS[0].label.split("，")[0])
+
+    def test_dark_then_lit_saves_the_lit_set_and_keeps_the_light_on(self):
+        self.light.replies = {}
+        self.light.fail_sends = False
+        for reply_to in (b"ON\r", b"B200\r"):
+            self.light.replies[reply_to] = b"$"  # an echo that identifies nothing must not stop the trial
+        self.controller.start_light_trial(self.IMPORTED, 200)
+        self.drain()
+        self.assertTrue(self.screen.light_trial_widget.isVisibleTo(self.screen))
+        self.assertIn("第 1／", self.screen.light_trial_label.text())
+        self.assertEqual(self.light.sent, [b"ON\r", b"B200\r"])
+        self.assertIn("回覆 $", self.screen.light_trial_label.text())
+
+        self.light.sent.clear()
+        self.screen.light_trial_dark_button.click()
+        self.drain()
+        self.assertEqual(self.light.sent[0], b"B000\r", "the dark set is switched off before the next one")
+        self.assertIn("第 2／", self.screen.light_trial_label.text())
+        second = trial_candidates(self.IMPORTED, 200)[1]
+
+        self.screen.light_trial_lit_button.click()
+        self.drain()
+        saved = self.store.load().light
+        self.assertEqual((saved.baud_rate, saved.brightness_template), (second.settings.baud_rate, second.settings.brightness_template))
+        self.assertEqual(saved.channels[0].brightness, 200)
+        self.assertTrue(self.light.is_connected, "the confirmed light stays on")
+        self.assertFalse(self.screen.light_trial_widget.isVisibleTo(self.screen))
+        self.assertIn("已確認會亮", self.notices[-1][0])
+
+    def test_all_dark_reports_e2109_and_stop_changes_nothing(self):
+        before = self.store.load().light
+        self.controller.start_light_trial(self.IMPORTED, 200)
+        total = len(trial_candidates(self.IMPORTED, 200))
+        for _ in range(total):
+            self.drain()
+            self.controller.answer_light_trial(False)
+        self.drain()
+        self.assertIn("[E-2109]", self.notices[-1][0])
+        self.assertFalse(self.controller.light_trial_running)
+        self.assertFalse(self.light.is_connected)
+        self.assertEqual(self.store.load().light, before)
+
+        self.controller.start_light_trial(self.IMPORTED, 200)
+        self.drain()
+        self.wait(self.controller.stop_light_trial())
+        self.assertFalse(self.light.is_connected)
+        self.assertEqual(self.store.load().light, before)
+
+    def test_trial_is_refused_while_the_light_is_connected(self):
+        self.light.connect(LightSettings())
+        self.assertIsNone(self.controller.start_light_trial(self.IMPORTED, 200))
+        self.assertIn("先按「關燈」", self.notices[-1][0])
+        self.assertFalse(self.controller.light_trial_running)
 
 
 def replace_channels(settings: LightSettings, channels) -> LightSettings:

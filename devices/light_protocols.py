@@ -145,6 +145,50 @@ def apply_protocol(settings: LightSettings, protocol: LightProtocol, baud_rate: 
 
 
 @dataclass(frozen=True)
+class LightTrialCandidate:
+    """One command set the operator switches on and judges by eye ("燈有亮嗎？")."""
+
+    label: str
+    settings: LightSettings
+
+
+TRIAL_LEVEL_DEFAULT = 200
+
+
+def trial_candidates(base: LightSettings, level: int = TRIAL_LEVEL_DEFAULT) -> list[LightTrialCandidate]:
+    """The configured commands first (usually from the original program), then every known protocol
+    at each of its common rates. Every channel is set to `level`, so a working set is visibly lit.
+
+    Controllers that only echo a byte (the SAT-24W350-R1 answered '$') cannot be identified from the
+    reply; a person watching the light is the only reliable check.
+    """
+    base = base.normalized()
+    level = max(1, min(int(level), base.brightness_max))
+
+    def lit(settings: LightSettings) -> LightSettings:
+        settings = settings.normalized()
+        return replace(settings, channels=tuple(LightChannel(c.channel, min(level, settings.brightness_max)) for c in settings.channels))
+
+    out: list[LightTrialCandidate] = []
+    seen: set[tuple] = set()
+
+    def add(label: str, settings: LightSettings) -> None:
+        settings = lit(settings)
+        key = (settings.baud_rate, settings.line_ending, settings.on_commands, settings.brightness_template,
+               tuple(c.channel for c in settings.channels))
+        if key not in seen:
+            seen.add(key)
+            out.append(LightTrialCandidate(label, settings))
+
+    if base.controls_brightness or base.on_commands:
+        add(f"目前設定（Baud {base.baud_rate}，通常是原程式匯入的指令）", base)
+    for protocol in KNOWN_LIGHT_PROTOCOLS:
+        for baud in protocol.baud_rates:
+            add(f"{protocol.label}，Baud {baud}", apply_protocol(base, protocol, baud))
+    return out
+
+
+@dataclass(frozen=True)
 class LightDetection:
     """Outcome of one auto-detection run on one COM port."""
 

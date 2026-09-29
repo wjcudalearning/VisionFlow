@@ -883,6 +883,15 @@ class AcquisitionTests(SaperaCameraTestBase):
         self.assertIn("trash", self.camera.status().message)
         self.interop.on_signal(False)
         self.assertFalse(self.camera.status().has_signal)
+        self.interop.on_signal(True)
+        # A trash frame ends a Snap: the camera must not stay busy waiting for it.
+        self.camera.capture_frame()
+        self.assertEqual(self.camera.status().state, CameraState.CAPTURING)
+        self.interop.on_frame(True)
+        self.assertEqual(self.camera.status().state, CameraState.IDLE)
+        self.assertEqual(self.frames, [])
+        self.interop.on_signal(False)
+        self.assertFalse(self.camera.status().has_signal)
         self.assertIn("E-0505", self.camera.status().message)
 
     def test_frames_after_disconnect_are_ignored(self):

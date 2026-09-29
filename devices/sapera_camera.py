@@ -398,7 +398,11 @@ class SaperaLineScanCamera(LineScanCamera):
     def _on_frame(self, trash: bool) -> None:
         if trash:
             with self._state_lock:
-                self._message = "影像落在 trash buffer（處理速度跟不上取像）。"
+                self._message = "影像落在 trash buffer（處理速度跟不上取像），這張沒有保存。"
+                # The frame is over even though its pixels were dropped; staying CAPTURING would make
+                # every later Snap/Sensor trigger wait for a frame that never comes.
+                if self._state == CameraState.CAPTURING:
+                    self._state = CameraState.IDLE
             return
         frame = None
         error = None
