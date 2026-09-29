@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from devices.ccd_models import MultipleRate
@@ -528,6 +528,26 @@ def _literal(text: str):
     return None
 
 
+def _read_target(args) -> str | None:
+    """The variable a DAQNavi `Read` fills: `out data` / `out byte data` (2 args) or the buffer (3 args)."""
+    target = args[-1] if len(args) in (2, 3) else ""
+    target = re.sub(r"^out\s+(?:var\s+|byte\s+|Byte\s+|int\s+)?", "", target.strip())
+    return target if re.fullmatch(r"\w+", target or "") else None
+
+
+_OPERAND = r"(?:0[xX][0-9A-Fa-f]+|\d+|[A-Za-z_][\w.]*)"
+
+
+def _bit_tests(variable: str) -> re.Pattern:
+    """`v >> n & 1`, `v & (1 << n)` and `v & mask`, optionally on `v[k]` and inside parentheses."""
+    name = rf"\b{re.escape(variable)}(?:\s*\[\s*(?P<element>{_OPERAND})\s*\])?"
+    return re.compile(
+        rf"{name}\s*\)?\s*(?:>>\s*\(?\s*(?P<shift>{_OPERAND})\s*\)?\s*\)?\s*&\s*(?:0[xX]0*1|1)\b"
+        rf"|&\s*\(?\s*(?:0[xX]0*1|1)\s*<<\s*(?P<shift2>{_OPERAND})"
+        rf"|&\s*(?P<mask>{_OPERAND}))"
+    )
+
+
 _CS_ESCAPE = re.compile(r"\\(u[0-9a-fA-F]{4}|x[0-9a-fA-F]{1,4}|.)")
 _CS_SIMPLE = {"r": "\r", "n": "\n", "t": "\t", "0": "\0", "a": "\a", "b": "\b", "f": "\f", "v": "\v"}
 
@@ -1024,14 +1044,70 @@ class LegacyProgramAnalyzer:
         ]
         out += self._do_pulse(writes)
         if not reads:
-            whole = [c for c in find_calls(self.files, ["Read"], member=True) if re.search(r"\bInstantDi", c.file.text)]
+            whole = [c for c in find_calls(self.files, ["Read"], member=True) if c.args and re.search(r"\bInstantDi", c.file.text)]
             if whole:
-                out.append(_warning("warn.di_read", "Sensor DI 讀取方式", "原程式整個 port 一起讀（Read），bit 要看後面的位元判斷，請手動確認 DI port／bit。", whole[:3]))
+                out += self._whole_port_reads(whole)
         interrupts = find_calls(self.files, ["SnapStart"], member=True) + [
             Call(s, m.start(), ()) for s in self.files for m in re.finditer(r"\bDiintChannels\b|\.Interrupt\s*\+=", s.text)
         ]
         if interrupts:
             out.append(_warning("warn.di_interrupt", "Sensor 偵測方式", "原程式用 DI 中斷偵測 Sensor；VisionFlow 用定時讀取，延遲約為「DI 讀取間隔」。", interrupts[:3]))
+        return out
+
+    def _whole_port_reads(self, whole: list[Call]) -> list[ImportFinding | None]:
+        """`InstantDiCtrl.Read(port, out data)` / `Read(start, count, buffer)`: port from the call, bit
+        from how the method tests `data` afterwards (`data >> 3 & 1`, `data & 0x08`, `data & (1 << 3)`).
+
+        Both are inferred, never pre-selected: the program may test several bits of the same byte.
+        """
+        r = self.resolver
+        ports: dict = {}
+        port_unresolved: list[SourceHit] = []
+        bits: dict = {}
+        for call in whole:
+            variable = _read_target(call.args)
+            if variable is None:
+                continue
+            port_values = r.values(call.args[0], call.file, call.index)
+            offset = 0
+            method = call.file.method_at(call.index)
+            end = method.body_end if method is not None else min(len(call.file.text), call.index + 2000)
+            body = call.file.text[call.index : end]
+            for match in _bit_tests(variable).finditer(body):
+                element = match.group("element")
+                offset_values = r.values(element, call.file, call.index) if element else {0}
+                offset = next(iter(offset_values)) if len(offset_values) == 1 else 0
+                at = call.index + match.start()
+                shift = match.group("shift") or match.group("shift2")
+                if shift:
+                    candidates = {int(v) for v in r.values(shift, call.file, at) if isinstance(v, int) and not isinstance(v, bool)}
+                else:
+                    masks = r.values(match.group("mask"), call.file, at)
+                    candidates = {
+                        int(m).bit_length() - 1 for m in masks if isinstance(m, int) and not isinstance(m, bool) and m > 0 and m & (m - 1) == 0
+                    }
+                hit = SourceHit(call.hit().file, call.file.line_of(call.index + match.start()), method.name if method else "", match.group(0).strip())
+                for bit in candidates:
+                    if 0 <= bit < 8:
+                        bits.setdefault(bit, []).append(hit)
+            if port_values:
+                for port in port_values:
+                    if isinstance(port, int):
+                        ports.setdefault(port + int(offset), []).append(call.hit())
+            else:
+                port_unresolved.append(call.hit())
+        note = "原程式整個 port 一起讀（Read），由讀取後的位元判斷推定；同一個 byte 可能判斷多個 bit，請確認哪一個是 Sensor。"
+        out: list[ImportFinding | None] = []
+        for key, label, found, unresolved in (
+            ("sensor_relay.di_port", "Sensor DI port", ports, port_unresolved),
+            ("sensor_relay.di_bit", "Sensor DI bit", bits, []),
+        ):
+            finding = _finding(key, label, found, unresolved, convert=int)
+            if finding is not None and finding.status == STATUS_READY:
+                finding = replace(finding, status=STATUS_PARTIAL, note=note)
+            out.append(finding)
+        if not bits:
+            out.append(_warning("warn.di_read", "Sensor DI 讀取方式", "原程式整個 port 一起讀（Read），但追不到後面判斷哪個 bit，請手動確認 DI port／bit。", whole[:3]))
         return out
 
     def _designer_device(self) -> ImportFinding | None:

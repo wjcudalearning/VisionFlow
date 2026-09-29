@@ -315,6 +315,29 @@ class ObjectOrientedProgramTests(unittest.TestCase):
         self.assertIn("中斷", report.finding("warn.di_interrupt").display)
         self.assertIn("SHAFT_ENCODER_DROP = 2", report.finding("warn.shaft_encoder").display)
 
+    def test_whole_port_read_infers_port_and_bit_from_the_bit_test(self):
+        read_bit = "_di.ReadBit(SensorPort, Bits.Sensor, out state);\n            return state == 1;"
+        for body, port, bit in (
+            ("_di.Read(SensorPort, out state);\n            return ((state >> Bits.Sensor) & 1) == 1;", 0, 3),
+            ("_di.Read(SensorPort, out state);\n            return (state & 0x10) != 0;", 0, 4),
+            ("_di.Read(SensorPort, out state);\n            return (state & (1 << 6)) != 0;", 0, 6),
+            ("byte[] buffer = new byte[2];\n            _di.Read(SensorPort, 2, buffer);\n            return (buffer[1] & 0x02) != 0;", 1, 1),
+        ):
+            with self.subTest(body=body):
+                report = self.scan({"Machine/Devices/SensorRelay.cs": RELAY.replace(read_bit, body)})
+                port_finding = self.assertValue(report, "sensor_relay.di_port", port, STATUS_PARTIAL)
+                bit_finding = self.assertValue(report, "sensor_relay.di_bit", bit, STATUS_PARTIAL)
+                self.assertIn("整個 port", bit_finding.note)
+                self.assertFalse(bit_finding.preselected, "an inferred bit is never pre-selected")
+                self.assertTrue(port_finding.applicable)
+                self.assertIsNone(report.finding("warn.di_read"))
+
+    def test_whole_port_read_without_a_bit_test_still_warns(self):
+        body = "_di.Read(SensorPort, out state);\n            return Check(state);"
+        report = self.scan({"Machine/Devices/SensorRelay.cs": RELAY.replace("_di.ReadBit(SensorPort, Bits.Sensor, out state);\n            return state == 1;", body)})
+        self.assertIsNone(report.finding("sensor_relay.di_bit"))
+        self.assertEqual(report.finding("warn.di_read").status, STATUS_WARNING)
+
     def test_designer_resx_device_is_decoded(self):
         relay = RELAY.replace("new DeviceInformation(board)", "new DeviceInformation(comboDevice.Text)")
         blob = base64.b64encode(b"\x00\x01stream" + "PCIe-1730,BID#1".encode("utf-16-le") + b"\x00" * 30).decode()
