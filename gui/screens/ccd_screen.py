@@ -67,6 +67,7 @@ from devices.ccd_models import (
     TriggerMode,
     TriggerSettings,
 )
+from devices.device_check import DeviceCheckReport
 from devices.frame_writer import SaveQueueStats
 from devices.light_protocols import KNOWN_LIGHT_PROTOCOLS, LightDetection, apply_protocol, protocol_by_key
 from devices.sensor_relay import MODE_LABELS as SENSOR_RELAY_MODE_LABELS
@@ -255,6 +256,7 @@ class CcdScreen(QWidget):
     light_brightness_applied = Signal(object)
     light_test_requested = Signal(str)
     light_detect_requested = Signal(object)
+    device_check_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -292,6 +294,7 @@ class CcdScreen(QWidget):
         controls_layout = QVBoxLayout(controls)
         controls_layout.setContentsMargins(0, 0, 6, 0)
         controls_layout.setSpacing(12)
+        controls_layout.addWidget(self._build_device_check_panel())
         controls_layout.addWidget(self._build_legacy_import_panel())
         controls_layout.addWidget(self._build_camera_panel())
         controls_layout.addWidget(self._build_settings_panel())
@@ -330,6 +333,42 @@ class CcdScreen(QWidget):
     # ------------------------------------------------------------------
     # construction
     # ------------------------------------------------------------------
+    def _build_device_check_panel(self) -> Panel:
+        """One button that checks every device and lists one copyable line per device (admin)."""
+        panel = Panel(title="設備自檢")
+        panel.add_widget(
+            _hint(
+                "上機時先按這裡：一次檢查相機（未連線時跑 S1–S8）、米輪、Sensor I/O（PCIe-1730）與光源，"
+                "每項一行結果並存到 outputs/logs/device_check/。只讀取狀態：不開燈、不送 DO 脈衝、不改設定。"
+                "請先關閉原機台程式，拍下或抄回「總結」那一行即可。"
+            )
+        )
+        self.device_check_button = self.gate.register(_button("一鍵設備自檢", "primary", "check"))
+        self.device_check_button.clicked.connect(self.device_check_requested.emit)
+        panel.add_widget(_row(self.device_check_button))
+        self.device_check_label = _hint()
+        self.device_check_label.setProperty("mono", "true")
+        self.device_check_label.setWordWrap(True)
+        self.device_check_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.device_check_label.setVisible(False)
+        panel.add_widget(self.device_check_label)
+        return panel
+
+    def set_device_check_running(self, running: bool) -> None:
+        self.device_check_button.setText("自檢中…" if running else "一鍵設備自檢")
+        self.gate.set_enabled(self.device_check_button, not running)
+        if running:
+            self.device_check_label.setText("正在檢查各設備，請稍候…")
+            self.device_check_label.setVisible(True)
+
+    def show_device_check(self, report: DeviceCheckReport) -> None:
+        lines = [f"總結（優先抄這行）：{report.summary_line()}"]
+        for item in report.items:
+            lines.append(item.line())
+            lines.extend(f"    {line}" for line in item.lines)
+        lines.append(f"報告：{report.report_path}")
+        self.device_check_label.setText("\n".join(lines))
+        self.device_check_label.setVisible(True)
     def _build_legacy_import_panel(self) -> Panel:
         """Admin-only smart import: read the original machine program and apply its settings."""
         panel = Panel(title="從原機台程式匯入（智能模式）")
