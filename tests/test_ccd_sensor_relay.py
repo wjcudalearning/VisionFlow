@@ -529,6 +529,14 @@ class ControllerSensorRelayTests(unittest.TestCase):
         self.assertEqual(self.meter_wheel.read_compare(), 120, "the first line starts 120 counts after the Sensor")
         self.camera.complete_capture()
 
+    def test_meter_wheel_set_values_fill_the_trigger_sequence(self):
+        self.screen.encoder_input.setValue(100)
+        self.screen.compare_input.setValue(250)
+        self.screen.sensor_snap_from_wheel_button.click()
+        settings = self.screen.sensor_relay_settings()
+        self.assertEqual((settings.snap_encoder_reset, settings.snap_encoder_value, settings.snap_compare_offset), (True, 100, 150))
+        self.assertEqual(self.store.load().sensor_relay.snap_compare_offset, 0, "filling the form saves nothing")
+
     def test_offset_without_reset_is_relative_to_the_encoder_at_the_trigger(self):
         self._setup(TriggerSettings(TriggerMode.SOFTWARE), relay=replace(ENABLED, snap_compare_offset=30))
         self.meter_wheel.set_encoder(400)

@@ -789,7 +789,12 @@ class CcdScreen(QWidget):
             "Sensor 觸發後米輪再走幾格才拍第一行（Compare = Encoder + 這個值）；0 表示下一格就開始，是 VisionFlow 原本的做法。"
         )
         form.addRow("軟體觸發起拍", _row(self.sensor_snap_reset_check, self.sensor_snap_encoder_input, stretch_last=False))
-        form.addRow("起拍偏移（格）", self.sensor_snap_offset_input)
+        self.sensor_snap_from_wheel_button = self.gate.register(_button("帶入米輪 Encoder／Compare Set 值"))
+        self.sensor_snap_from_wheel_button.setToolTip(
+            "照原 C# 程式的習慣：Encoder Set 值當原點、Compare Set 值當起拍點；只填入表單，按「套用 Sensor 中繼設定」才保存。"
+        )
+        self.sensor_snap_from_wheel_button.clicked.connect(self._fill_snap_from_meter_wheel)
+        form.addRow("起拍偏移（格）", _row(self.sensor_snap_offset_input, self.sensor_snap_from_wheel_button, stretch_last=False))
         self.sensor_assembly_edit = self.gate.register(QLineEdit())
         self.sensor_assembly_edit.setProperty("mono", "true")
         self.sensor_assembly_edit.setPlaceholderText("預設：DAQNavi 安裝位置（Automation.BDaq4.dll）")
@@ -821,6 +826,14 @@ class CcdScreen(QWidget):
         panel.add_widget(self.sensor_relay_stats_label)
         self._sensor_relay_settings = SensorRelaySettings()
         return panel
+
+    def _fill_snap_from_meter_wheel(self) -> None:
+        """Encoder Set value as the origin and Compare Set value as the first line, as the C# app used them."""
+        encoder = int(self.encoder_input.value())
+        compare = int(self.compare_input.value())
+        self.sensor_snap_reset_check.setChecked(True)
+        self.sensor_snap_encoder_input.setValue(encoder)
+        self.sensor_snap_offset_input.setValue(max(0, compare - encoder))
 
     def set_sensor_relay_availability(self, availability: DeviceAvailability) -> None:
         self.sensor_relay_availability_label.setText(f"I/O 卡不可用：{availability.reason}")
