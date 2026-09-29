@@ -75,7 +75,7 @@ from devices.device_check import (
     write_report,
 )
 from devices.light_protocols import LightDetection, detect_light_protocol
-from devices.serial_light import describe_bytes, encode_command, render_brightness
+from devices.serial_light import describe_bytes, encode_command, render_brightness, render_switch_command
 from devices.sensor_relay import MODE_FORWARD, MODE_LABELS, MODE_SNAP, SensorRelay, relay_mode
 from devices.trigger_automation import (
     SOFTWARE_TRIGGER_POLL_SEC,
@@ -1495,10 +1495,19 @@ class CcdController(QObject, LogMixin):
     def _light_steps(self, settings: LightSettings, kind: str, channels=None) -> list[tuple[str, bytes]]:
         ending = settings.line_ending
         steps: list[tuple[str, bytes]] = []
+        names = [channel.channel for channel in settings.channels]
+
+        def switch_steps(prefix: str, commands) -> list[tuple[str, bytes]]:
+            out = []
+            for index, command in enumerate(commands):
+                for channel, data in render_switch_command(command, names, ending):
+                    out.append((f"{prefix} {index + 1}" + (f"（通道 {channel}）" if channel else ""), data))
+            return out
+
         if kind == "on":
-            steps += [(f"開燈指令 {i + 1}", encode_command(c, ending)) for i, c in enumerate(settings.on_commands)]
+            steps += switch_steps("開燈指令", settings.on_commands)
         if kind == "off" and settings.off_commands:
-            return [(f"關燈指令 {i + 1}", encode_command(c, ending)) for i, c in enumerate(settings.off_commands)]
+            return switch_steps("關燈指令", settings.off_commands)
         if settings.controls_brightness and kind in ("on", "off", "brightness"):
             for channel in channels if channels is not None else settings.channels:
                 value = 0 if kind == "off" else channel.brightness
@@ -1610,6 +1619,13 @@ class CcdController(QObject, LogMixin):
     def apply_light_settings(self, settings: LightSettings):
         previous = self._machine.light
         settings = settings.normalized()
+        try:
+            # Render every command once so a bad template is refused here, not when monitoring starts.
+            for kind in ("on", "off"):
+                self._light_steps(settings, kind)
+        except DeviceError as exc:
+            self.notice.emit(f"光源設定未保存：{exc}", "error")
+            return None
         if not self._save_machine(replace(self._machine, light=settings)):
             return None
         self.light_settings_changed.emit(settings)

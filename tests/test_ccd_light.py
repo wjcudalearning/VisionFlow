@@ -18,7 +18,14 @@ from devices.ccd_settings_store import CcdMachineSettingsStore, settings_from_di
 from devices.factory import CcdDevices, UnavailableLight
 from devices.legacy_program_import import STATUS_PARTIAL, STATUS_READY, scan_legacy_program
 from devices.light_protocols import KNOWN_LIGHT_PROTOCOLS, apply_protocol, detect_light_protocol, protocol_by_key
-from devices.serial_light import DotNetSerialLight, describe_bytes, encode_command, modbus_crc16, render_brightness
+from devices.serial_light import (
+    DotNetSerialLight,
+    describe_bytes,
+    encode_command,
+    modbus_crc16,
+    render_brightness,
+    render_switch_command,
+)
 from devices.simulated import SimulatedDigitalIo, SimulatedLight, SimulatedLineScanCamera, SimulatedMeterWheel
 from gui.ccd_controller import CcdController
 from gui.screens.ccd_screen import CcdScreen
@@ -424,6 +431,38 @@ class LightProtocolTests(unittest.TestCase):
         cancelled = detect_light_protocol(light, LightSettings(), reply_timeout_ms=0, should_stop=lambda: True)
         self.assertTrue(cancelled.cancelled)
         self.assertFalse(light.is_connected)
+
+
+class SwitchCommandTests(unittest.TestCase):
+    def test_plain_commands_are_sent_once_and_templates_per_channel(self):
+        self.assertEqual(render_switch_command("@00L11D", ["1", "2"], "\r\n"), [("", b"@00L11D\r\n")])
+        self.assertEqual(render_switch_command("$1{channel}000{xor}", ["1", "2"]), [("1", b"$1100014"), ("2", b"$1200017")])
+        self.assertEqual(render_switch_command("ALL{checksum}", ["3", "4"]), [("", render_brightness("ALL{checksum}", "3", 0))])
+        with self.assertRaises(DeviceError):
+            render_switch_command("{channel:02X}", ["A"])
+
+
+class OptSwitchControllerTests(LightControllerCase):
+    def test_opt_opens_each_channel_before_brightness_and_closes_them(self):
+        opt = apply_protocol(LightSettings(enabled=True, port="COM3", command_delay_ms=0, reply_timeout_ms=0), protocol_by_key("opt"))
+        opt = replace_channels(opt, (LightChannel("1", 255), LightChannel("2", 16)))
+        self.wait(self.controller.apply_light_settings(opt))
+        self.assertEqual(self.light.sent, [b"$1100014", b"$1200017", b"$310FF16", render_brightness("$3{channel}{value:03X}{xor}", "2", 16)])
+        self.assertIn("開燈指令 1（通道 2）", self.controller.light_status.replies[1])
+        self.light.sent.clear()
+        self.wait(self.controller.light_off())
+        self.assertEqual(self.light.sent, [b"$2100017", render_switch_command("$2{channel}000{xor}", ["2"])[0][1]])
+
+    def test_bad_command_template_is_not_saved(self):
+        self.assertIsNone(self.controller.apply_light_settings(LightSettings(on_commands=("{channel:02X}",), channels=(LightChannel("A", 0),))))
+        self.assertIn("光源設定未保存", self.notices[-1][0])
+        self.assertEqual(self.store.load().light, LightSettings())
+
+
+def replace_channels(settings: LightSettings, channels) -> LightSettings:
+    from dataclasses import replace
+
+    return replace(settings, channels=tuple(channels))
 
 
 class ControllerLightDetectionTests(LightControllerCase):

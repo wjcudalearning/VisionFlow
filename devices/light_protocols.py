@@ -79,13 +79,15 @@ KNOWN_LIGHT_PROTOCOLS: tuple[LightProtocol, ...] = (
     LightProtocol(
         key="opt",
         label="OPT 格式（$3 + 通道 + 三位十六進位 + XOR 校驗）",
-        note="「$」＋命令（3 設亮度、4 讀亮度）＋通道＋三位十六進位亮度＋兩位 XOR 校驗，沒有結尾字元。",
+        note="「$」＋命令（1 開通道、2 關通道、3 設亮度、4 讀亮度）＋通道＋三位十六進位資料＋兩位 XOR 校驗，沒有結尾字元；開燈先逐通道送 $1 再設亮度，關燈逐通道送 $2。",
         baud_rates=(9600, 19200),
         line_ending="",
         brightness_template="$3{channel}{value:03X}{xor}",
         channels=("1",),
         probe="$4{channel}000{xor}",
         matches=_pattern(rb"^\$"),
+        on_commands=("$1{channel}000{xor}",),
+        off_commands=("$2{channel}000{xor}",),
     ),
     LightProtocol(
         key="sa",

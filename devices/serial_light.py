@@ -96,6 +96,25 @@ def render_brightness(template: str, channel: str, value: int, line_ending: str 
     return bytes(out)
 
 
+TEMPLATE_FIELDS = frozenset({"channel", "value", "checksum", "xor", "crc16"})
+
+
+def render_switch_command(text: str, channels, line_ending: str = "") -> list[tuple[str, bytes]]:
+    """An on/off command as (channel, bytes) pairs.
+
+    Plain text is sent once (channel ""). A command using the template fields is rendered like a
+    brightness command with value 0: once per channel when it contains `{channel}` (for example
+    OPT `$1{channel}000{xor}`), otherwise once for the first channel.
+    """
+    names = {match.group(1) for match in _PLACEHOLDER.finditer(text)} & TEMPLATE_FIELDS
+    if not names:
+        return [("", encode_command(text, line_ending))]
+    channels = [str(channel) for channel in channels] or ["1"]
+    if "channel" in names:
+        return [(channel, render_brightness(text, channel, 0, line_ending)) for channel in channels]
+    return [("", render_brightness(text, channels[0], 0, line_ending))]
+
+
 def modbus_crc16(data: bytes) -> int:
     """Modbus RTU CRC-16 (polynomial 0xA001 reflected, initial 0xFFFF)."""
     crc = 0xFFFF
