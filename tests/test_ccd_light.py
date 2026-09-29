@@ -408,6 +408,78 @@ LIGHT_PROGRAM = {
 }
 
 
+WRAPPED_LIGHT = """
+using System.IO.Ports;
+namespace Machine
+{
+    public class LightBox
+    {
+        private SerialPort serialPort1 = new System.IO.Ports.SerialPort();
+
+        public void Setup()
+        {
+            serialPort1.PortName = "COM1";
+            serialPort1.BaudRate = 9600;
+        }
+
+        public void Apply(int level)
+        {
+            Send(serialPort1, "L1ON");
+            Send(serialPort1, $"SA{level:0000}#");
+        }
+
+        public void Stop()
+        {
+            Send(serialPort1, "L1OFF");
+        }
+
+        private static void Send(SerialPort sp, string cmd)
+        {
+            string text = "";
+            text = cmd;
+            sp.Write(text);
+        }
+    }
+}
+"""
+
+
+def _scan_light(source: str):
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        files = {"Light.sln": LIGHT_PROGRAM["Light.sln"], "Light/Light.csproj": "<Project />", "Light/LightBox.cs": source}
+        for relative, text in files.items():
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(textwrap.dedent(text), encoding="utf-8")
+        return scan_legacy_program(root / "Light.sln")
+
+
+class LightImportCoverageTests(unittest.TestCase):
+    def test_port_passed_as_a_parameter_and_on_off_read_from_the_command_text(self):
+        report = _scan_light(WRAPPED_LIGHT)
+        values = {f.key: f.value for f in report.findings}
+        self.assertEqual(values["light.port"], "COM1")
+        self.assertEqual(values["light.on_commands"], ("L1ON",), "the empty initial value is not a command")
+        self.assertEqual(values["light.off_commands"], ("L1OFF",))
+        self.assertEqual(values["light.brightness_template"], "SA{value:04}#")
+        self.assertIsNone(report.finding("info.light_brightness_only"))
+
+    def test_brightness_only_controller_is_explained(self):
+        source = WRAPPED_LIGHT.replace('            Send(serialPort1, "L1ON");\n', "").replace('Send(serialPort1, "L1OFF");', "")
+        report = _scan_light(source)
+        self.assertIsNone(report.finding("light.on_commands"))
+        info = report.finding("info.light_brightness_only")
+        self.assertIn("靠送出亮度開燈", info.display)
+
+    def test_unresolved_commands_point_at_the_light_trial(self):
+        source = WRAPPED_LIGHT.replace('Send(serialPort1, "L1ON");', "Send(serialPort1, ReadCommand());").replace(
+            'Send(serialPort1, $"SA{level:0000}#");', ""
+        ).replace('Send(serialPort1, "L1OFF");', "")
+        warning = _scan_light(source).finding("warn.light_commands")
+        self.assertIn("逐一試亮", warning.note)
+
+
 class LightImportTests(unittest.TestCase):
     def test_writeline_program_is_scanned(self):
         # Regression: a program that sends with WriteLine made the scan fail with
@@ -624,6 +696,11 @@ class LightTrialTests(LightControllerCase):
         self.wait(self.controller.stop_light_trial())
         self.assertFalse(self.light.is_connected)
         self.assertEqual(self.store.load().light, before)
+
+    def test_blank_current_values_read_as_not_set(self):
+        current = self.controller.legacy_current_values()
+        self.assertEqual(current["light.on_commands"], "（未設定）")
+        self.assertEqual(current["light.brightness_template"], "（未設定）")
 
     def test_trial_is_refused_while_the_light_is_connected(self):
         self.light.connect(LightSettings())

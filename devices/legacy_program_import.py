@@ -1215,11 +1215,14 @@ class LegacyProgramAnalyzer:
     def _light(self) -> list[ImportFinding | None]:
         names: set[str] = set()
         for source in self.files:
-            names.update(re.findall(r"\bSerialPort\s+(\w+)\s*[=;]", source.text))
-            names.update(re.findall(r"\b(\w+)\s*=\s*new\s+SerialPort\b", source.text))
+            # Fields, locals, properties and parameters typed SerialPort (`void Send(SerialPort sp, …)`).
+            names.update(re.findall(r"\bSerialPort\s+(\w+)\s*[=;,){]", source.text))
+            names.update(re.findall(r"\b(\w+)\s*=\s*new\s+(?:System\.IO\.Ports\.)?SerialPort\b", source.text))
+        # `port.BaseStream.Write(bytes, 0, n)` writes to the same port.
+        names.add("BaseStream")
         constructors = find_calls(self.files, ["SerialPort"])
         constructors = [c for c in constructors if "new" in c.file.text[max(0, c.index - 12) : c.index] and c.args]
-        if not names and not constructors:
+        if names == {"BaseStream"} and not constructors:
             return []
         r = self.resolver
         out: list[ImportFinding | None] = []
@@ -1282,6 +1285,7 @@ class LegacyProgramAnalyzer:
         on: dict[str, list[SourceHit]] = {}
         off: dict[str, list[SourceHit]] = {}
         unclear: list[SourceHit] = []
+        unclear_texts: dict[str, None] = {}
         writer_methods: set[str] = set()
         for call in writes:
             method = call.file.method_at(call.index)
@@ -1289,7 +1293,8 @@ class LegacyProgramAnalyzer:
                 writer_methods.add(method.name)
             values, _gaps = self.resolver.trace(call.args[0], call.file, call.index)
             for value in values:
-                if not isinstance(value, (str, bytes)):
+                # An empty string is the initial value of a command variable built later, not a command.
+                if not isinstance(value, (str, bytes)) or not value:
                     continue
                 text = describe_bytes(value if isinstance(value, bytes) else value.encode("latin-1", errors="replace"))
                 owner = self._literal_owner(value) or (method.name if method else "")
@@ -1301,6 +1306,7 @@ class LegacyProgramAnalyzer:
                     off.setdefault(text, []).append(hit)
                 else:
                     unclear.append(hit)
+                    unclear_texts[f"{owner or '?'}：{text}"] = None
         out: list[ImportFinding | None] = []
         for key, label, found in (("light.on_commands", "光源開燈指令", on), ("light.off_commands", "光源關燈指令", off)):
             if found:
@@ -1308,15 +1314,40 @@ class LegacyProgramAnalyzer:
                 commands = tuple(found)
                 out.append(
                     ImportFinding(key, label, STATUS_PARTIAL, commands, "；".join(commands),
-                                  "依所在方法名稱分類為開燈／關燈，請確認順序與內容。", hits)
+                                  "依指令內容（ON／OFF）或所在方法名稱分類為開燈／關燈，請確認順序與內容。", hits)
                 )
         if unclear:
             out.append(
                 ImportFinding("info.light_commands", "其他光源指令", STATUS_INFO, None,
-                              "；".join(sorted({h.method for h in unclear if h.method})) or "（無法分類）",
-                              "這些固定指令無法判斷是開燈或關燈，請手動確認。", tuple(unclear))
+                              "；".join(list(unclear_texts)[:8]),
+                              "這些固定指令無法判斷是開燈或關燈；可複製到光源面板的「開燈指令」或「測試」欄位試送。", tuple(unclear))
             )
-        out.append(self._brightness_template(writer_methods))
+        template = self._brightness_template(writer_methods)
+        out.append(template)
+        if not on and template is not None:
+            out.append(
+                ImportFinding(
+                    "info.light_brightness_only",
+                    "光源開燈方式",
+                    STATUS_INFO,
+                    None,
+                    "原程式沒有獨立的開燈指令，靠送出亮度開燈",
+                    "這是正常的：VisionFlow 開燈時送亮度範本（用面板上的亮度），關燈時送亮度 0；「開燈指令」留空即可。",
+                    template.sources,
+                )
+            )
+        if not on and template is None and not unclear:
+            out.append(
+                ImportFinding(
+                    "warn.light_commands",
+                    "光源指令",
+                    STATUS_WARNING,
+                    None,
+                    "找到光源 COM port，但追不到送出的指令內容",
+                    "原程式的指令可能在執行時才組出來（例如讀設定檔或迴圈算校驗碼）。請在光源面板用「逐一試亮」找出會亮的指令。",
+                    tuple(c.hit() for c in writes[:3]),
+                )
+            )
         return out
 
     def _literal_owner(self, value) -> str:
@@ -1393,7 +1424,16 @@ _OFF_WORDS = ("off", "close", "stop", "dispose", "shutdown", "exit", "disable", 
 _ON_WORDS = ("on", "open", "start", "init", "enable", "connect", "load", "開")
 
 
+_TEXT_OFF = re.compile(r"(?i)(?<![a-z])off(?![a-z])|關")
+_TEXT_ON = re.compile(r"(?i)(?<![a-z])on(?![a-z])|開")
+
+
 def _command_kind(method: str, command: str) -> str:
+    """On/off from the command text itself (`L1ON`, `L1OFF`) first, then from the method name."""
+    if _TEXT_OFF.search(command):
+        return "off"
+    if _TEXT_ON.search(command):
+        return "on"
     name = method.lower()
     if any(word in name for word in _OFF_WORDS):
         return "off"

@@ -104,7 +104,9 @@ class LegacyImportDialog(QDialog):
         sources = "；".join(hit.label() for hit in finding.sources[:2])
         if len(finding.sources) > 2:
             sources += f"（另 {len(finding.sources) - 2} 處）"
-        cells = (finding.label, finding.display, current, None, sources)
+        # Never leave a value cell blank: it reads like a missing row. Say what the blank means.
+        display = finding.display if str(finding.display).strip() else "（空白：原程式的值是空字串，請看出處）"
+        cells = (finding.label, display, current, None, sources)
         for column, text in enumerate(cells, start=1):
             item = status if text is None else QTableWidgetItem(text)
             self.table.setItem(row, column, item)

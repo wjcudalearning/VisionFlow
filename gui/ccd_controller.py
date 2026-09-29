@@ -2171,7 +2171,7 @@ class CcdController(QObject, LogMixin):
         wheel = self._machine.meter_wheel
         relay = self._machine.sensor_relay
         acquisition = self._product.acquisition
-        return {
+        values = {
             "meter_wheel.card_id": str(wheel.card_id),
             "meter_wheel.compare_increment": str(wheel.compare_increment),
             "meter_wheel.multiple_rate": MultipleRate(wheel.multiple_rate).name,
@@ -2201,6 +2201,8 @@ class CcdController(QObject, LogMixin):
             "light.off_commands": "；".join(self._machine.light.off_commands),
             "light.brightness_template": self._machine.light.brightness_template,
         }
+        # A blank cell reads like a missing value; say that VisionFlow has nothing set yet.
+        return {key: value if str(value).strip() else "（未設定）" for key, value in values.items()}
 
     def apply_legacy_import(self, findings: Sequence[LegacyImportFinding]) -> list[str]:
         """Apply the confirmed values through the normal CCD settings paths; returns applied labels."""
