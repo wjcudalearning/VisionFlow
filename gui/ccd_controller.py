@@ -1527,6 +1527,10 @@ class CcdController(QObject, LogMixin):
         if self._light_for_monitoring:
             self.notice.emit("相機直連監控正在使用光源，請先停止監控再偵測。", "warning")
             return None
+        if self.devices.light.is_connected:
+            # Detection reopens the port at other rates; the light could stay on with nothing left to switch it off.
+            self.notice.emit("光源目前已連線，請先按「關燈」再偵測。", "warning")
+            return None
         availability = self.devices.light.availability()
         if not availability.available:
             self.notice.emit(f"無法偵測光源：{availability.reason}", "error")

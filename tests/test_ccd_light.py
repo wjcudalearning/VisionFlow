@@ -449,6 +449,11 @@ class ControllerLightDetectionTests(LightControllerCase):
         self.controller._light_for_monitoring = True
         self.assertIsNone(self.controller.detect_light(LightSettings()))
         self.assertIn("停止監控", self.notices[-1][0])
+        self.controller._light_for_monitoring = False
+        self.light.connect(LightSettings())
+        self.assertIsNone(self.controller.detect_light(LightSettings()))
+        self.assertIn("先按「關燈」", self.notices[-1][0])
+        self.assertEqual(self.light.sent, [], "nothing is probed while the light is in use")
 
     def test_protocol_template_and_detect_are_admin_only(self):
         self.screen.light_protocol_combo.setCurrentIndex(self.screen.light_protocol_combo.findData("sa"))
