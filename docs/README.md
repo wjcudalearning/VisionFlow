@@ -2,6 +2,14 @@
 
 專案根目錄只保留日常開發與執行會直接使用的入口文件；其餘文件依用途集中在本目錄。
 
+## 設備與相機直連監控
+
+2026-09-30 使用者回報現場設備測試皆通過，包含相機直連監控成功。基本取像、米輪線觸發、Sensor 軟體觸發、光源開關與 Recipe 相機設定已確認；長時間壓測、資源量測及完整診斷／故障注入驗收見 [`../Todo.md`](../Todo.md)。
+
+- [`packaging/DEVICE_PARAMETER_GUIDE.md`](packaging/DEVICE_PARAMETER_GUIDE.md)：設備參數對照、Recipe 儲存與相機直連啟動步驟。
+- [`device-error-codes.md`](device-error-codes.md)：設備與相機直連監控的錯誤碼。
+- [`sapera-diagnose.md`](sapera-diagnose.md)：Sapera S1–S8 診斷、短碼與板卡讀回值。
+
 ## Release Notes
 
 Release notes 位於 [`release-notes/`](release-notes/)，檔名同時標示產品與版本：
