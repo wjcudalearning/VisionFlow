@@ -564,6 +564,34 @@ class ControllerSensorRelayTests(unittest.TestCase):
         self.assertIn("自動遞增沒有動作", hint(9000, 1000, 9))
         self.assertIn("CMP_OUT→擷取卡的接線", hint(9000, 9005, 9))
 
+    def test_sensor_diagnosis_prefers_actual_height_and_current_frame_events(self):
+        self._start_sensor_capture(length=8000)
+        self.camera.apply_readbacks = lambda: {"EL": "1", "EF": "0", "CROP": "9000", "H": "9000"}
+        hint = self.controller._sensor_line_trigger_hint(80000, 80009, 9, {})
+        self.assertIn("Length 8000 不符", hint)
+        self.assertIn("H=9000", hint)
+        self.camera.apply_readbacks = lambda: {"EL": "1", "EF": "0", "CROP": "8000", "H": "8000"}
+        from devices.ccd_models import ACQUISITION_EVENT_LINE_TRIGGER_TOO_FAST
+        hint = self.controller._sensor_line_trigger_hint(80000, 80009, 9, {ACQUISITION_EVENT_LINE_TRIGGER_TOO_FAST: 1})
+        self.assertIn("本張擷取卡回報行觸發太快", hint)
+        hint = self.controller._sensor_line_trigger_hint(80000, 80009, 9, {})
+        self.assertIn("無法確認 CMP_OUT", hint)
+        self.camera.complete_capture()
+
+    def test_e6107_counts_only_errors_since_this_sensor_capture(self):
+        from devices.ccd_models import ACQUISITION_EVENT_LINE_TRIGGER_TOO_FAST
+        self._setup(TriggerSettings(TriggerMode.SOFTWARE), length=10)
+        self.camera.emit_acquisition_event(ACQUISITION_EVENT_LINE_TRIGGER_TOO_FAST)
+        self.screen.preview_button.click()
+        self._edge()
+        self.assertTrue(_wait_until(lambda: self.controller._sensor_capture_in_flight))
+        self.meter_wheel.set_encoder(50)
+        self.meter_wheel.set_compare(51)
+        self.controller.poll_meter_wheel()
+        notice = next(text for text, _ in self.notices if "[E-6107]" in text)
+        self.assertNotIn("本張擷取卡回報行觸發太快", notice)
+        self.camera.complete_capture()
+
     def test_reverse_counting_is_reported_as_e6108(self):
         self._setup(TriggerSettings(TriggerMode.SOFTWARE), length=10)
         self.meter_wheel.set_encoder(1000)

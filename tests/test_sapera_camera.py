@@ -866,6 +866,27 @@ class AcquisitionTests(SaperaCameraTestBase):
         self.camera.start_preview()
         self.assertEqual(self.interop.names("grab"), [("grab",)])
 
+    def test_software_snap_refuses_disabled_line_trigger_or_enabled_frame_trigger(self):
+        self.connect(mode=TriggerMode.SOFTWARE)
+        for line, frame in ((0, 0), (1, 1)):
+            with self.subTest(line=line, frame=frame):
+                self.interop.params.update(EXT_LINE_TRIGGER_ENABLE=line, EXT_FRAME_TRIGGER_ENABLE=frame)
+                with self.assertRaises(SaperaError) as caught:
+                    self.camera.capture_frame()
+                self.assertEqual(caught.exception.code, "E-0607")
+                self.assertEqual(self.camera.status().state, CameraState.IDLE)
+                self.assertEqual(self.interop.names("snap"), [])
+        self.interop.params.update(EXT_LINE_TRIGGER_ENABLE=1, EXT_FRAME_TRIGGER_ENABLE=0)
+        self.camera.capture_frame()
+        self.assertEqual(self.interop.names("snap"), [("snap",)])
+
+    def test_external_line_readbacks_are_recorded_without_changing_ccf_input(self):
+        self.interop.params.update(EXT_LINE_TRIGGER_SOURCE=3, EXT_LINE_TRIGGER_DETECTION=8)
+        self.connect(mode=TriggerMode.SOFTWARE)
+        values = self.camera.apply_readbacks()
+        self.assertEqual((values["EL"], values["EF"], values["LIS"], values["LID"]), ("1", "0", "3", "8"))
+        self.assertEqual((values["IL"], values["SE"]), ("0", "0"))
+
     def test_external_trigger_without_one_frame_only_needs_line_trigger(self):
         self.connect(mode=TriggerMode.EXTERNAL, one_frame=False)
         self.camera.start_preview()

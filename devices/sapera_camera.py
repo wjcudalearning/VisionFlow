@@ -44,6 +44,8 @@ from devices.sapera_api import (
     FRAME_TRIGGER_LEVEL_PARAMETER,
     FRAME_TRIGGER_LEVEL_VALUES,
     FRAME_TRIGGER_SOURCE_PARAMETER,
+    LINE_TRIGGER_SOURCE_PARAMETER,
+    LINE_TRIGGER_DETECTION_PARAMETER,
     BufferFormat,
     SaperaError,
     SaperaRuntime,
@@ -88,7 +90,7 @@ class ApplyNote:
 # Keys of pply_readbacks(), in the order the diagnosis prints them: camera TriggerMode, camera line
 # rate and its reported range, board INT_LINE_TRIGGER_FREQ, exposure, gain, buffer width/height.
 # FTS/FTD/FTL: the CCF's Sensor frame-trigger input (source, detection, voltage level).
-READBACK_KEYS = ("TM", "LR", "LRMIN", "LRMAX", "BLR", "EXP", "GAIN", "CAMW", "CCF", "W", "H", "CROP", "FTS", "FTD", "FTL")
+READBACK_KEYS = ("TM", "LR", "LRMIN", "LRMAX", "BLR", "EXP", "GAIN", "CAMW", "CCF", "W", "H", "CROP", "EL", "EF", "IL", "SE", "LIS", "LID", "FTS", "FTD", "FTL")
 
 
 class _ApplyLog:
@@ -367,6 +369,11 @@ class SaperaLineScanCamera(LineScanCamera):
             if self._state == CameraState.PREVIEWING:
                 raise DeviceError("請先停止預覽再擷取。")
             self._require_transfer_start_allowed("擷取")
+        # Snap can return true while an incorrect CCF never supplies a line. Software trigger
+        # starts the frame in the application; it must not also wait for a hardware frame trigger.
+        if self._trigger.mode != TriggerMode.CONTINUOUS:
+            self._require_external_trigger_armed(interop, self._trigger)
+        with self._state_lock:
             # Mark busy before Snap(): the end-of-frame callback may arrive before Snap() returns.
             self._state = CameraState.CAPTURING
             self._stop_requested_during_capture = False
@@ -813,6 +820,12 @@ class SaperaLineScanCamera(LineScanCamera):
         else:
             log.fail("E-0606", "One Frame", f"EXT_FRAME_TRIGGER_ENABLE={one_frame} 寫入失敗")
         self._read_frame_trigger_input(interop, acq, trigger, log)
+        for key, parameter in (
+            ("EL", "EXT_LINE_TRIGGER_ENABLE"), ("EF", "EXT_FRAME_TRIGGER_ENABLE"),
+            ("IL", "INT_LINE_TRIGGER_ENABLE"), ("SE", "SHAFT_ENCODER_ENABLE"),
+            ("LIS", LINE_TRIGGER_SOURCE_PARAMETER), ("LID", LINE_TRIGGER_DETECTION_PARAMETER),
+        ):
+            log.readbacks[key] = _short_value(self._get_int(interop, acq, parameter))
 
         self._buffers, self._memory_type = interop.new_buffers(acq, location, BUFFER_COUNT)
         if not getattr(interop, "buffer_with_trash", True):
@@ -955,12 +968,15 @@ class SaperaLineScanCamera(LineScanCamera):
         with self._lifecycle_lock:
             line = self._get_int(interop, self._acquisition, "EXT_LINE_TRIGGER_ENABLE")
             frame = self._get_int(interop, self._acquisition, "EXT_FRAME_TRIGGER_ENABLE")
-        armed = line == 1 and (frame == 1 if trigger.external_frame_one_frame else True)
+        armed = line == 1 and (
+            frame == 0 if trigger.mode == TriggerMode.SOFTWARE
+            else frame == 1 if trigger.external_frame_one_frame else True
+        )
         if not armed:
             raise SaperaError(
                 "E-0607",
                 f"EXT_LINE_TRIGGER_ENABLE={_fmt(line)}、EXT_FRAME_TRIGGER_ENABLE={_fmt(frame)}；"
-                "為避免變成連續取像，未開始預覽",
+                "觸發設定讀回不符，未開始取像；軟體觸發需線觸發 1、Frame Trigger 0",
             )
 
     # ---- guarded Sapera calls -------------------------------------------------------------

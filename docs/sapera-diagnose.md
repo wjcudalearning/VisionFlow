@@ -90,6 +90,9 @@ TM=Off LR=300 LRMIN=300 LRMAX=48000 BLR=300 EXP=100 GAIN=1 CAMW=16384 CCF=linea1
 | `CCF` | 這次使用的 CCF 檔名 |
 | `W`／`H` | 依 CCF 建立的 buffer 寬高（應為 16384 × Length） |
 | `CROP` | 板卡 `CROP_HEIGHT` 讀回（影像長度） |
+| `EL`／`EF` | 板卡外部 Line／Frame Trigger 啟用值；軟體觸發需 `EL=1 EF=0` |
+| `IL`／`SE` | 板卡內部 Line Trigger／Shaft Encoder 啟用值 |
+| `LIS`／`LID` | CCF 外部 Line Trigger 來源／偵測方式的原始代碼（只讀、不覆寫；不支援則 `?`） |
 | `FTS`／`FTD`／`FTL` | CCF 設定的 Sensor 外部 Frame Trigger 輸入：來源代碼、觸發方式（`RISE`／`FALL`／`HIGH`／`LOW`／`2RISE`／`2FALL`）、電壓（`TTL`／`12V`／`24V`／`422`／`LVDS`）；對不到名稱時顯示原始數字。程式只讀不寫，要改請用 CamExpert 改 CCF |
 | `IMG`／`MEAN` | S7 實際收到的影像尺寸與平均灰階（全黑約 0、過曝接近 255） |
 

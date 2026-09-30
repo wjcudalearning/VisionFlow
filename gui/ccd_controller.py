@@ -368,6 +368,7 @@ class CcdController(QObject, LogMixin):
         self._sensor_capture_start_encoder: int | None = None
         self._sensor_capture_expected_counts = 0
         self._sensor_capture_started_at = 0.0
+        self._sensor_event_baseline: dict[str, int] = {}
         self._sensor_busy_noticed = False
         # Follows the Sensor-started frame through meter-wheel readings (re-arms compare, reverse, Length).
         self._sensor_watch: ExternalCaptureWatch | None = None
@@ -1619,6 +1620,7 @@ class CcdController(QObject, LogMixin):
             self._sensor_capture_in_flight = True
             self._sensor_capture_started_at = time.monotonic()
             self._sensor_busy_noticed = False
+            self._sensor_event_baseline = self.devices.camera.acquisition_event_counts()
             try:
                 self.devices.camera.capture_frame()
             except DeviceError as exc:
@@ -1662,7 +1664,7 @@ class CcdController(QObject, LogMixin):
         moved = abs(travel)
         # Values the operator can type back from the camera machine (no files or photos leave it).
         readings = f"Encoder {encoder_now}、Compare {compare_now}、觸發時 Encoder {start}"
-        counts = self.devices.camera.acquisition_event_counts()
+        counts = event_delta(self.devices.camera.acquisition_event_counts(), self._sensor_event_baseline)
         if counts:
             readings += "；擷取卡事件 " + "、".join(f"{name} {count}" for name, count in sorted(counts.items()))
         expected = self._sensor_capture_expected_counts
@@ -1696,8 +1698,8 @@ class CcdController(QObject, LogMixin):
                 self.notice.emit(
                     tag(
                         "E-6107",
-                        f"米輪已走 {moved} 格（一張需要 {expected} 格），影像仍未完成：擷取卡沒收到足夠的線觸發。"
-                        f"{self._line_trigger_hint(encoder_now, compare_now, increment)}（{readings}）",
+                        f"米輪已走 {moved} 格（一張需要約 {expected} 格），影像仍未完成。"
+                        f"{self._sensor_line_trigger_hint(encoder_now, compare_now, increment, counts)}（{readings}）",
                     ),
                     "warning",
                 )
@@ -1750,17 +1752,38 @@ class CcdController(QObject, LogMixin):
         if expected and travel >= expected + 10 * increment and not self._sensor_busy_noticed:
             self._sensor_busy_noticed = True
             readings = f"Encoder {snapshot.encoder_value}、Compare {snapshot.compare_value}、起拍時 Encoder {watch.phase_start}"
-            counts = self.devices.camera.acquisition_event_counts()
+            counts = event_delta(self.devices.camera.acquisition_event_counts(), self._sensor_event_baseline)
             if counts:
                 readings += "；擷取卡事件 " + "、".join(f"{name} {count}" for name, count in sorted(counts.items()))
             self.notice.emit(
                 tag(
                     "E-6107",
-                    f"米輪已走 {travel} 格（一張需要 {expected} 格），影像仍未完成：擷取卡沒收到足夠的線觸發。"
-                    f"{self._line_trigger_hint(snapshot.encoder_value, snapshot.compare_value, increment)}（{readings}）",
+                    f"米輪已走 {travel} 格（一張需要約 {expected} 格），影像仍未完成。"
+                    f"{self._sensor_line_trigger_hint(snapshot.encoder_value, snapshot.compare_value, increment, counts)}（{readings}）",
                 ),
                 "warning",
             )
+
+    def _sensor_line_trigger_hint(self, encoder: int, compare: int, increment: int, counts: Mapping[str, int]) -> str:
+        readbacks = getattr(self.devices.camera, "apply_readbacks", lambda: {})()
+        values = " ".join(f"{key}={readbacks[key]}" for key in ("EL", "EF", "IL", "SE", "LIS", "LID", "CROP", "H", "EXP") if key in readbacks)
+        cause = ""
+        if readbacks.get("EL") == "0":
+            cause = "板卡外部線觸發實際為 0；請重新連線並確認 CCF。"
+        elif readbacks.get("EF") == "1" and self._applied and self._applied[2].mode == TriggerMode.SOFTWARE:
+            cause = "軟體觸發連線的板卡 Frame Trigger 實際為 1，Snap 仍會等待硬體觸發；請重新連線。"
+        elif self._applied and any(
+            str(readbacks.get(key, "")).isdigit() and int(readbacks[key]) != self._applied[1].length_lines
+            for key in ("CROP", "H")
+        ):
+            cause = f"板卡 CROP_HEIGHT／buffer 高度與本次連線 Length {self._applied[1].length_lines} 不符；請確認 CCF 與 Length 寫入結果。"
+        elif counts.get(ACQUISITION_EVENT_LINE_TRIGGER_TOO_FAST, 0):
+            cause = "本張擷取卡回報行觸發太快；請核對米輪脈衝間隔、曝光與相機最大線速。"
+        elif counts.get(ACQUISITION_EVENT_LINE_TRIGGER_TOO_SLOW, 0):
+            cause = "本張擷取卡回報行觸發太慢；請核對米輪脈衝與 CCF 時序。"
+        else:
+            cause = self._line_trigger_hint(encoder, compare, increment)
+        return cause + (f"（連線時板卡讀回 {values}）" if values else "")
 
     @staticmethod
     def _line_trigger_hint(encoder: int, compare: int, increment: int) -> str:
@@ -1777,7 +1800,7 @@ class CcdController(QObject, LogMixin):
                 "請對照智慧匯入「原程式參數總表」的 Compare 模式與「自動遞增」設定。"
             )
         return (
-            "Compare 有跟著 Encoder 往前，米輪卡應該有送出 CMP_OUT 脈衝：請檢查 CMP_OUT→擷取卡的接線、"
+            "目前 Compare 在 Encoder 附近，僅憑這次讀值無法確認 CMP_OUT 脈衝有送到板卡：請檢查 CMP_OUT→擷取卡的接線、"
             "CCF 的線觸發（EXT_LINE_TRIGGER）設定、CMP Out Width 與 CROP_HEIGHT；擷取卡事件的「行觸發太快」代表脈衝太密。"
         )
 
@@ -1900,26 +1923,57 @@ class CcdController(QObject, LogMixin):
 
         def job() -> LightStatus:
             replies: list[str] = []
+            off_failures: list[str] = []
+            zero_sent = 0
             confirmed = False
             missing_reply = False
             try:
                 if reconnect or not light.is_connected:
                     light.connect(settings)
                 for index, (label, command) in enumerate(steps):
-                    reply = light.send(command, settings.reply_timeout_ms)
+                    try:
+                        reply = light.send(command, settings.reply_timeout_ms)
+                    except DeviceError as exc:
+                        if action != "off":
+                            raise
+                        # Even a failed switch command must not suppress the field-confirmed zero
+                        # brightness fallback, or skip the other channels.
+                        off_failures.append(f"{label}：{exc}")
+                        replies.append(f"{label}：送出失敗 {exc}")
+                        if settings.command_delay_ms and index < len(steps) - 1:
+                            time.sleep(settings.command_delay_ms / 1000.0)
+                        continue
                     replies.append(f"{label}：送出 {describe_bytes(command)}" + (f"，回覆 {describe_bytes(reply)}" if reply else "，無回覆"))
                     if not reply:
                         missing_reply = True
                     elif protocol is not None and label.startswith("通道"):
+                        rejection = ""
                         if not protocol.matches(reply):
-                            raise DeviceError(f"{protocol.label} 的回覆格式不符：{describe_bytes(reply)}")
-                        if protocol.key == "ccs" and b"N" in reply:
-                            raise DeviceError(f"{protocol.label} 回覆拒絕指令：{describe_bytes(reply)}")
+                            rejection = f"{protocol.label} 的回覆格式不符：{describe_bytes(reply)}"
+                        elif protocol.key == "ccs" and b"N" in reply:
+                            rejection = f"{protocol.label} 回覆拒絕指令：{describe_bytes(reply)}"
+                        if rejection:
+                            if action != "off":
+                                raise DeviceError(rejection)
+                            off_failures.append(f"{label}：{rejection}")
+                            if settings.command_delay_ms and index < len(steps) - 1:
+                                time.sleep(settings.command_delay_ms / 1000.0)
+                            continue
                         confirmed = confirmed or protocol.confirms_brightness
+                    if action == "off" and label.startswith("通道"):
+                        zero_sent += 1
                     if settings.command_delay_ms and index < len(steps) - 1:
                         time.sleep(settings.command_delay_ms / 1000.0)
                 if action == "off":
                     light.disconnect()
+                    if off_failures:
+                        zero_complete = settings.controls_brightness and zero_sent == len(settings.channels)
+                        message = "；".join(off_failures) + (
+                            "；各通道亮度 0 已送出，實際熄燈待確認。" if zero_complete
+                            else "；關燈未完整送出，實際熄燈未確認。"
+                        )
+                        return LightStatus(False, False if zero_complete else self._light_status.on,
+                                           tuple(replies), message, action, False)
             except DeviceError as exc:
                 return LightStatus(light.is_connected, self._light_status.on, tuple(replies), str(exc), action, False)
             on = {"on": True, "off": False}.get(action, self._light_status.on or action == "brightness")

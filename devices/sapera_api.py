@@ -229,6 +229,10 @@ FRAME_TRIGGER_INPUT_PARAMETERS = (
     FRAME_TRIGGER_DETECTION_PARAMETER,
     FRAME_TRIGGER_LEVEL_PARAMETER,
 )
+# Optional read-only CCF line input evidence, like the frame input above. Do not add these to the
+# required manifest: missing enum members on older Sapera builds only make the readback unavailable.
+LINE_TRIGGER_SOURCE_PARAMETER = "EXT_LINE_TRIGGER_SOURCE"
+LINE_TRIGGER_DETECTION_PARAMETER = "EXT_LINE_TRIGGER_DETECTION"
 FRAME_TRIGGER_DETECTION_VALUES = (
     "RISING_EDGE",
     "FALLING_EDGE",

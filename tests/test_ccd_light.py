@@ -648,6 +648,27 @@ class OptSwitchControllerTests(LightControllerCase):
         self.assertIn("光源設定未保存", self.notices[-1][0])
         self.assertEqual(self.store.load().light, LightSettings())
 
+    def test_off_send_failure_does_not_skip_zero_or_other_channels(self):
+        settings = LightSettings(enabled=True, port="COM3", off_commands=("X",), brightness_template="B{channel}={value:03}",
+                                 channels=(LightChannel("1", 200), LightChannel("2", 100)),
+                                 line_ending="", command_delay_ms=0, reply_timeout_ms=0)
+        self.wait(self.controller.apply_light_settings(settings))
+        send = self.light.send
+
+        def fail_switch(command, timeout):
+            if command == b"X":
+                raise DeviceError("關閉通道命令失敗")
+            return send(command, timeout)
+
+        with patch.object(self.light, "send", side_effect=fail_switch):
+            self.light.sent.clear()
+            self.wait(self.controller.light_off())
+        self.assertEqual(self.light.sent, [b"B1=000", b"B2=000"])
+        self.assertFalse(self.light.is_connected)
+        self.assertFalse(self.controller.light_status.on)
+        self.assertFalse(self.controller.light_status.ok, "the failed command remains visible")
+        self.assertIn("各通道亮度 0 已送出", self.controller.light_status.message)
+
 
 class LightTrialTests(LightControllerCase):
     IMPORTED = LightSettings(port="COM3", baud_rate=19200, line_ending="\r", on_commands=("ON",), brightness_template="B{value:03}",
