@@ -1228,6 +1228,7 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 - [ ] 加速不得犧牲 GUI 回應、打包啟動、結果追溯、錯誤訊息或 CPU fallback。
 
 ## 完成紀錄
+- [x] 2026-09-30：準備 VisionFlow AOI `v1.11.6` Windows x64 修正版：關燈補送亮度 0、Sensor 軟體觸發取像中自動重設 Compare／切換反向計數並即時回報 E-6107、相機直連監控按開始依 Recipe 自動連線並直接進入軟體觸發。CUDA 輸入自 v1.11.5 未變，依 aoi-release 規則沿用 v1.11.5 的 DLL。GUI Pipeline 版本、README 最新發行版與 release notes 索引同步為 1.11.6；套件、tag 與 GitHub Release 的驗證結果另於發布後記錄。
 - [x] 2026-09-30：Sensor 軟體觸發取像中直接修正（使用者：米輪已超過 Length 仍未取好，希望直接改好而不只是提示）：每張 Sensor 起拍的影像沿用外部觸發的取像監看（`ExternalCaptureWatch`，每 200 ms 讀米輪），Compare 落後 Encoder 時立即重設到前方讓 CMP_OUT 繼續送線觸發；Encoder 倒退時自動切換並保存「反向計數」、重設 Compare，讓這一張繼續拍完；超過 Length 約 10 行仍未完成時立即回報 `E-6107` 並附 Encoder／Compare／擷取卡事件數值。影像完成、Sensor 中繼停止或卡住解除時結束監看。補取像中重設 Compare、倒退自動切換、超過 Length 立即回報的測試；實際原因仍待現場確認。
 - [x] 2026-09-30：依相機機台實測修正（開燈有亮但關燈無效、軟體觸發米輪走 80000 多格仍回報 E-6107、不同產品的 Gain／曝光／Length 要跟 Recipe、相機直連監控按開始要直接進入軟體觸發）：關燈改為先送關燈指令再送各通道亮度 0；相機直連監控按「開始」時，相機未連線或 Recipe 相機設定尚未寫入就依 Recipe 自動連線／重連，軟體觸發時自動連上米輪，再開燈並開始收觸發（Recipe 為連續取像時才擋下）；Sensor 重複觸發的判讀新增 `E-6108`（米輪倒退計數），`E-6107` 附上 Encoder、Compare、觸發時 Encoder 與擷取卡事件次數，並依 Compare 位置指出最可能斷掉的一段。補對應測試；E-6107 的實際原因待下次現場回報數值確認。
 - [x] 2026-09-29：`aoi-release` skill（`.claude/skills` 與 `codex-skills` 兩份）新增：只有 `gpu/visionflow_cuda.cu`、`gpu/include`、`gpu/test_cuda_api.cu`、`gpu/build_cuda_dll.ps1` 或工具鏈／架構改變時才重建 CUDA DLL；否則沿用前一版已驗證的 DLL（核對公開 ZIP 與 Todo 記錄的 SHA-256），仍對本次 commit 跑 `validate_cuda_dll.py`。v1.10.1 到 v1.11.5 之間這些輸入都沒有變動（使用者建議）。
