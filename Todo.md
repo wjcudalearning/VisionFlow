@@ -1231,6 +1231,7 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 - [ ] 加速不得犧牲 GUI 回應、打包啟動、結果追溯、錯誤訊息或 CPU fallback。
 
 ## 完成紀錄
+- [x] 2026-09-30：準備 VisionFlow AOI `v1.11.7` Windows x64 修正版：CMP_OUT 極性可設定並由匯入帶入、CMP Out Width 為 0 的防呆、Codex `427046b` 的 Snap 前線觸發核對與 E-6107 證據，以及隨 ZIP 附上 `DEVICE_PARAMETER_GUIDE.md`、`ERROR_CODES.md`。CUDA 輸入自 v1.11.6 未變，沿用已驗證的 DLL。GUI Pipeline 版本、README 最新發行版與 release notes 索引同步為 1.11.7；套件、tag 與 GitHub Release 的驗證結果另於發布後記錄。
 - [x] 2026-09-30：新增現場用參數對照說明 `docs/packaging/DEVICE_PARAMETER_GUIDE.md`（使用者需求：把原廠參數對到 GUI 位置，隨發布帶進機台）：逐節列出米輪（含 CMP Out Width 10、CMP OUT 極性與位元換算）、相機（Recipe 與機台設定的分工及儲存 Recipe 步驟）、Sensor（含軟體觸發起拍）、光源、智慧匯入與建議上機順序。`packaging/scripts/build_exe.ps1` 把它與設備錯誤代碼表複製到發布資料夾最上層（`DEVICE_PARAMETER_GUIDE.md`、`ERROR_CODES.md`），腳本維持 ASCII；新增測試確認兩份文件會被複製，且說明引用的欄位名稱與 CCD 頁一致。
 - [x] 2026-09-30：CMP_OUT 極性改為可設定並檢查 CMP Out Width（使用者現場比對原廠程式：CMP output polarity 10、CMP out width 10、CMP output 勾選、Compare mode 為 auto）：米輪設定新增「CMP OUT 極性」（0–255，原本固定寫 0），連線與改寫 CMP Out Width 時都照它呼叫 `LSI8181_compare_CMP_OUT_set`，已連線時可立即重寫；智慧匯入帶入原程式的極性，參數總表改列為可設定。CMP Out Width 為 0 時設備自檢警告、Sensor 起拍拒絕並說明、E-6107 優先指出。CMP output 啟用（`toggle_preset`）與 Compare 自動遞增模式原本就與原廠一致。極性 10 若原廠以位元顯示需換算（二進位 10 = 2），欄位說明已註明；現場需確認哪個值讓擷取卡收到線觸發。
 - [x] 2026-09-30：上述 E-6107／Snap 前置核對與關燈失敗後續亮度 0 修正的本機驗證：完整 `unittest discover -s tests -v` 1186 項通過、compileall、CUDA source／ABI preflight、GUI offscreen Recipe 載入 smoke 與 `git diff --check` 通過。此次未改 CUDA source／DLL，未重新打包 EXE，未執行相機／米輪／光源實機驗收。
