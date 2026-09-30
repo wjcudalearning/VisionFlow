@@ -321,8 +321,10 @@ class SimulatedMeterWheel(MeterWheel):
     def set_reverse_direction(self, reverse: bool) -> None:
         self._update(reverse_direction=bool(reverse))
 
-    def set_cmp_out_width(self, width: int) -> None:
+    def set_cmp_out_width(self, width: int, polarity: int | None = None) -> None:
         self._update(cmp_out_width=int(width))
+        if polarity is not None:
+            self._update(cmp_out_polarity=int(polarity))
 
     def read_extension_status(self) -> tuple[bool, ...]:
         with self._lock:

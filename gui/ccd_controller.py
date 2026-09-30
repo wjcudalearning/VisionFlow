@@ -486,6 +486,7 @@ class CcdController(QObject, LogMixin):
         screen.multiple_rate_changed.connect(self.set_multiple_rate)
         screen.reverse_direction_changed.connect(self.set_reverse_direction)
         screen.cmp_out_width_requested.connect(self.set_cmp_out_width)
+        screen.cmp_out_polarity_requested.connect(self.set_cmp_out_polarity)
         screen.extension_channels_applied.connect(self.apply_extension_channels)
         screen.sapera_location_requested.connect(self.request_sapera_location)
         screen.sapera_diagnose_requested.connect(self.start_camera_diagnose)
@@ -1777,6 +1778,12 @@ class CcdController(QObject, LogMixin):
             for key in ("CROP", "H")
         ):
             cause = f"板卡 CROP_HEIGHT／buffer 高度與本次連線 Length {self._applied[1].length_lines} 不符；請確認 CCF 與 Length 寫入結果。"
+        elif self._machine.meter_wheel.cmp_out_width <= 0:
+            # Seen on site: the original program uses width 10; width 0 leaves the grabber nothing to see.
+            cause = (
+                "米輪 CMP Out Width 為 0，CMP_OUT 脈衝寬度 0，擷取卡收不到線觸發；請在米輪面板把 CMP Out Width 與 "
+                f"CMP OUT 極性（目前 {self._machine.meter_wheel.cmp_out_polarity}）設成原廠程式的值。"
+            )
         elif counts.get(ACQUISITION_EVENT_LINE_TRIGGER_TOO_FAST, 0):
             cause = "本張擷取卡回報行觸發太快；請核對米輪脈衝間隔、曝光與相機最大線速。"
         elif counts.get(ACQUISITION_EVENT_LINE_TRIGGER_TOO_SLOW, 0):
@@ -1812,6 +1819,14 @@ class CcdController(QObject, LogMixin):
             return None
         if self._machine.meter_wheel.compare_increment <= 0:
             self.notice.emit("Sensor 已觸發，但米輪自動遞增為 0；未開始取像，請設定每行格數。", "error")
+            return None
+        if self._machine.meter_wheel.cmp_out_width <= 0:
+            # A zero-width CMP_OUT pulse never reaches the grabber, so the frame could only hang.
+            self.notice.emit(
+                tag("E-6107", "Sensor 已觸發，但米輪 CMP Out Width 為 0，擷取卡收不到線觸發；未開始取像。"
+                    "請在米輪面板把 CMP Out Width 與 CMP OUT 極性設成原廠程式的值後再試。"),
+                "error",
+            )
             return None
         relay = self._machine.sensor_relay
         try:
@@ -2376,6 +2391,7 @@ class CcdController(QObject, LogMixin):
             "meter_wheel.compare_increment": str(wheel.compare_increment),
             "meter_wheel.multiple_rate": MultipleRate(wheel.multiple_rate).name,
             "meter_wheel.cmp_out_width": str(wheel.cmp_out_width),
+            "meter_wheel.cmp_out_polarity": str(wheel.cmp_out_polarity),
             "meter_wheel.reverse_direction": "是" if wheel.reverse_direction else "否",
             "sensor_relay.device": relay.device,
             "sensor_relay.di_port": str(relay.di_port),
@@ -2423,6 +2439,7 @@ class CcdController(QObject, LogMixin):
             ("meter_wheel.compare_increment", lambda v: self.apply_compare_increment(int(v))),
             ("meter_wheel.multiple_rate", lambda v: self.set_multiple_rate(MultipleRate(v))),
             ("meter_wheel.cmp_out_width", lambda v: self.set_cmp_out_width(int(v))),
+            ("meter_wheel.cmp_out_polarity", lambda v: self.set_cmp_out_polarity(int(v))),
             ("meter_wheel.reverse_direction", lambda v: self.set_reverse_direction(bool(v))),
         )
         for key, action in wheel_actions:
@@ -2576,6 +2593,17 @@ class CcdController(QObject, LogMixin):
         self._meter_wheel_change(
             {"reverse_direction": bool(reverse)}, self.devices.meter_wheel.set_reverse_direction, "reverse_direction"
         )
+
+    def set_cmp_out_polarity(self, polarity: int) -> None:
+        """Save the CMP_OUT polarity and rewrite CMP_OUT at once when the meter wheel is connected."""
+        settings = replace(self._machine.meter_wheel, cmp_out_polarity=int(polarity)).normalized()
+        if not self._save_meter_wheel(settings):
+            return
+        if self.devices.meter_wheel.is_connected:
+            self._meter_wheel_write(
+                lambda: self.devices.meter_wheel.set_cmp_out_width(settings.cmp_out_width, settings.cmp_out_polarity)
+            )
+        self.notice.emit(f"CMP OUT 極性已設為 {settings.cmp_out_polarity}。", "success")
 
     def set_cmp_out_width(self, width: int) -> None:
         self._meter_wheel_change({"cmp_out_width": int(width)}, self.devices.meter_wheel.set_cmp_out_width, "cmp_out_width")
@@ -3028,10 +3056,13 @@ class CcdController(QObject, LogMixin):
             f"自動遞增 {settings.compare_increment}、倍頻 {settings.multiple_rate.value}、反向 {'是' if settings.reverse_direction else '否'}",
             "推動米輪後再自檢一次，Encoder 應該改變；沒變請查編碼器接線。",
         )
-        status = CHECK_WARN if settings.compare_increment <= 0 else CHECK_PASS
+        lines = (*lines, f"CMP Out Width {settings.cmp_out_width}、CMP OUT 極性 {settings.cmp_out_polarity}（原廠程式 Compare 視窗的值）")
+        status = CHECK_WARN if settings.compare_increment <= 0 or settings.cmp_out_width <= 0 else CHECK_PASS
         detail = f"卡片 ID {settings.card_id} 已連線，Encoder {encoder}，Compare {compare}"
-        if status == CHECK_WARN:
+        if settings.compare_increment <= 0:
             detail += "；「自動遞增」為 0，外部觸發只會出一個線脈衝"
+        if settings.cmp_out_width <= 0:
+            detail += "；CMP Out Width 為 0，擷取卡收不到 CMP_OUT 線觸發，請設成原廠程式的值"
         return CheckItem(CHECK_METER_WHEEL, status, detail + "。", lines,
                          verified=("卡片連線", "Encoder／Compare 單次讀值"),
                          not_checked=("推動米輪後計數變化", "CMP_OUT 線觸發"))

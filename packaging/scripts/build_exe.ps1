@@ -45,4 +45,18 @@ try {
     Pop-Location
 }
 
+# On-site reference sheets beside the EXE: the camera machine has no network and files only go in.
+$distRoot = Join-Path $RepoRoot "dist\VisionFlow AOI"
+$siteDocs = @{
+    "docs\packaging\DEVICE_PARAMETER_GUIDE.md" = "DEVICE_PARAMETER_GUIDE.md"
+    "docs\device-error-codes.md" = "ERROR_CODES.md"
+}
+foreach ($source in $siteDocs.Keys) {
+    $sourcePath = Join-Path $RepoRoot $source
+    if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+        throw "On-site document not found: $sourcePath"
+    }
+    Copy-Item -LiteralPath $sourcePath -Destination (Join-Path $distRoot $siteDocs[$source]) -Force
+}
+
 Write-Host "Built GUI executable: dist\VisionFlow AOI\VisionFlow AOI.exe"

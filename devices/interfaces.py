@@ -180,7 +180,8 @@ class MeterWheel(ABC):
     def set_reverse_direction(self, reverse: bool) -> None: ...
 
     @abstractmethod
-    def set_cmp_out_width(self, width: int) -> None: ...
+    def set_cmp_out_width(self, width: int, polarity: int | None = None) -> None:
+        """Write CMP_OUT pulse width; `polarity` also replaces the CMP_OUT polarity when given."""
 
     @abstractmethod
     def read_extension_status(self) -> tuple[bool, ...]: ...

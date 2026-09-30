@@ -992,6 +992,8 @@ class LegacyProgramAnalyzer:
                 show=lambda rate: rate.name,
             ),
             _finding("meter_wheel.cmp_out_width", "CMP Out Width", *_collect(cmp_out, 3, r), convert=int),
+            _finding("meter_wheel.cmp_out_polarity", "CMP OUT 極性", *_collect(cmp_out, 1, r), convert=int,
+                     note="VisionFlow 連線時照這個值寫入 CMP_OUT（2026-09-30 前固定為 0）。"),
             _finding(
                 "meter_wheel.reverse_direction",
                 "反向計數",
@@ -1007,9 +1009,10 @@ class LegacyProgramAnalyzer:
                 out.append(_warning("warn.ci_mode", "米輪計數模式", f"原程式計數模式 {mode}、防抖 {debounce}；VisionFlow 固定為 0（正交）與 1（1 µs）。", [call]))
                 break
         for call in cmp_out:
-            pol, mode = _single(r, call, 1), _single(r, call, 2)
-            if (pol is not None and pol != 0) or (mode is not None and mode != 1):
-                out.append(_warning("warn.cmp_out", "CMP OUT 輸出方式", f"原程式 CMP OUT 極性 {pol}、輸出模式 {mode}；VisionFlow 固定為 0 與 1（脈衝）。", [call]))
+            # Polarity is a VisionFlow setting (imported above); only the output mode is still fixed.
+            mode = _single(r, call, 2)
+            if mode is not None and mode != 1:
+                out.append(_warning("warn.cmp_out", "CMP OUT 輸出方式", f"原程式 CMP OUT 輸出模式 {mode}；VisionFlow 固定為 1（脈衝）。", [call]))
                 break
         for call in compare_mode:
             mode = _single(r, call, 1)

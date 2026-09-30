@@ -265,6 +265,7 @@ class ObjectOrientedProgramTests(unittest.TestCase):
         self.assertValue(report, "meter_wheel.multiple_rate", MultipleRate.X1)
         # Omitted optional parameter -> its default value.
         self.assertValue(report, "meter_wheel.cmp_out_width", 25)
+        self.assertValue(report, "meter_wheel.cmp_out_polarity", 0)
         self.assertValue(report, "meter_wheel.reverse_direction", True)
         # Constructor parameter -> const string; App.config appSettings through int.Parse.
         self.assertValue(report, "sensor_relay.device", "PCIe-1730,BID#0")
@@ -301,11 +302,13 @@ class ObjectOrientedProgramTests(unittest.TestCase):
 
     def test_settings_that_vision_flow_fixes_are_reported(self):
         wheel = WHEEL.replace("LSI8181_CI_mode_set(_card, 0, 1,", "LSI8181_CI_mode_set(_card, 1, 3,")
-        wheel = wheel.replace("LSI8181_compare_CMP_OUT_set(_card, 0, 1,", "LSI8181_compare_CMP_OUT_set(_card, 1, 1,")
+        wheel = wheel.replace("LSI8181_compare_CMP_OUT_set(_card, 0, 1,", "LSI8181_compare_CMP_OUT_set(_card, 10, 2,")
         report = self.scan({"Machine/Devices/MeterWheel.cs": wheel})
         self.assertEqual(report.finding("warn.ci_mode").status, STATUS_WARNING)
         self.assertIn("計數模式 1、防抖 3", report.finding("warn.ci_mode").display)
-        self.assertIn("極性 1", report.finding("warn.cmp_out").display)
+        self.assertIn("輸出模式 2", report.finding("warn.cmp_out").display)
+        self.assertNotIn("極性", report.finding("warn.cmp_out").display, "polarity is a setting now, not a warning")
+        self.assertEqual(report.finding("meter_wheel.cmp_out_polarity").value, 10)
 
     def test_interrupt_detection_and_shaft_encoder_are_flagged(self):
         relay = RELAY.replace("public bool SensorOn()", "public void Hook() { _di.DiintChannels[0].Enabled = true; }\n        public bool SensorOn()")

@@ -4,6 +4,7 @@ import os
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from ctypes import c_uint32
 from pathlib import Path
 
@@ -214,6 +215,14 @@ class Lsi8181BindingTests(unittest.TestCase):
         self.assertEqual((self.fake.compare_mode, self.fake.increment), (2, 120))
         self.assertEqual((self.fake.cmp_out, self.fake.preset), ((0, 1, 15), 1))
         self.assertEqual(self.fake.offsets, [index * 1000 - 3000 for index in range(EXTENSION_CHANNEL_COUNT)])
+
+    def test_cmp_out_polarity_is_written_on_connect_and_when_changed(self):
+        self.meter_wheel.connect(replace(_settings(), cmp_out_polarity=10))
+        self.assertEqual(self.fake.cmp_out, (10, 1, 15), "the machine's CMP output polarity, not a fixed 0")
+        self.meter_wheel.set_cmp_out_width(10)
+        self.assertEqual(self.fake.cmp_out, (10, 1, 10), "a width change keeps the polarity")
+        self.meter_wheel.set_cmp_out_width(10, 2)
+        self.assertEqual((self.fake.cmp_out, self.fake.preset), ((2, 1, 10), 1))
         self.assertEqual(self.fake.widths, [index * 7 for index in range(EXTENSION_CHANNEL_COUNT)])
         self.assertEqual(self.fake.mask, 0b0100_1001)
         self.assertEqual(self.fake.outputs, [0, 1, 0, 0, 0, 1, 0, 1], "masked channels never drive a manual output")

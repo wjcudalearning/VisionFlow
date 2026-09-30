@@ -139,7 +139,7 @@ class UnavailableMeterWheel(MeterWheel):
     def set_reverse_direction(self, reverse: bool) -> None:
         raise DeviceError(self._reason)
 
-    def set_cmp_out_width(self, width: int) -> None:
+    def set_cmp_out_width(self, width: int, polarity: int | None = None) -> None:
         raise DeviceError(self._reason)
 
     def read_extension_status(self) -> tuple[bool, ...]:

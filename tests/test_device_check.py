@@ -167,7 +167,7 @@ class ControllerDeviceCheckTests(unittest.TestCase):
         machine = self.controller.machine_settings
         self.controller._machine = replace(
             machine,
-            meter_wheel=MeterWheelSettings(card_id=0, compare_increment=1),
+            meter_wheel=MeterWheelSettings(card_id=0, compare_increment=1, cmp_out_width=10),
             sensor_relay=SensorRelaySettings(enabled=True),
             light=LightSettings(enabled=True, port="COM3", on_commands=("ON",), reply_timeout_ms=0),
         )

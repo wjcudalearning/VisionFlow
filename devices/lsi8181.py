@@ -281,6 +281,7 @@ class Lsi8181MeterWheel(MeterWheel):
                 self._set_reverse_direction_locked(settings.reverse_direction)
                 library.call("LSI8181_compare_mode_set", "設定 Compare 自動遞增模式", card, COMPARE_AUTO_INCREMENT)
                 library.call("LSI8181_compare_increment_set", "設定 Compare 自動遞增值", card, settings.compare_increment)
+                self._cmp_out_polarity = settings.cmp_out_polarity
                 self._set_cmp_out_width_locked(settings.cmp_out_width)
                 self._apply_extension_channels_locked(channels)
                 library.call("LSI8181_counter_start", "以 Compare 輸出模式啟動計數", card, COUNTER_COMPARE)
@@ -334,10 +335,12 @@ class Lsi8181MeterWheel(MeterWheel):
             self._require_library_open()
             self._set_reverse_direction_locked(bool(reverse))
 
-    def set_cmp_out_width(self, width: int) -> None:
+    def set_cmp_out_width(self, width: int, polarity: int | None = None) -> None:
         width = _require_range(width, UINT16_RANGE, "CMP Out Width")
         with self._lock:
             self._require_library_open()
+            if polarity is not None:
+                self._cmp_out_polarity = _require_range(polarity, (0, 255), "CMP OUT 極性")
             self._set_cmp_out_width_locked(width)
 
     # ---- extension compare ------------------------------------------------
@@ -441,7 +444,7 @@ class Lsi8181MeterWheel(MeterWheel):
             "LSI8181_compare_CMP_OUT_set",
             "設定 CMP OUT 脈衝輸出",
             self._card_id,
-            CMP_OUT_NORMAL_POLARITY,
+            getattr(self, "_cmp_out_polarity", CMP_OUT_NORMAL_POLARITY),
             CMP_OUT_PULSE,
             width,
         )

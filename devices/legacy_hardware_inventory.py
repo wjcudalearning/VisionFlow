@@ -48,7 +48,7 @@ LSI_FUNCTIONS: dict[str, tuple[str, tuple[Argument, ...]]] = {
     "LSI8181_compare_increment_set": ("Compare 自動遞增", (_CARD, _setting("每行格數", "自動遞增"))),
     "LSI8181_compare_CMP_OUT_set": (
         "CMP_OUT 輸出",
-        (_CARD, _fixed("極性", 0), _fixed("輸出模式", 1), _setting("脈寬", "CMP Out Width")),
+        (_CARD, _setting("極性", "CMP OUT 極性"), _fixed("輸出模式", 1), _setting("脈寬", "CMP Out Width")),
     ),
     "LSI8181_toggle_preset": ("CMP_OUT 啟用", (_CARD, _fixed("啟用", 1))),
     "LSI8181_counter_start": ("計數啟動", (_CARD, _fixed("模式", 2))),

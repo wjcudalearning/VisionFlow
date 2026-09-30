@@ -267,6 +267,9 @@ class MeterWheelSettings:
     multiple_rate: MultipleRate = MultipleRate.X4
     reverse_direction: bool = False
     cmp_out_width: int = 0
+    # LSI8181_compare_CMP_OUT_set polarity, as the vendor program's CMP output polarity shows it.
+    # 0 was fixed before 2026-09-30; the camera machine needs its original program's value.
+    cmp_out_polarity: int = 0
     encoder_value: int = 0
     compare_value: int = 0
     extension_channels: tuple[ExtensionCompareChannel, ...] = field(default_factory=_default_extension_channels)
@@ -284,6 +287,7 @@ class MeterWheelSettings:
             multiple_rate=MultipleRate(self.multiple_rate),
             reverse_direction=bool(self.reverse_direction),
             cmp_out_width=int(_clamp(int(self.cmp_out_width), UINT16_RANGE)),
+            cmp_out_polarity=int(_clamp(int(self.cmp_out_polarity), CMP_OUT_POLARITY_RANGE)),
             encoder_value=int(_clamp(int(self.encoder_value), COUNTER_RANGE)),
             compare_value=int(_clamp(int(self.compare_value), COUNTER_RANGE)),
             extension_channels=tuple(channel.normalized() for channel in channels),
@@ -291,6 +295,7 @@ class MeterWheelSettings:
         )
 
 
+CMP_OUT_POLARITY_RANGE = (0, 255)
 DIO_PORT_RANGE = (0, 15)
 DIO_BIT_RANGE = (0, 7)
 SENSOR_PULSE_MS_RANGE = (0.1, 100.0)

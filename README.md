@@ -444,7 +444,11 @@ FFT 是 `visionflow_cuda.dll` 內建的 Stockham radix-2／4 kernel，不需要 
 
 ```text
 dist\VisionFlow AOI\VisionFlow AOI.exe
+dist\VisionFlow AOI\DEVICE_PARAMETER_GUIDE.md
+dist\VisionFlow AOI\ERROR_CODES.md
 ```
+
+EXE 旁邊的兩份說明是現場用的：`DEVICE_PARAMETER_GUIDE.md`（來源 `docs/packaging/DEVICE_PARAMETER_GUIDE.md`）把原廠程式的米輪、相機、Sensor、光源參數對到 CCD 頁的欄位位置；`ERROR_CODES.md` 是 `docs/device-error-codes.md` 的設備錯誤代碼表。相機機台無法把檔案帶出，這兩份隨 ZIP 帶進去對照。
 
 所有 `packaging\scripts\build_*.ps1` 會在 PyInstaller 執行期間暫時排除 `%USERPROFILE%\.cache\codex-runtimes` 等 agent runtime 的 PATH 項目，避免外部 `ucrtbase.dll`、ICU 或 OpenSSL 被打包而導致 QtCore 載入失敗；建置結束後 PATH 會還原。
 

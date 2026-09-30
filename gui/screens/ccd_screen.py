@@ -50,6 +50,7 @@ from devices.ccd_models import (
     SENSOR_PULSE_MS_RANGE,
     TRIGGER_MODE_LABELS,
     UINT16_RANGE,
+    CMP_OUT_POLARITY_RANGE,
     AcquisitionSettings,
     CameraConnectionSettings,
     CameraRecipeSettings,
@@ -240,6 +241,7 @@ class CcdScreen(QWidget):
     multiple_rate_changed = Signal(object)
     reverse_direction_changed = Signal(bool)
     cmp_out_width_requested = Signal(int)
+    cmp_out_polarity_requested = Signal(int)
     extension_channels_applied = Signal(object)
     sapera_location_requested = Signal(object)
     sapera_diagnose_requested = Signal()
@@ -726,6 +728,16 @@ class CcdScreen(QWidget):
         self.cmp_width_input = self.gate.register(NumStepper(0, *UINT16_RANGE))
         self.cmp_width_set_button = self.gate.register(_button("設定"))
         form.addRow("CMP Out Width", _row(self.cmp_width_input, self.cmp_width_set_button, stretch_last=False))
+        self.cmp_polarity_input = self.gate.register(NumStepper(0, *CMP_OUT_POLARITY_RANGE))
+        self.cmp_polarity_input.setToolTip(
+            "照原廠程式 Compare 視窗的 CMP output polarity 填入。原廠若顯示成兩個位元或勾選框（例如 1、0），"
+            "那是二進位，請換成十進位（二進位 10 = 2）；不確定時兩個都試。VisionFlow 連線時一律啟用 CMP output。"
+        )
+        self.cmp_polarity_set_button = self.gate.register(_button("設定"))
+        self.cmp_polarity_set_button.clicked.connect(
+            lambda: self.cmp_out_polarity_requested.emit(int(self.cmp_polarity_input.value()))
+        )
+        form.addRow("CMP OUT 極性", _row(self.cmp_polarity_input, self.cmp_polarity_set_button, stretch_last=False))
         panel.add_layout(form)
 
         self.encoder_set_button.clicked.connect(lambda: self.encoder_set_requested.emit(int(self.encoder_input.value())))
@@ -1530,6 +1542,7 @@ class CcdScreen(QWidget):
             self.multiple_rate_combo.setCurrentIndex(max(0, self.multiple_rate_combo.findData(settings.multiple_rate.value)))
             self.reverse_direction_check.setChecked(settings.reverse_direction)
             self.cmp_width_input.setValue(settings.cmp_out_width)
+            self.cmp_polarity_input.setValue(settings.cmp_out_polarity)
             for row, channel in zip(self.extension_rows, settings.extension_channels):
                 row["mask"].setChecked(channel.masked)
                 row["offset"].setValue(channel.offset)

@@ -121,6 +121,19 @@ class GuiThreadingPackagingContractTests(unittest.TestCase):
         self.assertNotIn('"--add-binary"', build)
         self.assertIn("CPU-compatible package", build)
 
+    def test_on_site_reference_sheets_are_copied_beside_the_exe(self):
+        build_path = BUILD_DIR / "build_exe.ps1"
+        self.assertTrue(build_path.read_bytes().isascii(), "Windows PowerShell 5.1 reads BOM-less scripts as ANSI")
+        build = build_path.read_text(encoding="ascii")
+        self.assertIn('"docs\\packaging\\DEVICE_PARAMETER_GUIDE.md" = "DEVICE_PARAMETER_GUIDE.md"', build)
+        self.assertIn('"docs\\device-error-codes.md" = "ERROR_CODES.md"', build)
+        guide = (ROOT / "docs" / "packaging" / "DEVICE_PARAMETER_GUIDE.md").read_text(encoding="utf-8")
+        for label in ("CMP Out Width", "CMP OUT 極性", "影像長度（線）", "Sensor DI", "亮度指令範本", "儲存 Recipe"):
+            self.assertIn(label, guide)
+        screen = (ROOT / "gui" / "screens" / "ccd_screen.py").read_text(encoding="utf-8")
+        for label in ("CMP Out Width", "CMP OUT 極性", "影像長度（線）", "Sensor DI", "亮度指令範本", "軟體觸發起拍", "起拍偏移（格）"):
+            self.assertIn(f'"{label}"', screen, f"the guide points at a label the CCD page really shows: {label}")
+
     def test_every_pyinstaller_build_runs_behind_the_path_guard(self):
         guard = BUILD_DIR / "pyinstaller_path_guard.ps1"
         self.assertTrue(guard.read_bytes().isascii())

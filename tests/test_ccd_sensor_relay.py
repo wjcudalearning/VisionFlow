@@ -414,6 +414,7 @@ class ControllerSensorRelayTests(unittest.TestCase):
         self.controller.connect_camera()
         self.assertTrue(self.controller.connect_meter_wheel(0))
         self.controller.apply_compare_increment(1)
+        self.controller.set_cmp_out_width(10)  # the camera machine's original program uses 10
         self.controller.set_encoder(0)
 
     def _edge(self, value: bool = True) -> None:
@@ -557,6 +558,25 @@ class ControllerSensorRelayTests(unittest.TestCase):
         self.controller.poll_meter_wheel()
         self.assertEqual(len([text for text, _kind in self.notices if "[E-6107]" in text]), 1, "once per capture")
         self.camera.complete_capture()
+
+    def test_zero_cmp_out_width_refuses_the_snap(self):
+        self._setup(TriggerSettings(TriggerMode.SOFTWARE))
+        self.controller.set_cmp_out_width(0)
+        self.screen.preview_button.click()
+        self.assertTrue(_wait_until(lambda: self.controller.sensor_relay_stats.polls > 1))
+        self._edge()
+        self.assertTrue(_wait_until(lambda: any("CMP Out Width 為 0" in text for text, _kind in self.notices)))
+        self.assertEqual(self.camera.status().state, CameraState.IDLE)
+        self.assertFalse(self.controller._sensor_capture_in_flight)
+
+    def test_cmp_out_polarity_is_saved_and_written(self):
+        self._setup(TriggerSettings(TriggerMode.SOFTWARE))
+        self.screen.cmp_polarity_input.setValue(10)
+        self.screen.cmp_polarity_set_button.click()
+        self.assertEqual(self.controller.machine_settings.meter_wheel.cmp_out_polarity, 10)
+        self.assertEqual(self.store.load().meter_wheel.cmp_out_polarity, 10)
+        self.assertEqual(self.meter_wheel.settings.cmp_out_polarity, 10, "rewritten while connected")
+        self.assertEqual(self.controller.legacy_current_values()["meter_wheel.cmp_out_polarity"], "10")
 
     def test_line_trigger_hint_follows_where_the_compare_sits(self):
         hint = CcdController._line_trigger_hint
