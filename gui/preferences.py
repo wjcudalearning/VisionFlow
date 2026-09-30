@@ -18,6 +18,12 @@ class GuiPreferences:
     def set_value(self, key: str, value) -> None:
         self.settings.setValue(key, value)
 
+    def bool_value(self, key: str, default: bool = False) -> bool:
+        value = self.value(key, default)
+        if isinstance(value, str):
+            return value.lower() in {"true", "1"}
+        return bool(value)
+
     def existing_path(self, key: str) -> Path | None:
         raw = str(self.value(key, "") or "")
         path = Path(raw) if raw else None

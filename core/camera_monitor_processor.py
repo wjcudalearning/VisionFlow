@@ -28,7 +28,7 @@ from core.processor_common import GenerationZeroGcThrottle, summarize_pipeline_r
 # a full queue reports the frame as not inspected instead of growing without bound.
 CAMERA_FRAME_QUEUE_CAPACITY = 4
 QUEUE_POLL_SEC = 0.1
-RAW_FRAME_SUBDIR = "raw"
+RAW_FRAME_SUBDIR = "origin"
 
 
 @dataclass(frozen=True)
@@ -57,17 +57,20 @@ class DroppedFrame:
     source_name: str
     received_at: float
     metadata: dict = field(default_factory=dict)
+    image: np.ndarray | None = field(default=None, repr=False, compare=False)
 
 
 class CameraFrameQueue:
     """Bounded, thread-safe hand-off from a camera driver thread to one inspection worker."""
 
-    def __init__(self, capacity: int = CAMERA_FRAME_QUEUE_CAPACITY):
+    def __init__(self, capacity: int = CAMERA_FRAME_QUEUE_CAPACITY, retain_dropped_frames: bool = False):
         self.capacity = max(1, int(capacity))
         self._condition = threading.Condition()
         self._frames: deque[CapturedFrame] = deque()
         self._dropped: deque[DroppedFrame] = deque()
         self._closed = False
+        self.retain_dropped_frames = bool(retain_dropped_frames)
+        self._retained_dropped_count = 0
 
     @property
     def closed(self) -> bool:
@@ -79,8 +82,14 @@ class CameraFrameQueue:
             if self._closed:
                 return False
             if len(self._frames) >= self.capacity:
-                # Only the name is kept; the pixels are released immediately.
-                self._dropped.append(DroppedFrame(frame.source_name, frame.received_at, dict(frame.metadata)))
+                # Keep at most one extra frame for ERROR evidence; never accumulate large pixels
+                # without bound when acquisition is faster than inspection/disk writing.
+                keep_pixels = self.retain_dropped_frames and self._retained_dropped_count == 0
+                self._dropped.append(DroppedFrame(
+                    frame.source_name, frame.received_at, dict(frame.metadata),
+                    frame.image if keep_pixels else None,
+                ))
+                self._retained_dropped_count += int(keep_pixels)
                 self._condition.notify()
                 return False
             self._frames.append(frame)
@@ -97,6 +106,7 @@ class CameraFrameQueue:
         with self._condition:
             dropped = list(self._dropped)
             self._dropped.clear()
+            self._retained_dropped_count = 0
             return dropped
 
     def pending(self) -> int:
@@ -185,6 +195,17 @@ class CameraMonitorProcessor(LogMixin):
         session_started = time.perf_counter()
         try:
             summary = self._run(started_at, monitor_output_dir, session_started)
+        except Exception as exc:
+            # Recipe/GPU initialization can fail before _inspect starts. Already received frames
+            # still need original evidence even though this monitoring run cannot continue.
+            self.frame_queue.close()
+            while (frame := self.frame_queue.get(0)) is not None:
+                processing_started = time.perf_counter()
+                raw_info = self._finish_raw_save(frame.source_name, self._start_raw_save(frame, monitor_output_dir))
+                item = self._error_item(frame.source_name, f"監控失敗，此影像未檢測：{exc}")
+                self._emit(item, frame.received_at, processing_started, 0.0, frame.metadata, raw_info)
+            self._report_dropped(monitor_output_dir)
+            raise
         finally:
             if self._raw_executor is not None:
                 self._raw_executor.shutdown(wait=True)
@@ -202,7 +223,7 @@ class CameraMonitorProcessor(LogMixin):
             self.logger.info("Camera monitor GPU warm-up: %s", gpu_warmup)
             self._progress(0, f"{GpuExecutionSession.warm_up_notice(gpu_warmup)}等待相機觸發影像")
             while not self._should_stop():
-                self._report_dropped()
+                self._report_dropped(monitor_output_dir)
                 frame = self.frame_queue.get(QUEUE_POLL_SEC)
                 if frame is not None:
                     self._inspect(frame, monitor_output_dir, gpu_session)
@@ -212,7 +233,7 @@ class CameraMonitorProcessor(LogMixin):
                 self._progress(0, f"監控停止中，完成佇列中的 {remaining} 張影像")
             while (frame := self.frame_queue.get(0)) is not None:
                 self._inspect(frame, monitor_output_dir, gpu_session)
-            self._report_dropped()
+            self._report_dropped(monitor_output_dir)
 
         finished_at = datetime.datetime.now()
         summary = {
@@ -224,6 +245,7 @@ class CameraMonitorProcessor(LogMixin):
             "processed": self._processed_count,
             "dropped": self._dropped_count,
             "gpu_warmup": gpu_warmup,
+            "raw_save_enabled": self.raw_frame_saver is not None,
         }
         if self.raw_frame_saver is not None:
             summary["raw_dir"] = str(monitor_output_dir / RAW_FRAME_SUBDIR)
@@ -305,17 +327,27 @@ class CameraMonitorProcessor(LogMixin):
             },
         }
 
-    def _report_dropped(self) -> None:
+    def _report_dropped(self, monitor_output_dir: Path) -> None:
         for dropped in self.frame_queue.take_dropped():
             self._dropped_count += 1
             self.logger.warning("Camera frame dropped: frame=%s capacity=%s", dropped.source_name, self.frame_queue.capacity)
-            not_saved = "，原圖也未存入監控資料夾" if self.raw_frame_saver is not None else ""
+            now = time.perf_counter()
+            raw_info = {}
+            if self.raw_frame_saver is not None:
+                if dropped.image is not None:
+                    frame = CapturedFrame(dropped.image, dropped.source_name, dropped.received_at, dropped.metadata)
+                    raw_info = self._finish_raw_save(
+                        dropped.source_name, self._start_raw_save(frame, monitor_output_dir)
+                    )
+                else:
+                    self._raw_failed_count += 1
+                    raw_info = {"raw_image_error": "原圖保存失敗：檢測與原圖暫存皆已滿，無法保留此 frame。"}
+                    self.logger.warning("Camera original unavailable: frame=%s reason=overflow evidence full", dropped.source_name)
             item = self._error_item(
                 dropped.source_name,
-                f"檢測佇列已滿（上限 {self.frame_queue.capacity} 張），此影像未檢測{not_saved}。",
+                f"檢測佇列已滿（上限 {self.frame_queue.capacity} 張），此影像未檢測。",
             )
-            now = time.perf_counter()
-            self._emit(item, dropped.received_at, now, 0.0, dropped.metadata)
+            self._emit(item, dropped.received_at, now, 0.0, dropped.metadata, raw_info)
 
     @staticmethod
     def _error_item(source_name: str, message: str) -> MonitorImageResult:
@@ -355,6 +387,7 @@ class CameraMonitorProcessor(LogMixin):
         data["timing"] = timing
         data["source"] = "camera"
         data["camera"] = dict(metadata)
+        data["raw_save_enabled"] = self.raw_frame_saver is not None
         data.update(raw_info)
         if self.item_callback is not None:
             self.item_callback(data)

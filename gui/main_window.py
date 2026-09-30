@@ -217,6 +217,7 @@ class MainWindow(QMainWindow, LogMixin):
         self.monitor_running = False
         self.monitor_result: dict | None = None
         self.monitor_source = MONITOR_SOURCE_FOLDER
+        self.monitor_save_original = self.preferences.bool_value("monitor/save_original", True)
         self._current_screen = "run"
         self._restored_viewer_zoom = 0.0
         self._restored_monitor_splitter_sizes: list[int] | None = None
@@ -471,6 +472,13 @@ class MainWindow(QMainWindow, LogMixin):
             output_form.addRow(label, toggle)
         self._sync_ng_tile_group_toggle()
 
+        self.monitor_original_toggle = Toggle(checked=self.monitor_save_original)
+        self.monitor_original_toggle.setToolTip(
+            "相機直連時與分析併行保存原圖，含分析 ERROR，存到本次分析目錄的 origin/。停止監控後可變更。"
+        )
+        self.monitor_original_toggle.toggled.connect(self._on_monitor_original_toggled)
+        output_form.addRow("相機直連保存原圖", self.monitor_original_toggle)
+
         drawer.add_layout(output_form)
 
         drawer.add_widget(_section_label("機台"))
@@ -668,6 +676,7 @@ class MainWindow(QMainWindow, LogMixin):
         self.preferences.set_value("paths/monitor", str(self.monitor_dir or ""))
         self.preferences.set_value("paths/monitor_move", str(self.monitor_move_dir or ""))
         self.preferences.set_value("monitor/source", self.monitor_source)
+        self.preferences.set_value("monitor/save_original", self.monitor_save_original)
         self.preferences.set_value(
             "paths/yolox_model_directory", str(self.yolox_model_directory or "")
         )
@@ -933,6 +942,14 @@ class MainWindow(QMainWindow, LogMixin):
         else:
             self._notice(f"相機參數與 Recipe 設計內容相同；{write_text}", "success")
 
+    def _on_monitor_original_toggled(self, checked: bool) -> None:
+        if self.monitor_running:
+            self.monitor_original_toggle.setChecked(self.monitor_save_original)
+            return
+        self.monitor_save_original = bool(checked)
+        self.preferences.set_value("monitor/save_original", self.monitor_save_original)
+        self.preferences.settings.sync()
+
     def _start_monitoring(self) -> None:
         camera_source = self.monitor_source == MONITOR_SOURCE_CAMERA
         if camera_source:
@@ -954,6 +971,7 @@ class MainWindow(QMainWindow, LogMixin):
             return
 
         self.monitor_running = True
+        self.monitor_original_toggle.setEnabled(False)
         self.monitor_result = None
         self.monitor_screen.clear_items()
         self._update_monitor_ready()
@@ -962,9 +980,8 @@ class MainWindow(QMainWindow, LogMixin):
         self.statusBar().showMessage("監控模式中")
 
         if camera_source:
-            frame_queue = CameraFrameQueue()
-            # Every inspected frame is saved to the monitor folder while it is inspected, from the same
-            # in-memory frame, so the original is kept without a write-then-read round trip.
+            frame_queue = CameraFrameQueue(retain_dropped_frames=self.monitor_save_original)
+            # When enabled, save the same in-memory frame while inspecting it, without a file round trip.
             worker = CameraMonitorWorker(
                 frame_queue=frame_queue,
                 recipe_path=self.recipe_path,
@@ -972,7 +989,7 @@ class MainWindow(QMainWindow, LogMixin):
                 output_overrides=dict(self.output_opts),
                 warmup_image_path=self.image_path,
                 gpu_session_cache=self._inspection_gpu_sessions,
-                raw_frame_saver=self.ccd_controller.raw_frame_saver(),
+                raw_frame_saver=self.ccd_controller.raw_frame_saver() if self.monitor_save_original else None,
             )
         else:
             worker = FolderMonitorWorker(
@@ -998,7 +1015,7 @@ class MainWindow(QMainWindow, LogMixin):
         if camera_source:
             # Attached after the worker runs: switching the light on or arming acquisition may fail at
             # once, and that failure stops the monitor through the normal path.
-            self.ccd_controller.attach_inspection_queue(frame_queue, monitor_saves_raw=True)
+            self.ccd_controller.attach_inspection_queue(frame_queue, monitor_saves_raw=self.monitor_save_original)
 
     def _on_camera_monitor_armed(self, message: str) -> None:
         if self.monitor_running:
@@ -1033,11 +1050,16 @@ class MainWindow(QMainWindow, LogMixin):
             self.topbar.set_backend_status(_backend_status_from_result(item["detail"]))
         final = item.get("final_result", "-")
         self.statusBar().showMessage(f"監控完成：{item.get('image_name', '')} → {final}")
+        if item.get("raw_image_error"):
+            self._notice(f"{item.get('image_name', '')}：{item['raw_image_error']}", "warning")
 
     def _open_monitor_original_image(self, item: dict) -> None:
         if item.get("source") == "camera":
             if not item.get("raw_image_path"):
-                message = str(item.get("raw_image_error") or CAMERA_MONITOR_NO_ORIGINAL_MESSAGE)
+                message = str(item.get("raw_image_error") or (
+                    "此輪相機直連監控已關閉保存原圖；可於設定 → 輸出開啟。"
+                    if item.get("raw_save_enabled") is False else CAMERA_MONITOR_NO_ORIGINAL_MESSAGE
+                ))
                 self._notice(message, "info")
                 return
             image_path = Path(str(item["raw_image_path"]))
@@ -1065,6 +1087,7 @@ class MainWindow(QMainWindow, LogMixin):
     def _on_monitor_thread_finished(self) -> None:
         self.ccd_controller.detach_inspection_queue()
         self.monitor_running = False
+        self.monitor_original_toggle.setEnabled(True)
         self._monitor_controller.clear()
         self.topbar.set_running(False, 0)
         self._update_monitor_ready()

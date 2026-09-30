@@ -45,6 +45,7 @@ from devices.frame_writer import write_frame_atomic
 from devices.simulated import SimulatedDigitalIo, SimulatedLight, SimulatedLineScanCamera, SimulatedMeterWheel
 from gui.ccd_controller import CcdController
 from gui.main_window import CAMERA_MONITOR_NO_ORIGINAL_MESSAGE, CAMERA_MONITOR_READY_MESSAGE, MainWindow
+from gui.preferences import GuiPreferences
 from gui.workers import CameraMonitorWorker
 from gui_launcher import _packaged_smoke_recipe
 
@@ -130,6 +131,17 @@ class PipelineFrameTests(unittest.TestCase):
 
 
 class FrameQueueTests(unittest.TestCase):
+    def test_overflow_evidence_retains_only_one_extra_frame_and_releases_the_slot(self):
+        queue = CameraFrameQueue(capacity=1, retain_dropped_frames=True)
+        frame = _gray_frame(1, (2, 2))
+        for index in range(4):
+            queue.put(CapturedFrame(frame, f"f{index}", 0))
+        dropped = queue.take_dropped()
+        self.assertIs(dropped[0].image, frame)
+        self.assertTrue(all(item.image is None for item in dropped[1:]))
+        self.assertFalse(queue.put(CapturedFrame(frame, "f4", 0)))
+        self.assertIs(queue.take_dropped()[0].image, frame)
+
     def test_queue_is_bounded_records_drops_and_rejects_after_close(self):
         queue = CameraFrameQueue(capacity=2)
         frames = [CapturedFrame(_gray_frame(index, (2, 2)), f"f{index}", float(index), {"i": index}) for index in range(4)]
@@ -197,7 +209,7 @@ class CameraMonitorProcessorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             recipe_path = _write_recipe(root, save_json=False)
-            queue = CameraFrameQueue(capacity=2)
+            queue = CameraFrameQueue(capacity=2, retain_dropped_frames=True)
             for index, frame in enumerate(frames):
                 queue.put(CapturedFrame(frame, f"camera_{index}", time.perf_counter(), {"frame_index": index}))
             queue.put(CapturedFrame(_gray_frame(9), "camera_dropped", time.perf_counter(), {}))
@@ -219,18 +231,67 @@ class CameraMonitorProcessorTests(unittest.TestCase):
         self.assertEqual(overlapped, [True, True])
         self.assertTrue(all(name.startswith("camera-raw") for name in writer_threads))
         self.assertEqual(raw_dir.name, RAW_FRAME_SUBDIR)
-        self.assertEqual(saved, ["camera_0.bmp", "camera_1.bmp"], "no .tmp leftovers and dropped frames are not saved")
+        self.assertEqual(saved, ["camera_0.bmp", "camera_1.bmp", "camera_dropped.bmp"], "no .tmp leftovers")
         for frame, pixels in zip(frames, reloaded):
             np.testing.assert_array_equal(pixels, frame_to_bgr(frame))
         *inspected, dropped = items
-        self.assertIn("原圖也未存入監控資料夾", dropped["error"])
-        self.assertNotIn("raw_image_path", dropped)
+        self.assertEqual(dropped["final_result"], "ERROR")
+        self.assertEqual(Path(dropped["raw_image_path"]).name, "camera_dropped.bmp")
         self.assertEqual([Path(item["raw_image_path"]).name for item in inspected], ["camera_0.bmp", "camera_1.bmp"])
         for item in inspected:
             self.assertIn(item["final_result"], {"PASS", "NG"})
             self.assertGreaterEqual(item["timing"]["raw_save_sec"], 0.0)
             self.assertGreaterEqual(item["timing"]["raw_save_wait_sec"], 0.0)
-        self.assertEqual((summary["raw_saved"], summary["raw_failed"]), (2, 0))
+        self.assertEqual((summary["raw_saved"], summary["raw_failed"]), (3, 0))
+
+    def test_analysis_exception_still_saves_original_in_parallel(self):
+        analysis_started = threading.Event()
+        write_started = threading.Event()
+        frame = _gray_frame()
+
+        def write(image, path):
+            write_started.set()
+            self.assertTrue(analysis_started.wait(5), "writer must overlap analysis")
+            return write_frame_atomic(image, path, ImageSaveFormat.BMP)
+
+        def fail_analysis(*args, **kwargs):
+            analysis_started.set()
+            self.assertTrue(write_started.wait(5), "analysis must not wait for saving")
+            raise RuntimeError("injected analysis error")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            queue = CameraFrameQueue()
+            queue.put(CapturedFrame(frame, "analysis_error", time.perf_counter()))
+            items = []
+            with patch.object(AOIPipeline, "run_frame", side_effect=fail_analysis):
+                summary = CameraMonitorProcessor(
+                    queue, _write_recipe(root), root / "out", item_callback=items.append,
+                    stop_callback=lambda: True, raw_frame_saver=RawFrameSaver(".bmp", write),
+                ).run()
+            original_path = Path(items[0]["raw_image_path"])
+            self.assertEqual(original_path.parent, Path(summary["output_dir"]) / "origin")
+            np.testing.assert_array_equal(load_image(original_path), frame_to_bgr(frame))
+        self.assertEqual(items[0]["final_result"], "ERROR")
+        self.assertIn("injected analysis error", items[0]["error"])
+        self.assertEqual(summary["raw_saved"], 1)
+
+    def test_overflow_beyond_evidence_capacity_reports_missing_original(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            queue = CameraFrameQueue(capacity=1, retain_dropped_frames=True)
+            for index in range(3):
+                queue.put(CapturedFrame(_gray_frame(index), f"f{index}", time.perf_counter()))
+            items = []
+            summary = CameraMonitorProcessor(
+                queue, _write_recipe(root), root / "out", item_callback=items.append,
+                stop_callback=lambda: True,
+                raw_frame_saver=RawFrameSaver(".bmp", lambda frame, path: write_frame_atomic(frame, path, ImageSaveFormat.BMP)),
+            ).run()
+        missing = next(item for item in items if item["image_name"] == "f2")
+        self.assertEqual(missing["final_result"], "ERROR")
+        self.assertIn("暫存皆已滿", missing["raw_image_error"])
+        self.assertEqual((summary["raw_saved"], summary["raw_failed"]), (2, 1))
 
     def test_raw_save_failure_keeps_the_inspection_result(self):
         def failing_write(frame, path):
@@ -254,6 +315,25 @@ class CameraMonitorProcessorTests(unittest.TestCase):
         self.assertIn("disk full", items[0]["raw_image_error"])
         self.assertNotIn("raw_image_path", items[0])
         self.assertEqual((summary["raw_saved"], summary["raw_failed"]), (0, 1))
+
+    def test_initialization_failure_preserves_received_original_before_worker_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            queue = CameraFrameQueue()
+            frame = _gray_frame()
+            queue.put(CapturedFrame(frame, "initialization_error", time.perf_counter()))
+            items = []
+            processor = CameraMonitorProcessor(
+                queue, root / "missing.yaml", root / "out", item_callback=items.append,
+                stop_callback=lambda: True,
+                raw_frame_saver=RawFrameSaver(".bmp", lambda image, path: write_frame_atomic(image, path, ImageSaveFormat.BMP)),
+            )
+            with self.assertRaises(Exception):
+                processor.run()
+            self.assertTrue(queue.closed)
+            self.assertEqual(items[0]["final_result"], "ERROR")
+            self.assertIn("未檢測", items[0]["error"])
+            np.testing.assert_array_equal(load_image(Path(items[0]["raw_image_path"])), frame_to_bgr(frame))
 
     def test_worker_failure_is_reported_and_closes_the_queue(self):
         app = QApplication.instance() or QApplication([])
@@ -526,6 +606,7 @@ class MainWindowCameraMonitorTests(unittest.TestCase):
 
                 window._start_monitoring()
                 self.assertTrue(window.monitor_running)
+                self.assertFalse(window.monitor_original_toggle.isEnabled())
                 self.assertFalse(panel.source_segmented.isEnabled())
                 camera.emit_frame()
                 camera.emit_frame()
@@ -544,6 +625,7 @@ class MainWindowCameraMonitorTests(unittest.TestCase):
 
                 raw_paths = [Path(item["raw_image_path"]) for item in items]
                 self.assertTrue(all(path.exists() for path in raw_paths))
+                self.assertTrue(all(path.parent.name == "origin" for path in raw_paths))
                 self.assertEqual(window.monitor_result["raw_saved"], 2)
                 with patch("gui.main_window.QDesktopServices.openUrl") as open_url:
                     window._open_monitor_original_image(items[0])
@@ -551,6 +633,23 @@ class MainWindowCameraMonitorTests(unittest.TestCase):
                 window._open_monitor_original_image({"source": "camera"})
                 self.assertEqual(window.notice_bar.label.text(), CAMERA_MONITOR_NO_ORIGINAL_MESSAGE)
                 self.assertEqual(camera.status().state, CameraState.IDLE, "Stop ends the preview monitoring started")
+
+                self.assertTrue(window.monitor_original_toggle.isEnabled())
+                window.monitor_original_toggle.setChecked(False)
+                fresh_preferences = GuiPreferences(QSettings(str(root / "gui.ini"), QSettings.Format.IniFormat))
+                self.assertFalse(fresh_preferences.bool_value("monitor/save_original", True))
+                window.output_dir = str(root / "disabled_outputs")
+                window._start_monitoring()
+                camera.emit_frame()
+                self.assertTrue(_wait_until(lambda: len(window.monitor_screen.items()) == 1))
+                disabled_item = window.monitor_screen.items()[0]
+                self.assertNotIn("raw_image_path", disabled_item)
+                self.assertFalse(disabled_item["raw_save_enabled"])
+                window._stop_monitoring()
+                self.assertTrue(_wait_until(lambda: not window.monitor_running))
+                self.assertFalse((Path(window.monitor_result["output_dir"]) / "origin").exists())
+                window._open_monitor_original_image(disabled_item)
+                self.assertIn("已關閉保存原圖", window.notice_bar.label.text())
 
                 # An enabled light that cannot be switched on stops monitoring before any frame is inspected.
                 window.ccd_controller._machine = replace(window.ccd_controller._machine, light=LightSettings(enabled=True))
