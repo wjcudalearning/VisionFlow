@@ -4,7 +4,7 @@
 
 ## 設備與相機直連監控
 
-目前原始碼的相機直連監控提供「設定 → 輸出 → 相機直連保存原圖」（預設開啟、持久化）；原圖與分析併行保存到同次輸出的 `origin/`，分析 ERROR 也保存。佇列與原圖暫存皆滿、或磁碟寫入失敗時會明確回報。此新增行為尚未打包到既有 v1.11.7。
+目前原始碼的相機直連監控提供「設定 → 輸出 → 相機直連保存原圖」（預設開啟、持久化）；原圖與分析併行保存到同次輸出的 `origin/`，分析 ERROR 也保存。佇列與原圖暫存皆滿、或磁碟寫入失敗時會明確回報。此新增行為納入 v2.0.0 發行版。
 
 2026-09-30 使用者回報現場設備測試皆通過，包含相機直連監控成功。基本取像、米輪線觸發、Sensor 軟體觸發、光源開關與 Recipe 相機設定已確認；長時間壓測、資源量測及完整診斷／故障注入驗收見 [`../Todo.md`](../Todo.md)。
 
@@ -22,6 +22,7 @@ Release notes 位於 [`release-notes/`](release-notes/)，檔名同時標示產�
 
 目前版本：
 
+- [`visionflow-aoi-v2.0.0.md`](release-notes/visionflow-aoi-v2.0.0.md)
 - [`visionflow-aoi-v1.11.7.md`](release-notes/visionflow-aoi-v1.11.7.md)
 - [`visionflow-aoi-v1.11.6.md`](release-notes/visionflow-aoi-v1.11.6.md)
 - [`visionflow-aoi-v1.11.5.md`](release-notes/visionflow-aoi-v1.11.5.md)

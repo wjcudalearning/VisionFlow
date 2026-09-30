@@ -37,7 +37,7 @@ try {
         VersionInfoPath = (Join-Path $RepoRoot "build\version_info\VisionFlow AOI.txt")
         ProductName = "VisionFlow AOI"
         ExecutableName = "VisionFlow AOI.exe"
-        Version = "0.0.0"
+        Version = "2.0.0"
     }
     Invoke-PyInstallerBuild @buildArguments
 } finally {

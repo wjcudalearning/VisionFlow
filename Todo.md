@@ -914,7 +914,7 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 - [x] **相機直連監控的檢測後端**（2026-09-17）：直接採記憶體交接，不走「存 BMP 到監控資料夾」的第一階段（同一行程內寫出再讀回大型 BMP 沒有好處）。`AOIPipeline.run_frame(frame, source_name, source_metadata)` 以 `frame_to_bgr` 轉成與 8-bit BMP 解碼逐像素相同的 BGR 影像，檔案路徑入口與結果欄位不變；相機 frame 結果多一個 `source`（type=camera、frame 序號、擷取時間、觸發模式、尺寸）並寫入 JSON。`CcdController` 只在相機以外部觸發或軟體觸發連線時，把完成的 frame 交給有界 `CameraFrameQueue`（預設 4 張，滿了記為未檢測），連續取像的 frame 一律不檢測；`CameraMonitorProcessor` 共用一個 GPU session 依序檢測，產生與資料夾監控相同格式的表格項目（`source=camera`、`camera` metadata、佇列等待／檢測／端到端時間），停止時新 frame 立即停止交接、佇列中已收到的 frame 仍會檢測完，輸出到 `outputs/monitor/<時間>_camera/`。GPU mode 下 frame 視為已解碼影像，與檔案相同只上傳一次。
 - 原「第一階段：CCD 自動存 BMP 到 Monitor 資料夾」已由記憶體交接取代，不實作；監控原圖改由設定 → 輸出 → 相機直連保存原圖控制，Recipe 自動快照仍獨立生效。
 - [x] **相機直連監控邊檢測邊存原圖**（2026-09-18 使用者需求，同日完成，見完成紀錄）：每張交給檢測的 frame 由同一份記憶體同時寫入本次分析資料夾 `origin/`（2026-09-30 改名，CCD 機台存圖格式、`.tmp` 原子寫入）與執行檢測，不再「寫檔→讀回」；啟用時已檢測 frame 不重複走快照自動存圖。
-- [x] **相機監控原圖開關與 ERROR 保存**（2026-09-30）：設定 → 輸出新增「相機直連保存原圖」，預設開啟、QSettings 保存、執行中不能修改；關閉不建立 `origin/`。分析拋出例外仍完成原圖寫入，Recipe／GPU 初始化失敗也先保存已收到的 frame；檢測佇列滿另保留最多一張待存 ERROR frame，暫存皆滿或寫入失敗明確附 `raw_image_error`，計入 `raw_failed`。保留既有 `raw_image_path`／`raw_dir`／timing 欄位相容性。Recipe 自動快照獨立生效。自動測試通過；新行為尚待實機與打包。
+- [x] **相機監控原圖開關與 ERROR 保存**（2026-09-30）：設定 → 輸出新增「相機直連保存原圖」，預設開啟、QSettings 保存、執行中不能修改；關閉不建立 `origin/`。分析拋出例外仍完成原圖寫入，Recipe／GPU 初始化失敗也先保存已收到的 frame；檢測佇列滿另保留最多一張待存 ERROR frame，暫存皆滿或寫入失敗明確附 `raw_image_error`，計入 `raw_failed`。保留既有 `raw_image_path`／`raw_dir`／timing 欄位相容性。Recipe 自動快照獨立生效。自動測試通過；新行為納入 v2.0.0 打包，尚待相機機台驗收。
 - [ ] 【實物】相機直連大 frame 的記憶體與耗時量測：16384×50000 單通道 819 MB，`frame_to_bgr` 轉 BGR 約 2.4 GB，加上檢測佇列最多 4 張、處理中的 frame 與原圖開啟時最多一張待存 ERROR frame；需在相機機台量測轉換耗時、峰值記憶體與佇列上限，並評估灰階直通（不得改變 Detector 判定）。encoder 值目前未寫入 frame metadata，需確認從 driver thread 讀米輪的時機。
 - [ ] 【實物】檢測與取像並行時，相機 callback、存圖佇列、檢測 worker 與 GPU session 互不阻塞；GUI 保持可回應。（結構已分離：callback 只交接 frame、檢測在 worker thread；需在相機機台以實際 frame 速率與尺寸壓測。）（2026-09-30 基本相機直連監控已成功；本項保留為實際 frame 速率與尺寸的並行壓測。）
 
@@ -1241,6 +1241,8 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 - [ ] 加速不得犧牲 GUI 回應、打包啟動、結果追溯、錯誤訊息或 CPU fallback。
 
 ## 完成紀錄
+
+- [x] 2026-09-30：依使用者指定準備 VisionFlow AOI v2.0.0 Windows x64 CUDA-enabled 發行原始碼，包含相機監控 `origin/` 原圖併行保存、持久化開關與 ERROR／初始化失敗保存，以及現場基本功能通過的文件紀錄。GUI Pipeline 版本與 Windows PE 版本同步為 2.0.0，更新 README、文件索引、現場參數指南並新增 release notes；Recipe／Detector／CUDA source／ABI 不變。套件、CUDA 重建／驗證、tag 與 GitHub Release 結果於發布完成後記錄。
 
 - [x] 2026-09-30：相機直連監控原圖改為同次分析輸出的 `origin/`，新增持久化開關（預設開啟）；維持單背景 writer 與分析併行，分析 ERROR／例外仍保存原圖。增加一張有界溢出 frame 暫存，讓佇列滿的 ERROR 亦可保存；過載超過暫存或磁碟寫入失敗均明確回報。測試涵蓋初始化失敗與併行例外保存、逐像素往返、溢出保存與上限、GUI 關閉存圖與偏好持久化、停止排空；README、文件索引、設備參數指南與專案報告同步。驗證：完整 1194 項 unittest、compileall、CUDA preflight、CLI 合成影像、GUI offscreen smoke 與 diff 檢查通過。未修改 Detector／Recipe／CUDA，尚未打包或做新增行為的相機實測。
 - [x] 2026-09-30：現場驗收文件同步的本機檢查完成：完整 `unittest discover -s tests -v` 1190 項通過、compileall、CUDA source／ABI preflight、78 個本機 Markdown 連結檢查與 `git diff --check` 通過。此輪驗證針對文件與既有程式回歸；硬體功能通過的證據為使用者上述現場回報。
