@@ -29,6 +29,7 @@ from core.camera_monitor_processor import (
 from core.image_loader import ImageLoadError, frame_to_bgr, load_image
 from core.pipeline import AOIPipeline
 from devices.ccd_models import (
+    AcquisitionSettings,
     CameraConnectionSettings,
     CameraRecipeSettings,
     CameraState,
@@ -291,7 +292,7 @@ class ControllerHandOffTests(unittest.TestCase):
         self.controller.connect_camera()
 
     def test_only_trigger_frames_are_handed_to_inspection(self):
-        self.assertIn("相機未連線", self.controller.camera_monitor_blocker())
+        self.assertIn("連續取像", self.controller.camera_monitor_blocker())
         queue = CameraFrameQueue()
         self._connect(TriggerMode.CONTINUOUS)
         self.assertIn("連續取像", self.controller.camera_monitor_blocker())
@@ -401,7 +402,19 @@ class MonitorStartTests(unittest.TestCase):
         self.controller.detach_inspection_queue()
         self.assertEqual(self.camera.status().state, CameraState.PREVIEWING, "a preview the operator started keeps running")
 
-    def test_software_trigger_needs_the_meter_wheel(self):
+    def test_software_trigger_connects_the_meter_wheel_itself(self):
+        self._connect(TriggerMode.SOFTWARE)
+        self.assertFalse(self.controller.devices.meter_wheel.is_connected)
+        queue = CameraFrameQueue()
+        self.controller.attach_inspection_queue(queue)
+        self.assertTrue(self.controller.devices.meter_wheel.is_connected, "Start connects the meter wheel for Software Trigger")
+        self.assertTrue(self.controller.software_trigger_monitor_running)
+        self.assertEqual(self.failed, [])
+        self.controller.detach_inspection_queue()
+        self.assertFalse(self.controller.software_trigger_monitor_running)
+
+    def test_software_trigger_fails_when_the_meter_wheel_cannot_connect(self):
+        self.controller.devices = CcdDevices(self.camera, SimulatedMeterWheel(present_card_ids=()), SimulatedDigitalIo(), self.light)
         self._connect(TriggerMode.SOFTWARE)
         queue = CameraFrameQueue()
         self.controller.attach_inspection_queue(queue)
@@ -410,13 +423,33 @@ class MonitorStartTests(unittest.TestCase):
         self.assertEqual(queue.pending(), 0)
         self.controller.detach_inspection_queue()
 
-        self.failed.clear()
-        self.controller.connect_meter_wheel()
-        self.controller.attach_inspection_queue(queue)
-        self.assertTrue(self.controller.software_trigger_monitor_running)
-        self.assertEqual(self.failed, [])
+    def test_start_connects_the_camera_with_the_recipe_settings(self):
+        recipe = CameraRecipeSettings(acquisition=AcquisitionSettings(length_lines=8000), trigger=TriggerSettings(TriggerMode.EXTERNAL))
+        self.controller.apply_camera_settings(CameraConnectionSettings(), recipe)
+        self.assertFalse(self.camera.status().connected)
+        self.assertEqual(self.controller.camera_monitor_blocker(), "", "a disconnected camera no longer blocks Start")
+        self.controller.attach_inspection_queue(CameraFrameQueue())
+        self.assertTrue(_wait_until(lambda: self.armed))
+        self.assertTrue(self.camera.status().connected)
+        self.assertEqual(self.controller.hardware_trigger().mode, TriggerMode.EXTERNAL)
+        self.assertEqual(self.controller._applied[1].length_lines, 8000)
+        self.assertEqual(self.camera.status().state, CameraState.PREVIEWING)
         self.controller.detach_inspection_queue()
-        self.assertFalse(self.controller.software_trigger_monitor_running)
+
+    def test_start_reconnects_when_the_recipe_changed_the_camera_settings(self):
+        self._connect(TriggerMode.EXTERNAL)
+        other_product = CameraRecipeSettings(acquisition=AcquisitionSettings(length_lines=4321, gain=2.0), trigger=TriggerSettings(TriggerMode.EXTERNAL))
+        # A Recipe load changes the product settings but never writes the camera by itself.
+        self.controller._product = other_product
+        self.assertTrue(self.controller.pending_hardware_write())
+        self.controller.attach_inspection_queue(CameraFrameQueue())
+        self.assertTrue(_wait_until(lambda: self.armed))
+        self.assertFalse(self.controller.pending_hardware_write())
+        self.assertEqual(self.controller._applied[1].length_lines, 4321)
+        self.controller.detach_inspection_queue()
+
+    def test_a_continuous_recipe_blocks_start(self):
+        self.assertIn("連續取像", self.controller.camera_monitor_blocker())
 
     def test_frames_wait_for_the_light_and_a_light_failure_stops_monitoring(self):
         light = LightSettings(enabled=True, brightness_template="L{channel}{value:03}", channels=(LightChannel("1", 128),), line_ending="", command_delay_ms=0, reply_timeout_ms=0)
@@ -482,7 +515,7 @@ class MainWindowCameraMonitorTests(unittest.TestCase):
                 window._load_recipe(_write_recipe(root, save_json=False))
                 window._on_monitor_source_changed("camera")
                 panel = window.monitor_screen.control_panel
-                self.assertIn("相機未連線", panel.message_label.text())
+                self.assertIn("連續取像", panel.message_label.text())
 
                 window.ccd_controller.apply_camera_settings(
                     CameraConnectionSettings(), CameraRecipeSettings(trigger=TriggerSettings(TriggerMode.EXTERNAL))

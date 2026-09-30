@@ -493,10 +493,10 @@ class CcdGuiTests(unittest.TestCase):
         self.assertFalse(panel.start_button.isEnabled())
         self.assertTrue(panel.choose_button.isHidden())
         self.assertFalse(panel.camera_status_label.isHidden())
-        self.assertIn("相機未連線", panel.message_label.text())
+        self.assertIn("連續取像", panel.message_label.text(), "the Recipe trigger is continuous")
         window._start_monitoring()
         self.assertFalse(window.monitor_running)
-        self.assertIn("相機未連線", window.notice_bar.label.text())
+        self.assertIn("連續取像", window.notice_bar.label.text())
 
         window.ccd_controller.connect_camera()
         self.assertIn("待機", panel.camera_status_label.text())

@@ -231,6 +231,8 @@ class ControllerDeviceCheckTests(unittest.TestCase):
                 trigger = TriggerSettings(mode=mode, external_frame_one_frame=one_frame)
                 self.camera.connect(CameraConnectionSettings(), AcquisitionSettings(), trigger)
                 self.controller._applied = (CameraConnectionSettings(), AcquisitionSettings(), trigger)
+                # The Recipe holds the same trigger, so Start would not rewrite the camera.
+                self.controller._product = replace(self.controller._product, trigger=trigger)
                 self.assertTrue(self.controller.quick_device_check())
                 text = self.reports[-1].startup_readiness
                 self.assertIn(mode_text, text)

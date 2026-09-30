@@ -626,7 +626,22 @@ class OptSwitchControllerTests(LightControllerCase):
         self.assertIn("開燈指令 1（通道 2）", self.controller.light_status.replies[1])
         self.light.sent.clear()
         self.wait(self.controller.light_off())
-        self.assertEqual(self.light.sent, [b"$2100017", render_switch_command("$2{channel}000{xor}", ["2"])[0][1]])
+        brightness_zero = [render_brightness("$3{channel}{value:03X}{xor}", name, 0) for name in ("1", "2")]
+        self.assertEqual(
+            self.light.sent,
+            [b"$2100017", render_switch_command("$2{channel}000{xor}", ["2"])[0][1], *brightness_zero],
+            "close each channel, then brightness 0",
+        )
+
+    def test_off_still_sends_brightness_zero_when_the_off_command_is_ignored(self):
+        # On site the imported off command did nothing; brightness 0 (typed by hand) switched the light off.
+        settings = LightSettings(enabled=True, port="COM3", off_commands=("X",), brightness_template="B{value:03}",
+                                 channels=(LightChannel("1", 200),), line_ending="", command_delay_ms=0, reply_timeout_ms=0)
+        self.wait(self.controller.apply_light_settings(settings))
+        self.light.sent.clear()
+        self.wait(self.controller.light_off())
+        self.assertEqual(self.light.sent, [b"X", b"B000"])
+        self.assertFalse(self.light.is_connected)
 
     def test_bad_command_template_is_not_saved(self):
         self.assertIsNone(self.controller.apply_light_settings(LightSettings(on_commands=("{channel:02X}",), channels=(LightChannel("A", 0),))))

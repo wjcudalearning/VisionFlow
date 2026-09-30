@@ -84,6 +84,8 @@ _CODES = (
                     "依訊息把相機 Length 改小到建議的行數以內，或確認米輪「自動遞增」（每行格數）。"),
     DeviceErrorCode("E-6107", "相機直連監控", "米輪已走夠，影像仍未完成（線觸發不足）",
                     "檢查米輪 CMP_OUT→擷取卡接線、CCF 的線觸發設定與 CROP_HEIGHT；可看「外部觸發診斷」面板。"),
+    DeviceErrorCode("E-6108", "相機直連監控", "米輪在倒退計數，CMP_OUT 不會送線觸發",
+                    "在米輪面板切換「反向計數」後再試。"),
     # ---- E-71xx camera and machine settings ------------------------------------------------
     DeviceErrorCode("E-7101", "相機", "相機連線失敗",
                     "看訊息裡的 Sapera 代碼（E-01xx–E-09xx，對照 docs/sapera-diagnose.md），或執行「一鍵設備自檢」。"),

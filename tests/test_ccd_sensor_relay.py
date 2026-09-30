@@ -513,7 +513,63 @@ class ControllerSensorRelayTests(unittest.TestCase):
         self._setup(TriggerSettings(TriggerMode.SOFTWARE), length=10)
         notices = self._second_edge_during_capture(travel=50)
         self.assertIn("[E-6107]", notices[0])
-        self.assertIn("CMP_OUT", notices[0])
+        self.assertIn("Encoder 50", notices[0], "values the operator can type back")
+        self.assertIn("Compare", notices[0])
+        self.camera.complete_capture()
+
+    def _start_sensor_capture(self, length: int = 10) -> None:
+        self._setup(TriggerSettings(TriggerMode.SOFTWARE), length=length)
+        self.meter_wheel.set_encoder(1000)
+        self.screen.preview_button.click()
+        self.assertTrue(_wait_until(lambda: self.controller.sensor_relay_stats.polls > 1))
+        self._edge()
+        self.assertTrue(_wait_until(lambda: self.controller._sensor_capture_in_flight))
+        self.assertIsNotNone(self.controller._sensor_watch)
+
+    def test_a_stalled_compare_is_rearmed_during_the_capture(self):
+        self._start_sensor_capture()
+        # Auto-increment stopped: the compare stays at 1001 while the encoder keeps counting up.
+        self.meter_wheel.set_encoder(1030)
+        self.controller.poll_meter_wheel()
+        self.assertGreater(self.meter_wheel.read_compare(), 1030, "the compare is put back ahead of the encoder")
+        self.assertTrue(any("已自動重設 Compare" in text for text, _kind in self.notices))
+        self.camera.complete_capture()
+        self.assertTrue(_wait_until(lambda: self.controller._sensor_watch is None))
+
+    def test_reverse_counting_is_switched_during_the_capture(self):
+        self._start_sensor_capture()
+        self.assertFalse(self.controller.machine_settings.meter_wheel.reverse_direction)
+        self.meter_wheel.set_encoder(700)
+        self.controller.poll_meter_wheel()
+        self.assertTrue(self.controller.machine_settings.meter_wheel.reverse_direction, "reverse direction switched and saved")
+        self.assertEqual(self.meter_wheel.read_compare(), 701, "compare re-armed ahead of the encoder")
+        self.assertTrue(any("[E-6108]" in text and "已自動" in text for text, _kind in self.notices))
+        self.camera.complete_capture()
+
+    def test_travel_past_length_is_reported_at_once_with_values(self):
+        self._start_sensor_capture(length=10)
+        self.meter_wheel.set_compare(1025)
+        self.meter_wheel.set_encoder(1022)
+        self.controller.poll_meter_wheel()
+        notices = [text for text, _kind in self.notices if "[E-6107]" in text]
+        self.assertEqual(len(notices), 1, "reported while the frame is still open, not at the next Sensor")
+        self.assertIn("Encoder 1022", notices[0])
+        self.controller.poll_meter_wheel()
+        self.assertEqual(len([text for text, _kind in self.notices if "[E-6107]" in text]), 1, "once per capture")
+        self.camera.complete_capture()
+
+    def test_line_trigger_hint_follows_where_the_compare_sits(self):
+        hint = CcdController._line_trigger_hint
+        self.assertIn("米輪還沒走到", hint(1000, 9000, 9))
+        self.assertIn("自動遞增沒有動作", hint(9000, 1000, 9))
+        self.assertIn("CMP_OUT→擷取卡的接線", hint(9000, 9005, 9))
+
+    def test_reverse_counting_is_reported_as_e6108(self):
+        self._setup(TriggerSettings(TriggerMode.SOFTWARE), length=10)
+        self.meter_wheel.set_encoder(1000)
+        notices = self._second_edge_during_capture(travel=-300)
+        self.assertIn("[E-6108]", notices[0])
+        self.assertIn("反向計數", notices[0])
         self.camera.complete_capture()
 
     def test_imported_trigger_sequence_resets_the_encoder_and_offsets_the_compare(self):

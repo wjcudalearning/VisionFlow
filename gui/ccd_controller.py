@@ -369,6 +369,8 @@ class CcdController(QObject, LogMixin):
         self._sensor_capture_expected_counts = 0
         self._sensor_capture_started_at = 0.0
         self._sensor_busy_noticed = False
+        # Follows the Sensor-started frame through meter-wheel readings (re-arms compare, reverse, Length).
+        self._sensor_watch: ExternalCaptureWatch | None = None
         # One thread owns every serial exchange with the light, so commands never interleave.
         self._light_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ccd-light")
         self._light_status = LightStatus()
@@ -408,6 +410,8 @@ class CcdController(QObject, LogMixin):
         self._inspection_accepting = False
         self._monitor_started_acquisition = False
         self._monitor_light_pending = False
+        # Start connected the camera with the Recipe's settings; `_finish_connect` continues the start.
+        self._monitor_connect_pending = False
         self._meter_wheel_diagnosis: MeterWheelDllReport | None = None
         self._meter_wheel_diagnosis_ready = False
         # One diagnose run at a time; the workflow controller owns the QThread lifetime.
@@ -628,12 +632,17 @@ class CcdController(QObject, LogMixin):
             return f"相機不可用：{availability.reason}"
         if self.camera_busy:
             return f"相機{self._camera_busy_text}請稍候。"
-        hardware = self.hardware_trigger()
-        if hardware is None or not self.camera_status().connected:
-            return "相機未連線，請先到 CCD 控制連線相機。"
-        if hardware.mode == TriggerMode.CONTINUOUS:
-            return "相機以連續取像連線；相機直連檢測只檢測觸發影像，請改用外部觸發或軟體觸發並重新連線。"
+        # Start connects or reconnects with the Recipe's camera settings when needed, so the trigger
+        # that matters is the one about to be written, not necessarily the one connected now.
+        trigger = self._monitoring_trigger()
+        if trigger.mode == TriggerMode.CONTINUOUS:
+            return "Recipe 的相機觸發模式是連續取像；相機直連檢測只檢測觸發影像，請在 CCD 頁改成外部觸發或軟體觸發並儲存 Recipe。"
         return ""
+
+    def _monitoring_trigger(self) -> TriggerSettings:
+        if self.camera_status().connected and not self.pending_hardware_write() and self.hardware_trigger() is not None:
+            return self.hardware_trigger()
+        return self._product.trigger.normalized()
 
     def attach_inspection_queue(self, queue: CameraFrameQueue, monitor_saves_raw: bool = True) -> None:
         """Hand trigger frames to camera monitoring.
@@ -651,6 +660,32 @@ class CcdController(QObject, LogMixin):
         self._inspection_accepting = False
         self._monitor_started_acquisition = False
         self._inspection_queue = queue
+        status = self.camera_status()
+        if not status.connected or self.pending_hardware_write():
+            # Start is an operator action: write the Recipe's gain, exposure, Length and trigger now,
+            # then continue in `_finish_connect` (the connect runs on the lifecycle thread).
+            self._monitor_connect_pending = True
+            self.status_message.emit("相機直連監控：依目前 Recipe 的相機設定連線相機…")
+            if status.connected:
+                self.reconnect_camera()
+            else:
+                self.connect_camera()
+            return
+        self._continue_monitoring_start()
+
+    def _continue_monitoring_start(self) -> None:
+        """After the camera holds the Recipe's settings: meter wheel, light, then arm acquisition."""
+        if self._inspection_queue is None or self._closed:
+            return
+        hardware = self.hardware_trigger()
+        if (
+            hardware is not None
+            and hardware.mode == TriggerMode.SOFTWARE
+            and not self.devices.meter_wheel.is_connected
+            and self.devices.meter_wheel.availability().available
+        ):
+            # Software Trigger needs the meter wheel for its line pulses; connect it like startup does.
+            self.connect_meter_wheel(quiet=True)
         if not self._machine.light.enabled:
             self._arm_camera_monitoring()
             return
@@ -801,12 +836,16 @@ class CcdController(QObject, LogMixin):
         )
 
     def _finish_connect(self, settings, status, error, resume_preview: bool) -> None:
+        monitoring = self._monitor_connect_pending
+        self._monitor_connect_pending = False
         if error is not None:
             self._applied = None
             self.notice.emit(tag("E-7101", f"相機連線失敗：{error}"), "error")
             self.camera_settings_changed.emit(self.camera_settings_view())
             self.refresh_camera_status()
             self._publish_legacy_import_verification()
+            if monitoring and self._inspection_queue is not None:
+                self._fail_camera_monitoring(tag("E-6101", f"依 Recipe 設定連線相機失敗：{error}"))
             return
         self._applied = settings
         self._trigger_seen_since_connect = False
@@ -817,6 +856,9 @@ class CcdController(QObject, LogMixin):
         self.camera_settings_changed.emit(self.camera_settings_view())
         self.refresh_camera_status()
         self._publish_legacy_import_verification()
+        if monitoring and self._inspection_queue is not None:
+            self._continue_monitoring_start()
+            return
         if resume_preview:
             self.start_preview()
 
@@ -1499,6 +1541,7 @@ class CcdController(QObject, LogMixin):
     def _stop_sensor_relay(self) -> None:
         relay, self._sensor_relay = self._sensor_relay, None
         self._sensor_capture_in_flight = False
+        self._sensor_watch = None
         self._sensor_capture_start_encoder = None
         self._sensor_capture_started_at = 0.0
         if relay is None:
@@ -1556,6 +1599,7 @@ class CcdController(QObject, LogMixin):
             ):
                 self._sensor_capture_in_flight = False
                 self._sensor_capture_start_encoder = None
+                self._sensor_watch = None
                 self.notice.emit("上一張取像已結束但沒有收到影像；已解除 Sensor 忙碌狀態，請檢查擷取卡影像讀取。", "warning")
             if self._sensor_capture_in_flight or capture_busy:
                 self._sensor_skipped_busy += 1
@@ -1583,6 +1627,9 @@ class CcdController(QObject, LogMixin):
                 self._sensor_capture_started_at = 0.0
                 self.status_message.emit(f"Sensor 觸發無法開始擷取：{exc}")
             else:
+                self._sensor_watch = ExternalCaptureWatch(
+                    self._applied[1].length_lines, self._machine.meter_wheel.compare_increment, False, encoder
+                )
                 self.status_message.emit(
                     f"Sensor 觸發：已開始擷取一張；等待米輪走約 {self._sensor_capture_expected_counts} 格"
                     f"（Length {self._applied[1].length_lines} 行）。"
@@ -1598,6 +1645,7 @@ class CcdController(QObject, LogMixin):
         self._sensor_capture_in_flight = False
         self._sensor_capture_start_encoder = None
         self._sensor_capture_started_at = 0.0
+        self._sensor_watch = None
         self.status_message.emit("Sensor 觸發影像已完成；可接收下一次 Sensor 觸發。")
 
     def _sensor_busy_message(self) -> str:
@@ -1606,9 +1654,17 @@ class CcdController(QObject, LogMixin):
         if start is None or not self.devices.meter_wheel.is_connected:
             return message + "請確認米輪持續轉動、CMP_OUT 線脈衝與相機 Length。"
         try:
-            moved = abs(self.devices.meter_wheel.read_encoder() - start)
+            encoder_now = self.devices.meter_wheel.read_encoder()
+            compare_now = self.devices.meter_wheel.read_compare()
         except DeviceError as exc:
             return message + f"米輪讀值失敗：{exc}。"
+        travel = encoder_now - start
+        moved = abs(travel)
+        # Values the operator can type back from the camera machine (no files or photos leave it).
+        readings = f"Encoder {encoder_now}、Compare {compare_now}、觸發時 Encoder {start}"
+        counts = self.devices.camera.acquisition_event_counts()
+        if counts:
+            readings += "；擷取卡事件 " + "、".join(f"{name} {count}" for name, count in sorted(counts.items()))
         expected = self._sensor_capture_expected_counts
         increment = max(1, self._machine.meter_wheel.compare_increment)
         length = self._applied[1].length_lines if self._applied else 0
@@ -1616,7 +1672,17 @@ class CcdController(QObject, LogMixin):
         if not self._sensor_busy_noticed:
             # The encoder travel between two Sensor edges is the product pitch: say which side is wrong once.
             self._sensor_busy_noticed = True
-            if moved < expected:
+            increment_now = max(1, self._machine.meter_wheel.compare_increment)
+            if travel < -increment_now:
+                self.notice.emit(
+                    tag(
+                        "E-6108",
+                        f"米輪在倒退計數（走了 {travel} 格）：Compare 設在 Encoder 前方，倒退永遠碰不到，CMP_OUT 不會送線觸發。"
+                        f"請在米輪面板切換「反向計數」後再試。（{readings}）",
+                    ),
+                    "warning",
+                )
+            elif moved < expected:
                 self.notice.emit(
                     tag(
                         "E-6106",
@@ -1631,11 +1697,89 @@ class CcdController(QObject, LogMixin):
                     tag(
                         "E-6107",
                         f"米輪已走 {moved} 格（一張需要 {expected} 格），影像仍未完成：擷取卡沒收到足夠的線觸發。"
-                        "請檢查米輪 CMP_OUT→擷取卡的接線、CCF 的線觸發設定與 CROP_HEIGHT。",
+                        f"{self._line_trigger_hint(encoder_now, compare_now, increment)}（{readings}）",
                     ),
                     "warning",
                 )
         return message + f"米輪已走約 {moved}/{expected} 格（約 {lines} 行）。"
+
+    def _observe_sensor_watch(self, snapshot: MeterWheelSnapshot) -> None:
+        """While a Sensor-started frame collects its lines, repair what stops the CMP_OUT pulses.
+
+        A compare left behind the encoder is re-armed ahead of it; an encoder counting down gets the
+        meter wheel's reverse direction switched and the compare re-armed, so the frame carries on;
+        travel past Length without a frame is explained at once with the values to type back.
+        """
+        watch = self._sensor_watch
+        if watch is None or not snapshot.connected or not self._sensor_capture_in_flight:
+            return
+        meter_wheel = self.devices.meter_wheel
+        increment = max(1, self._machine.meter_wheel.compare_increment)
+        for finding in watch.observe(snapshot.encoder_value, snapshot.compare_value):
+            try:
+                if finding.code == "reverse":
+                    reverse = not self._machine.meter_wheel.reverse_direction
+                    self.set_reverse_direction(reverse)
+                    encoder = meter_wheel.read_encoder()
+                    meter_wheel.set_compare(min(COUNTER_MAX, encoder + increment))
+                    watch.on_trigger(encoder)
+                    self._sensor_capture_start_encoder = encoder
+                    self.notice.emit(
+                        tag(
+                            "E-6108",
+                            f"米輪在倒退計數，已自動把「反向計數」切換為{'是' if reverse else '否'}並重新設定 Compare，"
+                            "這一張會繼續拍完（起點可能偏後）；設定已保存，下一張起正常。",
+                        ),
+                        "warning",
+                    )
+                    return
+                if finding.rearm_compare is not None:
+                    meter_wheel.set_compare(finding.rearm_compare)
+                    if finding.level == "warning":
+                        self.notice.emit(
+                            f"Compare 沒有跟上 Encoder，CMP_OUT 停止送線觸發；已自動重設 Compare 為 {finding.rearm_compare}，影像繼續收線。",
+                            "warning",
+                        )
+                elif finding.code == "progress":
+                    self.status_message.emit("Sensor 取像：" + finding.message)
+            except DeviceError as exc:
+                self.notice.emit(tag("E-3104", f"取像中無法改寫米輪：{exc}"), "error")
+                return
+        travel = snapshot.encoder_value - watch.phase_start
+        expected = self._sensor_capture_expected_counts
+        if expected and travel >= expected + 10 * increment and not self._sensor_busy_noticed:
+            self._sensor_busy_noticed = True
+            readings = f"Encoder {snapshot.encoder_value}、Compare {snapshot.compare_value}、起拍時 Encoder {watch.phase_start}"
+            counts = self.devices.camera.acquisition_event_counts()
+            if counts:
+                readings += "；擷取卡事件 " + "、".join(f"{name} {count}" for name, count in sorted(counts.items()))
+            self.notice.emit(
+                tag(
+                    "E-6107",
+                    f"米輪已走 {travel} 格（一張需要 {expected} 格），影像仍未完成：擷取卡沒收到足夠的線觸發。"
+                    f"{self._line_trigger_hint(snapshot.encoder_value, snapshot.compare_value, increment)}（{readings}）",
+                ),
+                "warning",
+            )
+
+    @staticmethod
+    def _line_trigger_hint(encoder: int, compare: int, increment: int) -> str:
+        """Which link most likely stopped the line pulses, judged from where the compare sits now."""
+        gap = compare - encoder
+        if gap > 4 * increment:
+            return (
+                f"Compare 在 Encoder 前方 {gap} 格，米輪還沒走到，CMP_OUT 尚未開始送脈衝："
+                "若原程式每次觸發會把 Encoder 歸零，請在 Sensor 面板勾「每次觸發先把 Encoder 設為」。"
+            )
+        if gap < -4 * increment:
+            return (
+                f"Compare 落在 Encoder 後方 {-gap} 格且沒有跟著往前：Compare 自動遞增沒有動作，"
+                "請對照智慧匯入「原程式參數總表」的 Compare 模式與「自動遞增」設定。"
+            )
+        return (
+            "Compare 有跟著 Encoder 往前，米輪卡應該有送出 CMP_OUT 脈衝：請檢查 CMP_OUT→擷取卡的接線、"
+            "CCF 的線觸發（EXT_LINE_TRIGGER）設定、CMP Out Width 與 CROP_HEIGHT；擷取卡事件的「行觸發太快」代表脈衝太密。"
+        )
 
     def _arm_compare_for_sensor_capture(self) -> int | None:
         """Keep the compare ahead of the encoder so CMP_OUT supplies the frame's line pulses."""
@@ -1736,8 +1880,10 @@ class CcdController(QObject, LogMixin):
 
         if kind == "on":
             steps += switch_steps("開燈指令", settings.on_commands)
-        if kind == "off" and settings.off_commands:
-            return switch_steps("關燈指令", settings.off_commands)
+        if kind == "off":
+            # Off commands first, then brightness 0: a controller that ignores an imported off command
+            # (seen on site) still goes dark, exactly as sending brightness 0 by hand did.
+            steps += switch_steps("關燈指令", settings.off_commands)
         if settings.controls_brightness and kind in ("on", "off", "brightness"):
             for channel in channels if channels is not None else settings.channels:
                 value = 0 if kind == "off" else channel.brightness
@@ -2346,6 +2492,7 @@ class CcdController(QObject, LogMixin):
             self._end_external_watch()
         self._publish_meter_snapshot(snapshot)
         self._observe_external_watch(snapshot)
+        self._observe_sensor_watch(snapshot)
 
     def set_encoder(self, value: int) -> None:
         self._meter_wheel_change({"encoder_value": int(value)}, self.devices.meter_wheel.set_encoder, "encoder_value")
