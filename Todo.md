@@ -668,6 +668,32 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 - [x] 更新 `AGENT.md` 的 CPU/GPU 契約。（2026-09-14 依使用者指示改為 GPU mode 目標邊界：CPU 讀檔解碼後一次上傳，Template Anchor Grid 定位、tile／ROI、前處理、候選抽取、幾何／統計與 PASS/NG 皆在 GPU，只下載最終結果與報表必要像素；彙總、報表、YAML、GUI 與磁碟 I/O 在 CPU。CPU 實作仍為正確性基準與整顆 Detector fallback，未有等價 GPU 實作的步驟依本節待辦處理；`.claude/agents/aoi-coder.md` 同步摘要）
 - [x] 各步驟實際移到 GPU 後，同步更新 README 與 `gpu/README.md` 的使用者說明；202-CS-SN-1 已記錄最終 device/host split、傳輸量、等價、median／P95 與限制，Contour 類 Detector 仍明確標示 CPU 步驟。
 
+#### Contour 全流程 GPU 改善方案（2026-10-01 使用者需求）
+
+本節細化上方「Contour 類 Detector 候選抽取、幾何篩選與 PASS/NG 移到 GPU」及「大圖 GPU ROI 直通 Detector」中的 contour scanner、完整 geometry／分類待辦；這些是同一工作範圍，不能只完成 contour trace 或 summary 就勾選全流程完成。目標是整圖一次 H2D → resident GPU 前處理 → GPU 輪廓抽取 → GPU 幾何／篩選／排序／配對 → GPU Detector 判定 → 下載最終結果；CPU 保留讀檔解碼、控制、結果 dict 組裝、跨 Tile 彙總、報表與必要顯示／存檔像素。
+
+現況基準（不是全流程完成證據）：2026-10-01 工作目錄中的 900 contour-summary 路徑可在 device 計算 bbox／contourArea／點數，但尺寸篩選、排序、內外框配對與 PASS/NG 仍在 CPU。RTX 3090 重跑 37 個等價案例通過，另 1 個大型 EXTERNAL 請求明確回報不支援；17 項相關單元測試通過。現存 `outputs_validation/contour_summary_equivalence/contour_summary_equivalence.json` 的兩組 9999×9999 合成圖、各 5 次 warm median：CPU 約 2309–2315 ms、GPU 前處理＋mask D2H＋CPU contours 約 2226–2229 ms、GPU summary 約 9299–9398 ms；D2H 從約 200 MB 降到約 10 MB，但整段仍慢約 4 倍。這不是單獨 findContours kernel 耗時，也不是實物產線驗收；不得將舊大型 EXTERNAL 的加速案例泛化到 LIST／所有形狀。
+
+執行順序與交付 gate：
+
+- [ ] **1. 建立分段 profiler 與 CPU／GPU 基準矩陣**：分離前處理、邊界掃描、追蹤、點整理／CHAIN_APPROX_SIMPLE、summary、同步、H2D／D2H 與完整 Detector／pipeline；記錄 kernel、host、cold／warm median、P95。涵蓋小 ROI、2000×12000、9999×9999、正式大圖與實際 Recipe，並交叉 empty／full、稀疏、密集、很多短輪廓、少數超長輪廓、孔洞／巢狀、接邊、細線／單點與非零 ROI offset。核對 LIST 單 warp 順序掃描／追蹤佔比，不把整段 9.3 秒直接歸因於某一 kernel。
+- [ ] **2a. LIST：TRUCO 思路的 CUDA 原型**：參考 `D:\opencv and cuda\src\opencv-4.14.0\modules\imgproc\src\contours_truco.cpp` 的 row-strip、起點歸屬、跨區域追蹤、8-bit state 與恢復 Suzuki–Abe 順序策略；設計多 block／warp 執行及 CUDA 記憶體競爭處理，不直接增加 launch blocks 或把影像切成獨立 ROI。驗證跨 strip 輪廓不重複／不漏失、外／孔洞邊界、起點、方向、點列、CHAIN_APPROX_SIMPLE 與輸出順序。TRUCO 本身是 CPU 演算法，已知 fast path 僅限 RETR_LIST 且不要求 hierarchy；其 CPU 加速比不能當 CUDA 收益。
+- [ ] **2b. 平行邊界片段 CUDA 原型與 A/B 選型**：參考 2026 GPU border-tracking 論文，以 triad／局部邊界片段產生 → 區內／跨區連接 → cycle 識別三階段實作，評估少數超長輪廓能否避免逐點序列瓶頸。補齊 OpenCV foreground／8-connectivity、孔洞、退化輪廓、起點／方向／排序及 SIMPLE 取點契約。與 2a、現行 exact scanner 在同資料、同輸出要求下比較效能、VRAM、最壞情況與等價；先選型再接 production，不承諾直接移植論文即通過。
+- [ ] **2c. EXTERNAL：補強既有 BKE 路徑**：保留已完成的 resident component-root＋per-component warp trace，針對密集遮罩的輪廓起點／順序、巢狀 component 與大型 EXTERNAL summary 拒絕條件補驗證與修正。BKE 僅協助找 component／候選起點，不用 pixel area、label 排序代替 contourArea、孔洞輪廓或 OpenCV 順序；與新原型共用同一能力／等價契約。
+- [ ] **2d. NPP 可選對照原型**：核對本機 Toolkit 的 LabelMarkersUF、CompressedMarkerLabelsUFInfo／contour geometry API、實際依賴與 device／host 輸出，量測長輪廓限制與完整資料流。只在 OpenCV 語意、resident 相容性及端到端收益成立時採用；不可將 NPP connected-region contours 宣稱為現成等價 findContours，也不可為這項評估改掉專案的 CPU OpenCV 環境。
+- [ ] **3. 共用 resident contour／candidate 介面**：依 AGENT.md 透過 backend-neutral typed operator／plan 能力擴充，共用 context-owned buffers、generation／ROI bounds 與單一序列 GPU session；不新增 detector-named CUDA export。輪廓 points／offsets／summary 留在 device，由後續 operator 直接消費；只依幾何需求保存必要點列。合併可共用的 bbox／area／perimeter／point-count 統計，保留原始／拒絕候選數、原因與 metadata，不因提早篩選改變既有結果。ABI v1 與 optional-export 舊 DLL 相容。
+- [ ] **4. 優先完成 900-CS-AP-1 全 GPU 判定**：前處理雙 mask、contours、area／bbox、尺寸篩選、穩定面積排序、內外框配對及 max-edge-gap 判定全在 device；保持相同面積 tie-break、第一個有效配對、PASS／NG 與 NG 原因／候選 metadata。CPU 只組裝已決定的最終結果，不下載全部候選再篩選／配對；debug 額外下載須明確標示，且不改 production 判定。用實際 FRAME_900 Recipe 建立 CPU／GPU golden gate。
+- [ ] **5. 共用 GPU 幾何並遷移其他 contour Detector**：先加入各 Detector 真正需要的 contourArea、arcLength、boundingRect、approxPolyDP，再補 minAreaRect／boxPoints、minEnclosingCircle 等共用 operator；依輪廓長度／工作量分派 GPU 演算法，不能用 bbox、像素面積、moments／橢圓近似偷偷替代。逐一接入 401 系列、203-AS-SN-1、503／505／506 的篩選與 PASS／NG；每項確認 OpenCV 浮點、捨入、角度、邊界門檻、confidence／metadata／順序，允許容差需先登錄版本化契約並測試，不放寬既有 PASS／NG。
+- [ ] **6. 整合 contour 切圖與小 ROI 批次**：將 ShapeAnalyzer 的 rectangle／circle／polygon 分類、shape filter、subpixel、crop padding、座標與 deterministic Tile ordering 接到同一 GPU 候選／幾何層，直接產生後續 Detector 的 resident ROI；與既有完整 geometry／分類及 VRAM admission 待辦一併驗收。小 ROI 評估批次處理以攤平 launch／同步成本，保持順序、session／cache 正確性及單一 GPU queue，不用隱藏 CPU 計算冒充 strict GPU。
+- [ ] **7. 完整驗收與模式路由**：分開驗收「全 GPU 資料流」與「有效加速」。檢測階段不得有 CPU contour／幾何／篩選／配對／判定或中間 pixel D2H／再 H2D；只下載最終結果與明確要求的報表／debug 像素。驗證 PASS／NG、defect count、bbox、area、confidence、metadata、contour／Tile 順序與輸出一致，涵蓋缺少／舊 DLL、unsupported mode、注入錯誤／OOM、CPU 全 Detector restart；strict CUDA 未支援即明確失敗。RTX 3090 以正式尺寸、實際 Recipe 的 PASS／NG 真圖量測 cold／warm median／P95、傳輸量、RAM／VRAM 峰值及長跑穩定，auto 僅在 gate 通過且有可重現端到端收益的範圍啟用；runtime metadata／README／gpu README 如實回報每一 CPU／device 步驟。
+
+研究參考（均為待評估來源，外部結果不能當本專案驗收）：
+
+- [OpenCV TRUCO 官方 PR #28773](https://github.com/opencv/opencv/pull/28773)：CPU 平行抽取、起點歸屬、順序／近似等價測試；本機 D 槽已具原始碼。
+- [Accelerated border tracking in binary images with GPUs（2026）](https://link.springer.com/article/10.1007/s11227-026-08488-4)：triad extraction／connection／contour identification；工業流程 1000 張真圖整體 1.20×／1.26×，不是 AOI／RTX 3090 的預估加速承諾。
+- [Parallel border tracking in binary images using GPUs（2022）](https://link.springer.com/article/10.1007/s11227-021-04260-y)：工業車體缺陷案例與分區／邊界連接 CUDA 設計；論文提供簡化程式下載地址，實際可取得性與移植相容性需另外確認。
+- [NVIDIA NPP／nppPlus Image Filtering Functions](https://docs.nvidia.com/cuda/nppplus/image_filtering_functions.html)：UF label／contour 資料流與 host 輸出、超長輪廓限制，需依本機版本確認。
+
 ### 202-CS-SN-1／203-AS-SN-1／503-CS-SN-1／506-CS-SN-1 RTX 驗收（2026-09-14 補列）
 
 目前只有實作紀錄與 v1.4.0／v1.5.1 發行時的合成圖 CPU/GPU 等價，缺正式 Recipe、真圖與產線配置效能證據。
@@ -1241,6 +1267,8 @@ vs 原本 `[255,255,20,20]`）。因此「標籤編號順序」對 202 的最終
 - [ ] 加速不得犧牲 GUI 回應、打包啟動、結果追溯、錯誤訊息或 CPU fallback。
 
 ## 完成紀錄
+
+- [x] 2026-10-01：依使用者要求，在 P4「全流程 GPU 化」加入「Contour 全流程 GPU 改善方案」，整合既有 contour Detector 與切圖工作範圍，記錄目前 900 summary 實測限制，列出分段量測、TRUCO／邊界片段 CUDA 原型、BKE 補強、NPP 對照、resident 候選介面、900 優先判定、共用幾何／其他 Detector、切圖與批次、等價／效能／穩定性 gate 及研究來源。此次僅完成待辦文件規劃，所有新增實作／產線驗收項目保持未勾選。
 - [x] 2026-09-30：補齊現場驗收後的文件同步（接續 Codex `336869d`，commit `a25688a`）：README 新增米輪 CMP_OUT（Width 與極性照原廠設定、Width 0 防呆）、Sensor 取像中自動修正（Compare 重設、倒退自動切換 `E-6108`、超過 Length 即時 `E-6107`、`E-6106`）與關燈補送亮度 0 的說明；AGENT.md 更新 CCD 契約：監控「開始」依 Recipe 連線／重連、CMP_OUT 為機台設定且 Width 0 不得起拍、取像中自動修正須回報，以及設備錯誤碼登記與現場說明檔隨 EXE 發布的規則。未變更程式行為；完整 1194 tests、compileall、CUDA preflight 與 `git diff --check` 通過。
 
 - [x] 2026-09-30：正式發布 VisionFlow AOI **v2.0.0** Windows x64 CUDA-enabled（使用者指定打包與 gh release）。annotated tag `v2.0.0` → `e9baf2b`，位於 `origin/main`；GitHub Release 為 Latest、非 draft／prerelease：<https://github.com/wjcudalearning/VisionFlow/releases/tag/v2.0.0>。資產 `VisionFlow-AOI-v2.0.0-windows-x64.zip` 為 **120,817,953 bytes**、SHA-256 `30A743A844C9C270BB1E1B05AD9E26921BE32A732CF25B91897544F9C6CB154D`；草稿資產 digest 核對後發布，並以 `gh release download` 重新下載，大小／SHA-256／462 entries／389 files／7 Recipes／1 CUDA DLL 全部一致，ZIP 使用正斜線及單一根資料夾。以 release commit 的乾淨 managed worktree 建置，`build_provenance.json` 為 `commit=e9baf2b…`／`dirty=false`；EXE PE FileVersion `2.0.0`、ProductVersion `2.0.0+e9baf2b3c843`。以 CUDA 13.3.73／MSVC 19.51.36252／`sm_86` 重建 DLL（1,491,456 bytes、SHA-256 `650D3E3B1C6620AB09DF66C5081EB53A1A190B43C60A705DBB74754E13097422`），RTX 3090／Driver 610.62 native smoke、exports／dependencies、完整 Python validator（含 benchmark 5）與 10／100／1000 stress 通過。完整 1194 tests、compileall、CUDA preflight、CLI 合成影像、GUI offscreen、dist 與獨立解壓 ZIP 的 packaged smoke 全部通過；release commit 的 Windows CI `36685780728` success。與已核對 digest 的 v1.11.7 ZIP 相比，移除兩份重複 OpenSSL `libcrypto-3-x64.dll`／`libssl-3-x64.dll`，仍保留 Python 實際使用的 OpenSSL runtime 且 packaged smoke 通過。發布內容包含監控 `origin/`、原圖開關與 ERROR／初始化失敗保存；新增行為的相機機台、真實產品、其他 GPU／無 GPU 電腦及長時間驗收仍待執行。
