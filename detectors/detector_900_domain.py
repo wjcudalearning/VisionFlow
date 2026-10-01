@@ -31,11 +31,22 @@ class Candidate:
         }
 
 
+REJECTED_PREVIEW = 5
+
+
 @dataclass(frozen=True, slots=True)
 class CandidateSet:
-    all: tuple[Candidate, ...]
+    """Size-accepted candidates in descending area order, plus what the metadata reports of the rest.
+
+    Textured masks can produce hundreds of thousands of contours that the size rule rejects; only
+    their count and the first ``REJECTED_PREVIEW`` (with reasons) are reported, so they are not
+    materialised as objects.
+    """
+
     accepted: tuple[Candidate, ...]
-    rejected: tuple[Candidate, ...]
+    rejected_preview: tuple[Candidate, ...]
+    raw_count: int
+    rejected_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,44 +177,51 @@ class CandidateAnalyzer:
 
     def analyze(self, binary, mode: str, rule: SizeRule) -> CandidateSet:
         contours, _ = cv2.findContours(binary, self.contour_mode(mode), cv2.CHAIN_APPROX_SIMPLE)
-        return self._classify(self._host_measurements(contours), rule)
-
-    @staticmethod
-    def _host_measurements(contours):
-        # boundingRect only for contours that survive the point-count and area filters.
-        for contour in contours:
+        bboxes = np.zeros((len(contours), 4), np.int64)
+        areas = np.zeros(len(contours), np.float64)
+        points = np.zeros(len(contours), np.int64)
+        for index, contour in enumerate(contours):
+            points[index] = len(contour)
             if len(contour) < 3:
                 continue
-            area = float(cv2.contourArea(contour))
-            if area <= 0.0:
-                continue
-            yield tuple(int(value) for value in cv2.boundingRect(contour)), len(contour), area
+            areas[index] = cv2.contourArea(contour)
+            if areas[index] > 0.0:  # boundingRect only for contours that survive the filters
+                bboxes[index] = cv2.boundingRect(contour)
+        return self._classify(bboxes, points, areas, rule)
 
     def from_summaries(self, records, rule: SizeRule) -> CandidateSet:
         """Build the same candidate set from device ``boundingRect``/``contourArea`` records."""
+        bboxes = np.stack(
+            [records["x"], records["y"], records["width"], records["height"]], axis=1
+        ).astype(np.int64)
         return self._classify(
-            (
-                ((int(r["x"]), int(r["y"]), int(r["width"]), int(r["height"])),
-                 int(r["point_count"]), float(r["area"]))
-                for r in records
-            ),
+            bboxes.reshape(-1, 4),
+            np.asarray(records["point_count"], np.int64),
+            np.asarray(records["area"], np.float64),
             rule,
         )
 
-    def _classify(self, contours, rule: SizeRule) -> CandidateSet:
-        candidates = []
-        for bbox, point_count, area in contours:
-            if point_count < 3 or area <= 0.0:
-                continue
-            candidates.append(Candidate(bbox, area))
-        candidates.sort(key=lambda candidate: candidate.area, reverse=True)
-        accepted = tuple(candidate for candidate in candidates if self.passes_size(candidate, rule))
-        rejected = tuple(
-            replace(candidate, reject_reason=self.reject_reason(candidate, rule))
-            for candidate in candidates
-            if not self.passes_size(candidate, rule)
+    def _classify(self, bboxes, points, areas, rule: SizeRule) -> CandidateSet:
+        valid = np.flatnonzero((points >= 3) & (areas > 0.0))
+        # Stable descending area order keeps equal areas in contour order, like a stable
+        # sort(reverse=True) of the contour list.
+        order = valid[np.argsort(-areas[valid], kind="stable")]
+        widths = bboxes[order, 2]
+        heights = bboxes[order, 3]
+        passes = (
+            (np.abs(widths - rule.target_width) <= rule.width_tolerance)
+            & (np.abs(heights - rule.target_height) <= rule.height_tolerance)
         )
-        return CandidateSet(tuple(candidates), accepted, rejected)
+        make = lambda index: Candidate(  # noqa: E731
+            tuple(int(value) for value in bboxes[index]), float(areas[index])
+        )
+        accepted = tuple(make(index) for index in order[passes])
+        rejected_indices = order[~passes]
+        preview = tuple(
+            replace(candidate, reject_reason=self.reject_reason(candidate, rule))
+            for candidate in (make(index) for index in rejected_indices[:REJECTED_PREVIEW])
+        )
+        return CandidateSet(accepted, preview, int(order.size), int(rejected_indices.size))
 
     @staticmethod
     def passes_size(candidate: Candidate, rule: SizeRule) -> bool:
@@ -311,11 +329,11 @@ class Detector900ResultAssembler:
         metadata = {
             "reason": self.failure_reason(outer, inner),
             "outer_candidate_count": len(outer.accepted),
-            "outer_raw_candidate_count": len(outer.all),
-            "outer_rejected_candidate_count": len(outer.rejected),
+            "outer_raw_candidate_count": outer.raw_count,
+            "outer_rejected_candidate_count": outer.rejected_count,
             "inner_candidate_count": len(inner.accepted),
-            "inner_raw_candidate_count": len(inner.all),
-            "inner_rejected_candidate_count": len(inner.rejected),
+            "inner_raw_candidate_count": inner.raw_count,
+            "inner_rejected_candidate_count": inner.rejected_count,
             "outer_threshold": config.outer_threshold,
             "outer_contour_mode": config.outer_contour_mode,
             "outer_target_width": config.outer_rule.target_width,
@@ -338,8 +356,8 @@ class Detector900ResultAssembler:
             "debug_outer_candidates": [item.to_dict(offset_x, offset_y) for item in outer.accepted[:5]],
             "debug_inner_candidates": [item.to_dict(offset_x, offset_y) for item in inner.accepted[:5]],
             "debug_pair": self.debug_pair(outer, inner, offset_x, offset_y, config.max_edge_gap),
-            "debug_outer_rejected_candidates": [item.to_dict(offset_x, offset_y) for item in outer.rejected[:5]],
-            "debug_inner_rejected_candidates": [item.to_dict(offset_x, offset_y) for item in inner.rejected[:5]],
+            "debug_outer_rejected_candidates": [item.to_dict(offset_x, offset_y) for item in outer.rejected_preview],
+            "debug_inner_rejected_candidates": [item.to_dict(offset_x, offset_y) for item in inner.rejected_preview],
         }
         return [{
             "type": "900_frame_spacing_ng",

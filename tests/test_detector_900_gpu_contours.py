@@ -287,7 +287,7 @@ class Detector900DeviceContourTests(unittest.TestCase):
                 expected = analyzer.analyze(binary, mode, rule)
                 actual = analyzer.from_summaries(_reference_records(binary, mode, 0), rule)
                 self.assertEqual(actual, expected)
-                self.assertTrue(expected.all)
+                self.assertGreater(expected.raw_count, 0)
 
 
 if __name__ == "__main__":

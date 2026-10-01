@@ -187,6 +187,35 @@ struct PersistentContext {
     std::vector<VfContourSummaryV1> contour_summary_host;
     uint64_t contour_summary_generation = 0;
     bool contour_summary_valid = false;
+    // Parallel RETR_LIST summaries (no sequential trace): per padded pixel neighbourhood masks
+    // and state offsets, per border state packed pixel/direction, successor and cycle labels
+    // (double buffered for pointer jumping), sorted heads and per-contour accumulators.
+    uint8_t* cps_neighbours = nullptr;
+    size_t cps_neighbour_capacity = 0;
+    uint32_t* cps_offsets = nullptr;
+    size_t cps_offset_capacity = 0;
+    uint32_t* cps_states = nullptr;
+    size_t cps_state_capacity = 0;
+    uint32_t* cps_jump[2] = {nullptr, nullptr};
+    size_t cps_jump_capacity[2] = {0, 0};
+    unsigned long long* cps_label[2] = {nullptr, nullptr};
+    size_t cps_label_capacity[2] = {0, 0};
+    uint32_t* cps_cycle_position = nullptr;
+    size_t cps_cycle_position_capacity = 0;
+    uint32_t* cps_head_keys[2] = {nullptr, nullptr};
+    size_t cps_head_key_capacity[2] = {0, 0};
+    uint32_t* cps_head_states[2] = {nullptr, nullptr};
+    size_t cps_head_state_capacity[2] = {0, 0};
+    int* cps_bounds = nullptr;          // min x, min y, max x, max y per contour
+    size_t cps_bound_capacity = 0;
+    int* cps_kept = nullptr;
+    size_t cps_kept_capacity = 0;
+    double* cps_area = nullptr;
+    size_t cps_area_capacity = 0;
+    unsigned int* cps_counters = nullptr;  // head count, changed flag, invariant error flag
+    size_t cps_counter_capacity = 0;
+    uint8_t* cps_scratch = nullptr;
+    size_t cps_scratch_capacity = 0;
     // Exact-median scratch: the uploaded float values, their monotone-orderable uint32 order keys,
     // the radix-sorted keys, the cub temporary storage and a one-word NaN-presence flag. All
     // grow-only and deliberately separate from the shared plan scratch.
@@ -342,6 +371,21 @@ struct PersistentContext {
         visionflow_cuda::free_device(contour_out_offsets);
         visionflow_cuda::free_device(contour_out_points);
         visionflow_cuda::free_device(contour_summaries);
+        visionflow_cuda::free_device(cps_neighbours);
+        visionflow_cuda::free_device(cps_offsets);
+        visionflow_cuda::free_device(cps_states);
+        for (int index = 0; index < 2; ++index) {
+            visionflow_cuda::free_device(cps_jump[index]);
+            visionflow_cuda::free_device(cps_label[index]);
+            visionflow_cuda::free_device(cps_head_keys[index]);
+            visionflow_cuda::free_device(cps_head_states[index]);
+        }
+        visionflow_cuda::free_device(cps_cycle_position);
+        visionflow_cuda::free_device(cps_bounds);
+        visionflow_cuda::free_device(cps_kept);
+        visionflow_cuda::free_device(cps_area);
+        visionflow_cuda::free_device(cps_counters);
+        visionflow_cuda::free_device(cps_scratch);
         visionflow_cuda::free_device(contour_counts);
         visionflow_cuda::free_device(contour_row_counts);
         visionflow_cuda::free_device(contour_row_start);
@@ -466,6 +510,23 @@ ContextMemoryBreakdown context_memory_breakdown(const PersistentContext* context
         capacity_bytes(context->contour_out_offset_capacity, sizeof(int32_t)) +
         capacity_bytes(context->contour_out_point_capacity, sizeof(int32_t)) +
         capacity_bytes(context->contour_summary_capacity, sizeof(VfContourSummaryV1)) +
+        capacity_bytes(context->cps_neighbour_capacity, sizeof(uint8_t)) +
+        capacity_bytes(context->cps_offset_capacity, sizeof(uint32_t)) +
+        capacity_bytes(context->cps_state_capacity, sizeof(uint32_t)) +
+        capacity_bytes(context->cps_jump_capacity[0], sizeof(uint32_t)) +
+        capacity_bytes(context->cps_jump_capacity[1], sizeof(uint32_t)) +
+        capacity_bytes(context->cps_label_capacity[0], sizeof(unsigned long long)) +
+        capacity_bytes(context->cps_label_capacity[1], sizeof(unsigned long long)) +
+        capacity_bytes(context->cps_cycle_position_capacity, sizeof(uint32_t)) +
+        capacity_bytes(context->cps_head_key_capacity[0], sizeof(uint32_t)) +
+        capacity_bytes(context->cps_head_key_capacity[1], sizeof(uint32_t)) +
+        capacity_bytes(context->cps_head_state_capacity[0], sizeof(uint32_t)) +
+        capacity_bytes(context->cps_head_state_capacity[1], sizeof(uint32_t)) +
+        capacity_bytes(context->cps_bound_capacity, sizeof(int)) +
+        capacity_bytes(context->cps_kept_capacity, sizeof(int)) +
+        capacity_bytes(context->cps_area_capacity, sizeof(double)) +
+        capacity_bytes(context->cps_counter_capacity, sizeof(unsigned int)) +
+        capacity_bytes(context->cps_scratch_capacity, sizeof(uint8_t)) +
         capacity_bytes(context->contour_count_capacity, sizeof(int)) +
         capacity_bytes(context->contour_row_count_capacity, sizeof(int)) +
         capacity_bytes(context->contour_row_start_capacity, sizeof(int)) +
@@ -4459,6 +4520,445 @@ __global__ void contour_summary_kernel(
     out[contour] = record;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Parallel RETR_LIST contour summaries (see tools/contour_parallel_reference.py for the proof
+// sketch and the NumPy reference these kernels mirror).
+//
+// A step of icvFetchContour depends only on the state (pixel, back direction b) and the zero-ness
+// of the 3x3 neighbourhood. A state lies on a border cycle iff the back neighbour is foreground,
+// the neighbour at b+1 is zero and, for even b, the neighbour at b+2 is zero. Restricted to those
+// states the successor is a permutation; OpenCV emits each cycle once, at its first raster start
+// event (outer: zero left neighbour, hole: zero right neighbour; outer before hole), in reverse
+// discovery order. CHAIN_APPROX_SIMPLE keeps a state's point iff its outgoing direction differs
+// from (b + 4) & 7, independently of where the cycle starts. So the cycles are found by pointer
+// jumping on (first event key, head state) labels and summarised by per-state atomics, without
+// any sequential border trace.
+// ---------------------------------------------------------------------------------------------
+
+constexpr unsigned int CPS_NO_STATE = 0xFFFFFFFFu;
+constexpr int CPS_COUNTER_HEADS = 0;
+constexpr int CPS_COUNTER_CHANGED = 1;
+constexpr int CPS_COUNTER_ERROR = 2;
+
+__device__ __forceinline__ bool cps_fg(unsigned int nb, int k) {
+    return ((nb >> (k & 7)) & 1u) != 0u;
+}
+
+__device__ __forceinline__ unsigned int cps_border_bits(unsigned int nb) {
+    unsigned int bits = 0;
+    for (int b = 0; b < 8; ++b) {
+        if (cps_fg(nb, b) && !cps_fg(nb, b + 1) && ((b & 1) || !cps_fg(nb, b + 2))) bits |= 1u << b;
+    }
+    return bits;
+}
+
+__device__ __forceinline__ int cps_next_direction(unsigned int nb, int back) {
+    for (int step = 1; step <= 8; ++step) {
+        if (cps_fg(nb, back + step)) return (back + step) & 7;
+    }
+    return -1;
+}
+
+__device__ __forceinline__ int cps_start_back(unsigned int nb, int first) {
+    // icvFetchContour's initial clockwise search: W,NW,... for outer (first=3), E,SE,... for hole.
+    for (int index = 0; index < 8; ++index) {
+        const int direction = (first - index) & 7;
+        if (cps_fg(nb, direction)) return direction;
+    }
+    return -1;
+}
+
+__device__ __forceinline__ unsigned int cps_rank(unsigned int bits, int direction) {
+    return static_cast<unsigned int>(__popc(bits & ((1u << direction) - 1u)));
+}
+
+__device__ __forceinline__ int cps_dx(int direction) {
+    constexpr int dx[8] = {1, 1, 0, -1, -1, -1, 0, 1};
+    return dx[direction];
+}
+
+__device__ __forceinline__ int cps_dy(int direction) {
+    constexpr int dy[8] = {0, -1, -1, -1, 0, 1, 1, 1};
+    return dy[direction];
+}
+
+__device__ __forceinline__ bool cps_mask_fg(
+    const uint8_t* mask, int pitch, int width, int height, int padded_x, int padded_y) {
+    const int x = padded_x - 1;
+    const int y = padded_y - 1;
+    return x >= 0 && y >= 0 && x < width && y < height &&
+        mask[static_cast<size_t>(y) * pitch + x] != 0;
+}
+
+// Per padded pixel: neighbourhood mask (foreground pixels only) and the border-state count, which
+// the in-place exclusive scan turns into state offsets.
+__global__ void cps_count_kernel(
+    const uint8_t* mask, int pitch, int width, int height,
+    uint8_t* neighbours, uint32_t* offsets) {
+    const int padded_width = width + 2;
+    const int px = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    const int py = static_cast<int>(blockIdx.y * blockDim.y + threadIdx.y);
+    if (px >= padded_width || py >= height + 2) return;
+    const size_t pixel = static_cast<size_t>(py) * padded_width + px;
+    unsigned int nb = 0;
+    if (cps_mask_fg(mask, pitch, width, height, px, py)) {
+        for (int k = 0; k < 8; ++k) {
+            if (cps_mask_fg(mask, pitch, width, height, px + cps_dx(k), py + cps_dy(k))) nb |= 1u << k;
+        }
+    }
+    neighbours[pixel] = static_cast<uint8_t>(nb);
+    offsets[pixel] = static_cast<uint32_t>(__popc(cps_border_bits(nb)));
+}
+
+__global__ void cps_fill_labels_kernel(unsigned long long* labels, uint32_t count) {
+    const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index < count) labels[index] = ~0ull;
+}
+
+// Writes every border state (packed pixel * 8 + back direction) and seeds the cycle labels with
+// the raster start events. Isolated foreground pixels are one-point contours and become heads.
+__global__ void cps_emit_states_kernel(
+    const uint8_t* mask, int pitch, int width, int height,
+    const uint8_t* neighbours, const uint32_t* offsets, uint32_t* states,
+    unsigned long long* labels, uint32_t* head_keys, uint32_t* head_states, unsigned int* counters) {
+    const int padded_width = width + 2;
+    const int px = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    const int py = static_cast<int>(blockIdx.y * blockDim.y + threadIdx.y);
+    if (px >= padded_width || py >= height + 2) return;
+    if (!cps_mask_fg(mask, pitch, width, height, px, py)) return;
+    const uint32_t pixel = static_cast<uint32_t>(py) * static_cast<uint32_t>(padded_width) +
+        static_cast<uint32_t>(px);
+    const unsigned int nb = neighbours[pixel];
+    const unsigned int bits = cps_border_bits(nb);
+    const uint32_t base = offsets[pixel];
+    for (int b = 0; b < 8; ++b) {
+        if (bits & (1u << b)) states[base + cps_rank(bits, b)] = pixel * 8u + static_cast<uint32_t>(b);
+    }
+    for (int kind = 0; kind < 2; ++kind) {
+        const int side = kind == 0 ? px - 1 : px + 1;
+        if (cps_mask_fg(mask, pitch, width, height, side, py)) continue;
+        const uint32_t key = pixel * 2u + static_cast<uint32_t>(kind);
+        const int back = cps_start_back(nb, kind == 0 ? 3 : 7);
+        if (back < 0) {
+            if (kind == 0) {
+                const unsigned int slot = atomicAdd(&counters[CPS_COUNTER_HEADS], 1u);
+                head_keys[slot] = key;
+                head_states[slot] = CPS_NO_STATE;
+            }
+            continue;
+        }
+        if (!(bits & (1u << back))) {
+            atomicExch(&counters[CPS_COUNTER_ERROR], 1u);
+            continue;
+        }
+        const uint32_t state = base + cps_rank(bits, back);
+        atomicMin(&labels[state], (static_cast<unsigned long long>(key) << 32) | state);
+    }
+}
+
+__global__ void cps_successor_kernel(
+    int width, const uint8_t* neighbours, const uint32_t* offsets, const uint32_t* states,
+    uint32_t count, uint32_t* jump, unsigned int* counters) {
+    const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+    const int padded_width = width + 2;
+    const uint32_t pixel = states[index] >> 3;
+    const int back = static_cast<int>(states[index] & 7u);
+    const int out = cps_next_direction(neighbours[pixel], back);
+    if (out < 0) {
+        atomicExch(&counters[CPS_COUNTER_ERROR], 1u);
+        jump[index] = index;
+        return;
+    }
+    const int next_back = (out + 4) & 7;
+    const uint32_t next_pixel = static_cast<uint32_t>(
+        static_cast<long long>(pixel) + cps_dy(out) * padded_width + cps_dx(out));
+    const unsigned int next_bits = cps_border_bits(neighbours[next_pixel]);
+    if (!(next_bits & (1u << next_back))) {
+        atomicExch(&counters[CPS_COUNTER_ERROR], 1u);
+        jump[index] = index;
+        return;
+    }
+    jump[index] = offsets[next_pixel] + cps_rank(next_bits, next_back);
+}
+
+// One Wyllie round: every state takes the minimum label of the next 2^(r+1) states.
+__global__ void cps_jump_kernel(
+    const unsigned long long* label_in, const uint32_t* jump_in,
+    unsigned long long* label_out, uint32_t* jump_out, uint32_t count, unsigned int* counters) {
+    const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+    const uint32_t next = jump_in[index];
+    const unsigned long long current = label_in[index];
+    const unsigned long long merged = min(current, label_in[next]);
+    label_out[index] = merged;
+    jump_out[index] = jump_in[next];
+    if (merged != current) counters[CPS_COUNTER_CHANGED] = 1u;
+}
+
+__global__ void cps_heads_kernel(
+    const unsigned long long* labels, uint32_t count,
+    uint32_t* head_keys, uint32_t* head_states, unsigned int* counters) {
+    const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+    const unsigned long long label = labels[index];
+    if (label == ~0ull) {
+        atomicExch(&counters[CPS_COUNTER_ERROR], 1u);  // a border cycle without a start event
+        return;
+    }
+    if (static_cast<uint32_t>(label & 0xFFFFFFFFull) != index) return;
+    const unsigned int slot = atomicAdd(&counters[CPS_COUNTER_HEADS], 1u);
+    head_keys[slot] = static_cast<uint32_t>(label >> 32);
+    head_states[slot] = index;
+}
+
+__global__ void cps_init_contours_kernel(
+    int width, const uint32_t* head_keys, const uint32_t* head_states, uint32_t contours,
+    uint32_t* cycle_position, int* bounds, int* kept, double* area) {
+    const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= contours) return;
+    const uint32_t state = head_states[index];
+    if (state == CPS_NO_STATE) {
+        const uint32_t pixel = head_keys[index] >> 1;
+        const int x = static_cast<int>(pixel % static_cast<uint32_t>(width + 2)) - 1;
+        const int y = static_cast<int>(pixel / static_cast<uint32_t>(width + 2)) - 1;
+        bounds[4 * index] = x;
+        bounds[4 * index + 1] = y;
+        bounds[4 * index + 2] = x;
+        bounds[4 * index + 3] = y;
+        kept[index] = 1;
+    } else {
+        cycle_position[state] = index;
+        bounds[4 * index] = INT_MAX;
+        bounds[4 * index + 1] = INT_MAX;
+        bounds[4 * index + 2] = INT_MIN;
+        bounds[4 * index + 3] = INT_MIN;
+        kept[index] = 0;
+    }
+    area[index] = 0.0;
+}
+
+__global__ void cps_accumulate_kernel(
+    int width, const uint8_t* neighbours, const uint32_t* states, const unsigned long long* labels,
+    const uint32_t* cycle_position, uint32_t count, int* bounds, int* kept, double* area) {
+    const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+    const uint32_t contour = cycle_position[static_cast<uint32_t>(labels[index] & 0xFFFFFFFFull)];
+    const uint32_t pixel = states[index] >> 3;
+    const int back = static_cast<int>(states[index] & 7u);
+    const int out = cps_next_direction(neighbours[pixel], back);
+    const int x = static_cast<int>(pixel % static_cast<uint32_t>(width + 2)) - 1;
+    const int y = static_cast<int>(pixel / static_cast<uint32_t>(width + 2)) - 1;
+    const int next_x = x + cps_dx(out);
+    const int next_y = y + cps_dy(out);
+    atomicMin(&bounds[4 * contour], x);
+    atomicMin(&bounds[4 * contour + 1], y);
+    atomicMax(&bounds[4 * contour + 2], x);
+    atomicMax(&bounds[4 * contour + 3], y);
+    if (out != ((back + 4) & 7)) atomicAdd(&kept[contour], 1);
+    // Integer-valued terms with partial sums far below 2^53: the sum is exact in any order.
+    atomicAdd(&area[contour],
+              static_cast<double>(x) * next_y - static_cast<double>(y) * next_x);
+}
+
+__global__ void cps_records_kernel(
+    const int* bounds, const int* kept, const double* area, uint32_t contours, int request,
+    VfContourSummaryV1* out) {
+    const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= contours) return;
+    VfContourSummaryV1 record;
+    record.x = bounds[4 * index];
+    record.y = bounds[4 * index + 1];
+    record.width = bounds[4 * index + 2] - bounds[4 * index] + 1;
+    record.height = bounds[4 * index + 3] - bounds[4 * index + 1] + 1;
+    record.point_count = kept[index];
+    record.request = request;
+    record.area = fabs(area[index] * 0.5);
+    out[index] = record;
+}
+
+// Summarises every RETR_LIST contour of a single-channel device mask and appends the records,
+// in cv2.findContours order, to contour_summary_host. Returns the contour count in *out_count.
+static int run_contour_parallel_summaries(
+    PersistentContext* context, const uint8_t* mask, int pitch, int width, int height,
+    int request, int* out_count) {
+    const unsigned long long padded =
+        static_cast<unsigned long long>(width + 2) * static_cast<unsigned long long>(height + 2);
+    // Packed pixel * 8 + direction and event keys pixel * 2 + kind must fit in 32 bits.
+    if (padded * 8ull >= 0xFFFFFFFFull) return VF_CUDA_UNSUPPORTED;
+    const size_t pixels = static_cast<size_t>(padded);
+    cudaStream_t stream = context->stream;
+    int result = reserve_device(
+        &context->cps_neighbours, &context->cps_neighbour_capacity, pixels, &context->allocation_count);
+    if (result == VF_CUDA_OK) result = reserve_device(
+        &context->cps_offsets, &context->cps_offset_capacity, pixels + 1, &context->allocation_count);
+    if (result == VF_CUDA_OK) result = reserve_device(
+        &context->cps_counters, &context->cps_counter_capacity, static_cast<size_t>(4),
+        &context->allocation_count);
+    if (result != VF_CUDA_OK) return result;
+    cudaError_t error = cudaMemsetAsync(context->cps_counters, 0, 4 * sizeof(unsigned int), stream);
+    if (error == cudaSuccess) error = cudaMemsetAsync(context->cps_offsets + pixels, 0, sizeof(uint32_t), stream);
+    if (error != cudaSuccess) return cuda_result(error);
+
+    const dim3 block(32, 8);
+    const dim3 grid(
+        static_cast<unsigned int>((width + 2 + block.x - 1) / block.x),
+        static_cast<unsigned int>((height + 2 + block.y - 1) / block.y));
+    cps_count_kernel<<<grid, block, 0, stream>>>(
+        mask, pitch, width, height, context->cps_neighbours, context->cps_offsets);
+    result = visionflow_cuda::kernel_launch_result();
+    if (result != VF_CUDA_OK) return result;
+
+    size_t scan_bytes = 0;
+    error = cub::DeviceScan::ExclusiveSum(
+        nullptr, scan_bytes, context->cps_offsets, context->cps_offsets,
+        static_cast<int64_t>(pixels + 1), stream);
+    if (error != cudaSuccess) return cuda_result(error);
+    result = reserve_device(
+        &context->cps_scratch, &context->cps_scratch_capacity, std::max<size_t>(scan_bytes, 1),
+        &context->allocation_count);
+    if (result != VF_CUDA_OK) return result;
+    error = cub::DeviceScan::ExclusiveSum(
+        context->cps_scratch, scan_bytes, context->cps_offsets, context->cps_offsets,
+        static_cast<int64_t>(pixels + 1), stream);
+    if (error != cudaSuccess) return cuda_result(error);
+    uint32_t state_count = 0;
+    error = cudaMemcpyAsync(
+        &state_count, context->cps_offsets + pixels, sizeof(uint32_t), cudaMemcpyDeviceToHost, stream);
+    if (error != cudaSuccess) return cuda_result(error);
+    result = visionflow_cuda::stream_result(stream);
+    if (result != VF_CUDA_OK) return result;
+
+    // Heads are at most one per border state plus one per isolated pixel.
+    const size_t head_capacity = static_cast<size_t>(state_count) + pixels / 2 + 1;
+    const size_t state_capacity = std::max<size_t>(state_count, 1);
+    for (int index = 0; index < 2 && result == VF_CUDA_OK; ++index) {
+        result = reserve_device(&context->cps_jump[index], &context->cps_jump_capacity[index],
+                                state_capacity, &context->allocation_count);
+        if (result == VF_CUDA_OK) result = reserve_device(
+            &context->cps_label[index], &context->cps_label_capacity[index], state_capacity,
+            &context->allocation_count);
+        if (result == VF_CUDA_OK) result = reserve_device(
+            &context->cps_head_keys[index], &context->cps_head_key_capacity[index], head_capacity,
+            &context->allocation_count);
+        if (result == VF_CUDA_OK) result = reserve_device(
+            &context->cps_head_states[index], &context->cps_head_state_capacity[index], head_capacity,
+            &context->allocation_count);
+    }
+    if (result == VF_CUDA_OK) result = reserve_device(
+        &context->cps_states, &context->cps_state_capacity, state_capacity, &context->allocation_count);
+    if (result == VF_CUDA_OK) result = reserve_device(
+        &context->cps_cycle_position, &context->cps_cycle_position_capacity, state_capacity,
+        &context->allocation_count);
+    if (result != VF_CUDA_OK) return result;
+
+    constexpr int threads = 256;
+    const unsigned int state_blocks = (std::max<uint32_t>(state_count, 1) + threads - 1) / threads;
+    cps_fill_labels_kernel<<<state_blocks, threads, 0, stream>>>(context->cps_label[0], state_count);
+    cps_emit_states_kernel<<<grid, block, 0, stream>>>(
+        mask, pitch, width, height, context->cps_neighbours, context->cps_offsets,
+        context->cps_states, context->cps_label[0], context->cps_head_keys[0],
+        context->cps_head_states[0], context->cps_counters);
+    cps_successor_kernel<<<state_blocks, threads, 0, stream>>>(
+        width, context->cps_neighbours, context->cps_offsets, context->cps_states, state_count,
+        context->cps_jump[0], context->cps_counters);
+    result = visionflow_cuda::kernel_launch_result();
+    if (result != VF_CUDA_OK) return result;
+
+    int current = 0;
+    for (int round = 0; round < 40 && state_count > 0; ++round) {
+        error = cudaMemsetAsync(context->cps_counters + CPS_COUNTER_CHANGED, 0, sizeof(unsigned int), stream);
+        if (error != cudaSuccess) return cuda_result(error);
+        cps_jump_kernel<<<state_blocks, threads, 0, stream>>>(
+            context->cps_label[current], context->cps_jump[current],
+            context->cps_label[1 - current], context->cps_jump[1 - current], state_count,
+            context->cps_counters);
+        result = visionflow_cuda::kernel_launch_result();
+        if (result != VF_CUDA_OK) return result;
+        current = 1 - current;
+        unsigned int changed = 0;
+        error = cudaMemcpyAsync(&changed, context->cps_counters + CPS_COUNTER_CHANGED,
+                                sizeof(unsigned int), cudaMemcpyDeviceToHost, stream);
+        if (error != cudaSuccess) return cuda_result(error);
+        result = visionflow_cuda::stream_result(stream);
+        if (result != VF_CUDA_OK) return result;
+        // A round without any change means every label already is its cycle minimum.
+        if (changed == 0) break;
+        if (round == 39) return VF_CUDA_INTERNAL_ERROR;
+    }
+    const unsigned long long* labels = context->cps_label[current];
+    cps_heads_kernel<<<state_blocks, threads, 0, stream>>>(
+        labels, state_count, context->cps_head_keys[0], context->cps_head_states[0],
+        context->cps_counters);
+    result = visionflow_cuda::kernel_launch_result();
+    if (result != VF_CUDA_OK) return result;
+    unsigned int counters[4] = {0, 0, 0, 0};
+    error = cudaMemcpyAsync(counters, context->cps_counters, sizeof(counters),
+                            cudaMemcpyDeviceToHost, stream);
+    if (error != cudaSuccess) return cuda_result(error);
+    result = visionflow_cuda::stream_result(stream);
+    if (result != VF_CUDA_OK) return result;
+    if (counters[CPS_COUNTER_ERROR] != 0) return VF_CUDA_INTERNAL_ERROR;
+    const uint32_t contours = counters[CPS_COUNTER_HEADS];
+    *out_count = static_cast<int>(contours);
+    if (contours == 0) return VF_CUDA_OK;
+
+    size_t sort_bytes = 0;
+    error = cub::DeviceRadixSort::SortPairsDescending(
+        nullptr, sort_bytes, context->cps_head_keys[0], context->cps_head_keys[1],
+        context->cps_head_states[0], context->cps_head_states[1], static_cast<int>(contours), 0, 32,
+        stream);
+    if (error != cudaSuccess) return cuda_result(error);
+    if (sort_bytes > context->cps_scratch_capacity) {
+        result = reserve_device(&context->cps_scratch, &context->cps_scratch_capacity, sort_bytes,
+                                &context->allocation_count);
+        if (result != VF_CUDA_OK) return result;
+    }
+    error = cub::DeviceRadixSort::SortPairsDescending(
+        context->cps_scratch, sort_bytes, context->cps_head_keys[0], context->cps_head_keys[1],
+        context->cps_head_states[0], context->cps_head_states[1], static_cast<int>(contours), 0, 32,
+        stream);
+    if (error != cudaSuccess) return cuda_result(error);
+
+    result = reserve_device(&context->cps_bounds, &context->cps_bound_capacity,
+                            static_cast<size_t>(contours) * 4, &context->allocation_count);
+    if (result == VF_CUDA_OK) result = reserve_device(
+        &context->cps_kept, &context->cps_kept_capacity, static_cast<size_t>(contours),
+        &context->allocation_count);
+    if (result == VF_CUDA_OK) result = reserve_device(
+        &context->cps_area, &context->cps_area_capacity, static_cast<size_t>(contours),
+        &context->allocation_count);
+    if (result == VF_CUDA_OK) result = reserve_device(
+        &context->contour_summaries, &context->contour_summary_capacity, static_cast<size_t>(contours),
+        &context->allocation_count);
+    if (result != VF_CUDA_OK) return result;
+    const unsigned int contour_blocks = (contours + threads - 1) / threads;
+    cps_init_contours_kernel<<<contour_blocks, threads, 0, stream>>>(
+        width, context->cps_head_keys[1], context->cps_head_states[1], contours,
+        context->cps_cycle_position, context->cps_bounds, context->cps_kept, context->cps_area);
+    if (state_count > 0) {
+        cps_accumulate_kernel<<<state_blocks, threads, 0, stream>>>(
+            width, context->cps_neighbours, context->cps_states, labels, context->cps_cycle_position,
+            state_count, context->cps_bounds, context->cps_kept, context->cps_area);
+    }
+    cps_records_kernel<<<contour_blocks, threads, 0, stream>>>(
+        context->cps_bounds, context->cps_kept, context->cps_area, contours, request,
+        context->contour_summaries);
+    result = visionflow_cuda::kernel_launch_result();
+    if (result != VF_CUDA_OK) return result;
+    const size_t previous = context->contour_summary_host.size();
+    try {
+        context->contour_summary_host.resize(previous + contours);
+    } catch (const std::bad_alloc&) {
+        return VF_CUDA_ALLOCATION_FAILED;
+    }
+    error = cudaMemcpyAsync(
+        context->contour_summary_host.data() + previous, context->contour_summaries,
+        sizeof(VfContourSummaryV1) * contours, cudaMemcpyDeviceToHost, stream);
+    if (error != cudaSuccess) return cuda_result(error);
+    return visionflow_cuda::stream_result(stream);
+}
+
 VF_CUDA_API int vf_dag_plan_contour_summaries_roi(
     void* plan, uint64_t generation, int x, int y,
     const int* output_indices, const int* modes, int request_count,
@@ -4515,6 +5015,16 @@ VF_CUDA_API int vf_dag_plan_contour_summaries_roi(
         uint8_t* mask = values[compiled->output_nodes[output_indices[index]]];
         int contour_count = 0;
         int point_count = 0;
+        if (modes[index] == VF_CONTOURS_RETR_LIST) {
+            // RETR_LIST is summarised without a border trace; the cost no longer grows with the
+            // total point count walked by one warp.
+            result = run_contour_parallel_summaries(
+                context, mask, compiled->width, compiled->width, compiled->height, index,
+                &contour_count);
+            if (result != VF_CUDA_OK) break;
+            out_counts[index] = contour_count;
+            continue;
+        }
         context->resident_u8 = mask;
         context->resident_width = compiled->width;
         context->resident_height = compiled->height;

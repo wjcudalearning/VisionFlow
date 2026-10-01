@@ -118,8 +118,8 @@
       "level": "bit_exact",
       "exports": ["vf_dag_plan_contour_summaries_roi", "vf_contour_summaries_download"],
       "comparison": {"kind": "fields", "exact": ["contour_count", "order", "bounding_rect", "contour_area", "point_count"]},
-      "golden_tests": ["tests.test_gpu_contour_summaries", "tests.test_detector_900_gpu_contours"],
-      "notes": "cv2.boundingRect and cv2.contourArea of every cv2.findContours(CHAIN_APPROX_SIMPLE) contour of each traced DAG output, in OpenCV order; masks stay on the device, and only a RETR_EXTERNAL request over at least 2^20 pixels also copies its contour points to the host for the BKE nesting check."
+      "golden_tests": ["tests.test_gpu_contour_summaries", "tests.test_detector_900_gpu_contours", "tests.test_contour_parallel_reference", "tools.check_contour_summary_equivalence", "tools.check_contour_parallel_equivalence"],
+      "notes": "cv2.boundingRect and cv2.contourArea of every cv2.findContours(CHAIN_APPROX_SIMPLE) contour of each traced DAG output, in OpenCV order; RETR_LIST is computed by the parallel border-state algorithm of tools/contour_parallel_reference.py without a sequential trace; masks stay on the device, and only a RETR_EXTERNAL request over at least 2^20 pixels also copies its contour points to the host for the BKE nesting check."
     },
     "statistics.median_f32": {
       "level": "bit_exact",
