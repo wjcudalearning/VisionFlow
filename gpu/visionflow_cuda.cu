@@ -3147,22 +3147,43 @@ __global__ void contour_bke_root_flags_kernel(
     tile_ids[tile] = tile;
 }
 
-__global__ void contour_bke_seed_kernel(
-    int width, int tiles_x, const int32_t* root_tiles, int component_count,
-    const uint8_t* info_by_tile, int32_t* seeds) {
-    const int component = blockIdx.x * blockDim.x + threadIdx.x;
-    if (component >= component_count) return;
-    const int tile = root_tiles[component];
+__global__ void contour_bke_fill_first_kernel(int tile_count, int32_t* first_pixel_by_tile) {
+    const int tile = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tile < tile_count) first_pixel_by_tile[tile] = INT_MAX;
+}
+
+// OpenCV opens an outer border at the component's first raster pixel (topmost row, then leftmost
+// column). The union-find root is only the component's first 2x2 block in block order, which can
+// sit left of that pixel when the block holds just its lower row (C/D) while a block further right
+// holds a pixel of the row above. Every block therefore offers its own first raster pixel
+// (A < B < C < D) to its root, and the minimum is the exact OpenCV start pixel.
+__global__ void contour_bke_first_pixel_kernel(
+    int width, int height, int tiles_x, int tile_count, int32_t* parent,
+    const uint8_t* info_by_tile, int32_t* first_pixel_by_tile) {
+    const int tile = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tile >= tile_count) return;
+    const uint8_t info = info_by_tile[tile];
+    if ((info & 0x0Fu) == 0) return;
     const int row = (tile / tiles_x) * 2;
     const int column = (tile % tiles_x) * 2;
-    const int32_t root_index = row * width + column;
-    const uint8_t info = info_by_tile[tile];
-    int seed = -1;
-    if ((info & CONTOUR_BKE_A) != 0) seed = root_index;
-    else if ((info & CONTOUR_BKE_B) != 0) seed = root_index + 1;
-    else if ((info & CONTOUR_BKE_C) != 0) seed = root_index + width;
-    else if ((info & CONTOUR_BKE_D) != 0) seed = root_index + width + 1;
-    seeds[component] = seed;
+    if (row >= height || column >= width) return;
+    const int index = row * width + column;
+    int first = index + width + 1;
+    if ((info & CONTOUR_BKE_A) != 0) first = index;
+    else if ((info & CONTOUR_BKE_B) != 0) first = index + 1;
+    else if ((info & CONTOUR_BKE_C) != 0) first = index + width;
+    const int root = contour_bke_find(parent, index);
+    const int root_row = root / width;
+    const int root_tile = (root_row / 2) * tiles_x + (root - root_row * width) / 2;
+    atomicMin(first_pixel_by_tile + root_tile, first);
+}
+
+__global__ void contour_bke_seed_kernel(
+    const int32_t* root_tiles, int component_count,
+    const int32_t* first_pixel_by_tile, int32_t* seeds) {
+    const int component = blockIdx.x * blockDim.x + threadIdx.x;
+    if (component >= component_count) return;
+    seeds[component] = first_pixel_by_tile[root_tiles[component]];
 }
 
 __global__ void contour_bke_finish_counts_kernel(
@@ -4393,10 +4414,6 @@ VF_CUDA_API int vf_dag_plan_execute_roi(
         compiled, context->u8[0], outputs, output_count);
 }
 
-// vf_find_contours_u8 traces RETR_EXTERNAL regions of at least this many pixels with the BKE
-// component route.
-constexpr long long CONTOUR_BKE_MIN_PIXELS = 1LL << 20;
-
 // One warp per contour: cv::boundingRect and cv::contourArea(oriented=false) of the
 // CHAIN_APPROX_SIMPLE points. Every shoelace term is an exact integer in double and the partial
 // sums stay far below 2^53, so the warp reduction order cannot change the result.
@@ -4467,12 +4484,6 @@ VF_CUDA_API int vf_dag_plan_contour_summaries_roi(
         // A colour node cannot be reinterpreted as a binary mask without changing the foreground
         // rule, so the caller keeps its host contour reference for it.
         if (compiled->node_channels[compiled->output_nodes[output_indices[index]]] != 1) {
-            return VF_CUDA_UNSUPPORTED;
-        }
-        // The BKE RETR_EXTERNAL route does not yet reproduce OpenCV's contour order and start
-        // points on dense masks, so large external requests keep the host contour reference.
-        if (modes[index] == VF_CONTOURS_RETR_EXTERNAL &&
-            static_cast<long long>(compiled->width) * compiled->height >= CONTOUR_BKE_MIN_PIXELS) {
             return VF_CUDA_UNSUPPORTED;
         }
     }
@@ -5796,10 +5807,21 @@ int run_contour_bke_external(
         return VF_CUDA_OK;
     }
 
+    // tile_ids was only the DeviceSelect input, so it is reused here as the per-root first-pixel
+    // table indexed by tile.
+    contour_bke_fill_first_kernel<<<tile_blocks, threads, 0, persistent->stream>>>(
+        tile_count, persistent->contour_bke_tile_ids);
+    result = visionflow_cuda::kernel_launch_result();
+    if (result != VF_CUDA_OK) return result;
+    contour_bke_first_pixel_kernel<<<tile_blocks, threads, 0, persistent->stream>>>(
+        width, height, tiles_x, tile_count, persistent->contour_bke_parent,
+        persistent->contour_bke_info, persistent->contour_bke_tile_ids);
+    result = visionflow_cuda::kernel_launch_result();
+    if (result != VF_CUDA_OK) return result;
     const int component_blocks = (component_count + threads - 1) / threads;
     contour_bke_seed_kernel<<<component_blocks, threads, 0, persistent->stream>>>(
-        width, tiles_x, persistent->contour_bke_roots, component_count,
-        persistent->contour_bke_info, persistent->contour_bke_seeds);
+        persistent->contour_bke_roots, component_count,
+        persistent->contour_bke_tile_ids, persistent->contour_bke_seeds);
     result = visionflow_cuda::kernel_launch_result();
     if (result != VF_CUDA_OK) return result;
     size_t sort_bytes = 0;
@@ -6041,6 +6063,7 @@ VF_CUDA_API int vf_find_contours_u8(
     // only on the mask, so it is built once, before the retry loop, and its size is exact (the
     // per-row counts come back to the host and are prefix-summed there).
     const bool list_mode = (mode == VF_CONTOURS_RETR_LIST);
+    constexpr long long CONTOUR_BKE_MIN_PIXELS = 1LL << 20;
     const long long roi_pixels = static_cast<long long>(width) * height;
     if (!list_mode && roi_pixels >= CONTOUR_BKE_MIN_PIXELS) {
         result = run_contour_bke_external(

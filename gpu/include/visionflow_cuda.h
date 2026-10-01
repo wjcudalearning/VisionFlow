@@ -270,8 +270,9 @@ VF_CUDA_API int vf_dag_plan_execute_roi(
  * computed exactly like cv::contourArea on int32 points (double shoelace over float-converted
  * coordinates), which is exact for coordinates below 2^24. The result is rejected for download
  * once the resident image generation changes. A RETR_EXTERNAL request over a ROI of at least
- * 2^20 pixels returns VF_CUDA_UNSUPPORTED (the large-ROI external route is not yet order-exact),
- * as does a request for a multi-channel output; the caller keeps its host contour reference.
+ * 2^20 pixels takes the BKE component route of vf_find_contours_u8, which also copies that
+ * request's contour points to the host for its nesting check. A request for a multi-channel
+ * output returns VF_CUDA_UNSUPPORTED; the caller keeps its host contour reference.
  */
 typedef struct VfContourSummaryV1 {
     int32_t x;

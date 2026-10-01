@@ -198,7 +198,7 @@ class Detector900DeviceContourTests(unittest.TestCase):
     def test_device_refusal_keeps_the_mask_route_without_cpu_restart(self):
         image = _frame(True, 7)
         _, cpu, _ = _run(image)
-        refusal = GpuRuntimeError("large RETR_EXTERNAL")
+        refusal = GpuRuntimeError("multi-channel output")
         refusal.error_code = CUDA_ERROR_UNSUPPORTED
         runtime = _SummaryRuntime(error=refusal)
         _, gpu, _ = _run(image, runtime)

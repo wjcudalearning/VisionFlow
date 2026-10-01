@@ -112,6 +112,23 @@ def cases() -> list[tuple[str, np.ndarray]]:
     nested_large[450:575, 450:575] = 255
     shapes.append(("large_nested_components", nested_large))
 
+    # BKE start pixel: the component's first 2x2 block holds only its lower row, while the block to
+    # its right holds the component's first raster pixel. OpenCV starts the border at that pixel.
+    lower_row_first = np.zeros((1024, 1024), dtype=np.uint8)
+    lower_row_first[101, 101] = 255
+    lower_row_first[100, 102:106] = 255
+    lower_row_first[101:110, 104:108] = 255
+    shapes.append(("large_bke_lower_row_first_block", lower_row_first))
+
+    # Dense overlapping blobs (the contour-summary gate's 1100x1200 case): many components whose
+    # first block row spans several 2x2 blocks, which exposed the BKE start pixel and order.
+    blob_rng = np.random.default_rng(20261001)
+    dense_blobs = np.zeros((1200, 1100), dtype=np.uint8)
+    for _ in range(300):
+        cv2.circle(dense_blobs, (int(blob_rng.integers(0, 1100)), int(blob_rng.integers(0, 1200))),
+                   int(blob_rng.integers(2, 30)), 255, -1)
+    shapes.append(("large_dense_blobs_1100x1200", dense_blobs))
+
     for seed in (1, 2, 3, 4, 5):
         random_mask = (rng.integers(0, 100, (64, 80)) > 80).astype(np.uint8) * 255
         shapes.append((

@@ -30,7 +30,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from core.gpu_runtime import CUDA_ERROR_UNSUPPORTED, GpuRuntime, GpuRuntimeError  # noqa: E402
+from core.gpu_runtime import GpuRuntime, GpuRuntimeError  # noqa: E402
 from core.preprocess_plan import (  # noqa: E402
     CpuPreprocessDagExecutor,
     Gray,
@@ -44,7 +44,6 @@ from detectors.detector_900_domain import Detector900Config, Detector900MaskPrep
 DLL = ROOT / "gpu" / "visionflow_cuda.dll"
 OUTPUT = ROOT / "outputs_validation" / "contour_summary_equivalence"
 MODES = (("list", cv2.RETR_LIST), ("external", cv2.RETR_EXTERNAL))
-LARGE_EXTERNAL_PIXELS = 1 << 20  # the export refuses RETR_EXTERNAL at or above this ROI size
 PASS_THROUGH = PreprocessDagPlan(
     name="contour_summary_pass_through",
     nodes=(
@@ -130,21 +129,11 @@ def check_masks(runtime: GpuRuntime) -> list[dict]:
         roi = resident.roi(0, 0, mask.shape[1], mask.shape[0])
         for mode_name, mode in MODES:
             expected = opencv_summaries(mask, mode)
-            large_external = mode_name == "external" and mask.size >= LARGE_EXTERNAL_PIXELS
             try:
                 records = runtime.dag_contour_summaries_roi(mask, PASS_THROUGH, roi, [("mask", mode_name)])[0]
             except GpuRuntimeError as exc:
-                # A large RETR_EXTERNAL request must be refused explicitly so the caller keeps the
-                # host contour reference; any other refusal is a failure.
-                refused = getattr(exc, "error_code", None) == CUDA_ERROR_UNSUPPORTED
                 results.append({"case": name, "mode": mode_name, "contours": len(expected),
-                                "identical": refused and large_external,
-                                "difference": None if refused and large_external else str(exc),
-                                "route": "host_reference" if refused else "error"})
-                continue
-            if large_external:
-                results.append({"case": name, "mode": mode_name, "contours": len(expected),
-                                "identical": False, "difference": "large RETR_EXTERNAL was not refused"})
+                                "identical": False, "difference": str(exc)})
                 continue
             difference = first_difference(expected, device_summaries(records))
             results.append({"case": name, "mode": mode_name, "contours": len(expected),
@@ -156,11 +145,17 @@ def check_detector_900_plan(runtime: GpuRuntime) -> list[dict]:
     rng = np.random.default_rng(900)
     cpu = CpuPreprocessDagExecutor()
     results = []
-    for seed, (block, c, invert) in enumerate(((11, 0.0, False), (25, 3.5, True), (3, -2.0, False))):
-        canvas = frame_image(rng, 700, 900)
+    # The last entry is a ROI above 2^20 pixels, so RETR_EXTERNAL takes the BKE component route.
+    for seed, (block, c, invert, canvas_shape, roi_size) in enumerate((
+        (11, 0.0, False, (700, 900), (801, 613)),
+        (25, 3.5, True, (700, 900), (798, 614)),
+        (3, -2.0, False, (700, 900), (795, 615)),
+        (15, 1.0, False, (1200, 1300), (1203, 1101)),
+    )):
+        canvas = frame_image(rng, *canvas_shape)
         noise = rng.integers(0, 40, canvas.shape, dtype=np.uint8)
         canvas = cv2.add(canvas, noise)
-        x, y, width, height = 37 + seed, 21 + seed, 801 - seed * 3, 613 + seed
+        x, y, width, height = 37 + seed, 21 + seed, *roi_size
         tile = canvas[y : y + height, x : x + width]
         config = Detector900Config.from_params({
             "inner_adaptive_block_size": block, "inner_adaptive_c": c, "inner_invert": invert,
@@ -171,8 +166,6 @@ def check_detector_900_plan(runtime: GpuRuntime) -> list[dict]:
         resident = runtime.upload_image(canvas)
         roi = resident.roi(x, y, width, height)
         for mode_name, mode in MODES:
-            if mode_name == "external" and width * height >= LARGE_EXTERNAL_PIXELS:
-                continue
             records = runtime.dag_contour_summaries_roi(
                 tile, plan, roi, [("outer_mask", mode_name), ("inner_mask", mode_name)]
             )
@@ -287,11 +280,7 @@ def main() -> int:
     )
     for case in failures:
         print(f"FAIL {case['case']} {case['mode']}: {case['difference']}")
-    refused = sum(1 for case in cases if case.get("route") == "host_reference")
-    print(
-        f"{len(cases) - len(failures)}/{len(cases)} contour summary cases identical to OpenCV "
-        f"({refused} large RETR_EXTERNAL requests explicitly refused for the host reference)"
-    )
+    print(f"{len(cases) - len(failures)}/{len(cases)} contour summary cases identical to OpenCV")
     for entry in report.get("benchmark_900_tile", []):
         print(json.dumps(entry, ensure_ascii=False))
     return 1 if failures else 0
