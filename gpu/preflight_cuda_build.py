@@ -68,6 +68,10 @@ OPTIONAL_EXPORT_GROUPS = {
     "timings": {"vf_context_set_timing_enabled", "vf_context_last_timings"},
     "pattern_match": {"vf_pattern_match_gray_u8"},
     "plan_contours": {"vf_plan_find_contours_roi"},
+    "dag_contour_summaries": {
+        "vf_dag_plan_contour_summaries_roi",
+        "vf_contour_summaries_download",
+    },
     "context_memory_stats": {"vf_context_memory_stats_v1"},
     "analysis_scratch_trim": {
         "vf_context_memory_stats_v2",

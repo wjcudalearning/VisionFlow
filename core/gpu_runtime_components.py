@@ -162,6 +162,16 @@ class GpuCapabilities:
         )
 
     @property
+    def dag_contour_summaries(self) -> bool:
+        """A resident DAG whose masks are traced and reduced to per-contour bbox/area records."""
+        return bool(
+            self.find_contours
+            and self.has_exports(
+                ("vf_dag_plan_contour_summaries_roi", "vf_contour_summaries_download")
+            )
+        )
+
+    @property
     def exact_median(self) -> bool:
         """Optional bit-exact float32 median over host values (never reads the resident image)."""
         return self.has_exports(("vf_median_f32",))

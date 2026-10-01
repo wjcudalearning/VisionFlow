@@ -254,6 +254,42 @@ VF_CUDA_API int vf_dag_plan_execute_roi(
     void* plan, uint64_t generation, int x, int y,
     const VfDagOutputV1* outputs, int output_count);
 
+/*
+ * Optional detector-neutral contour summary extension. Executes a DAG plan once over a resident
+ * ROI, then traces each requested single-channel output with the OpenCV-equivalent contour
+ * operator (see vf_find_contours_u8) and reduces every contour on the device to its
+ * cv2.boundingRect, cv2.contourArea(oriented=false) and CHAIN_APPROX_SIMPLE point count. Only
+ * these records cross PCIe; the masks and the contour points stay on the device.
+ *
+ *   output_indices[i]: index into the plan's output list (not a node id); the node must be 1-channel.
+ *   modes[i]:          VF_CONTOURS_RETR_LIST or VF_CONTOURS_RETR_EXTERNAL.
+ *   out_counts[i]:     number of contours traced for request i.
+ *
+ * Records are stored request by request, each request in cv2.findContours order, and copied out
+ * with vf_contour_summaries_download. bbox coordinates are 0-based within the ROI. area is
+ * computed exactly like cv::contourArea on int32 points (double shoelace over float-converted
+ * coordinates), which is exact for coordinates below 2^24. The result is rejected for download
+ * once the resident image generation changes. A RETR_EXTERNAL request over a ROI of at least
+ * 2^20 pixels returns VF_CUDA_UNSUPPORTED (the large-ROI external route is not yet order-exact),
+ * as does a request for a multi-channel output; the caller keeps its host contour reference.
+ */
+typedef struct VfContourSummaryV1 {
+    int32_t x;
+    int32_t y;
+    int32_t width;
+    int32_t height;
+    int32_t point_count;
+    int32_t request;
+    double area;
+} VfContourSummaryV1;
+
+VF_CUDA_API int vf_dag_plan_contour_summaries_roi(
+    void* plan, uint64_t generation, int x, int y,
+    const int* output_indices, const int* modes, int request_count,
+    int* out_counts);
+VF_CUDA_API int vf_contour_summaries_download(
+    void* context, VfContourSummaryV1* out_records, int record_capacity);
+
 VF_CUDA_API int vf_bgr_to_gray_u8(
     const uint8_t* src, int width, int height, int src_stride, int src_channels,
     uint8_t* dst, int dst_stride, int dst_channels);

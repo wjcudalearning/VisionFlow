@@ -6,6 +6,7 @@ import time
 
 import cv2
 
+from core.gpu_runtime import CUDA_ERROR_UNSUPPORTED
 from core.preprocess_plan import (
     CpuPreprocessExecutor,
     CpuPreprocessDagExecutor,
@@ -178,6 +179,86 @@ class BaseDetector:
         result = self._cpu_preprocess_dag_executor.execute(image, plan)
         self._record_preprocess_result(plan, result)
         return result
+
+    def execute_dag_contour_summaries(
+        self,
+        image,
+        plan: PreprocessDagPlan,
+        requests,
+        device_roi_offset: tuple[int, int] = (0, 0),
+    ):
+        """Trace DAG outputs on the device and return per-contour records, or ``None``.
+
+        ``requests`` is a sequence of ``(output_name, mode)`` pairs where ``mode`` is ``"list"``,
+        ``"external"`` or ``None`` for a contour semantic the device does not provide. Each returned
+        array holds ``cv2.boundingRect`` (ROI-local), ``cv2.contourArea`` and the
+        ``CHAIN_APPROX_SIMPLE`` point count of every contour in ``cv2.findContours`` order; the masks
+        never leave the device.
+
+        ``None`` keeps the caller's mask + host ``cv2.findContours`` reference: no active CUDA
+        detector or resident ROI, debug images requested, a DLL without the export, a DAG the
+        native executor does not support, a measured CPU-faster crossover, an unsupported mode, or
+        a request the device refuses as unsupported. Any other device failure propagates, so
+        ``run`` restarts the whole detector on the CPU (or raises in strict CUDA mode).
+
+        The device tracer walks each contour point by point, so a mask with long tangled contours
+        (for example an adaptive threshold on flat noise) can trace slower than downloading the
+        masks for ``cv2.findContours``. When CPU fallback is allowed (``gpu.mode: auto``), each
+        plan/shape/request key is calibrated against that mask route with the runtime crossover
+        policy and the faster route is kept; strict CUDA always uses the device summaries. Both
+        routes produce identical records, so the choice never changes inspection results.
+        """
+        runtime = self.gpu_runtime
+        if (
+            not self.gpu_active
+            or self._cuda_preprocess_dag_executor is None
+            or self.export_debug_images
+            or not getattr(runtime, "supports_dag_contour_summaries", False)
+            or any(mode is None for _, mode in requests)
+        ):
+            return None
+        device_roi = self._device_roi_for(image, device_roi_offset)
+        if device_roi is None:
+            return None
+        report = self._cuda_preprocess_dag_executor.capability_report(plan, image).to_dict()
+        if report["selected_backend"] != "cuda":
+            return None
+        requests = tuple((str(name), str(mode)) for name, mode in requests)
+        policy = getattr(runtime, "crossover_policy", None) if self._gpu_fallback_enabled else None
+        route_key = None
+        if policy is not None:
+            plan_key = policy.key(plan, image, True)
+            if policy.prefer_cpu_key(plan_key)[0]:
+                return None
+            # "cuda" is the device summary route and "cpu" the mask + host contour route here.
+            route_key = (("contour_summaries", plan.signature, requests), *plan_key[1:])
+            if policy.prefer_cpu_key(route_key)[0]:
+                return None
+        started = policy.clock() if policy is not None else 0.0
+        try:
+            records = runtime.dag_contour_summaries_roi(image, plan, device_roi, list(requests))
+        except Exception as exc:
+            if getattr(exc, "error_code", None) == CUDA_ERROR_UNSUPPORTED:
+                return None
+            raise
+        if policy is not None:
+            policy.record(route_key, "cuda", policy.clock() - started)
+            if policy.wants_cpu_sample(route_key):
+                started = policy.clock()
+                self._host_contour_route(image, plan, requests, device_roi)
+                policy.record(route_key, "cpu", policy.clock() - started)
+            report["contour_route_crossover"] = policy.report(route_key)
+        report.update(route="native_dag_contour_summaries")
+        self.last_preprocess_capability = report
+        self._count_preprocess_route("cuda")
+        return records
+
+    def _host_contour_route(self, image, plan: PreprocessDagPlan, requests, device_roi) -> None:
+        """Time the mask download + host ``cv2.findContours`` route the summaries replace."""
+        modes = {"list": cv2.RETR_LIST, "external": cv2.RETR_EXTERNAL}
+        masks = self._cuda_preprocess_dag_executor.execute(image, plan, device_roi=device_roi)
+        for name, mode in requests:
+            cv2.findContours(masks[name], modes[mode], cv2.CHAIN_APPROX_SIMPLE)
 
     def _execute_cuda_or_crossover_cpu(self, image, plan, report: dict, cuda_executor, cpu_executor, device_roi):
         """Run a CUDA-capable plan, or its pixel-identical CPU plan when measured faster here."""

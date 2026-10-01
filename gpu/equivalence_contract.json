@@ -114,6 +114,13 @@
       "comparison": {"kind": "fields", "exact": ["contour_count", "order", "point_count", "points"]},
       "golden_tests": ["tests.test_gpu_contours", "tools.check_contour_equivalence"]
     },
+    "contours.dag_summaries": {
+      "level": "bit_exact",
+      "exports": ["vf_dag_plan_contour_summaries_roi", "vf_contour_summaries_download"],
+      "comparison": {"kind": "fields", "exact": ["contour_count", "order", "bounding_rect", "contour_area", "point_count"]},
+      "golden_tests": ["tests.test_gpu_contour_summaries", "tests.test_detector_900_gpu_contours"],
+      "notes": "cv2.boundingRect and cv2.contourArea of every cv2.findContours(CHAIN_APPROX_SIMPLE) contour of each traced DAG output, in OpenCV order; masks and points stay on the device."
+    },
     "statistics.median_f32": {
       "level": "bit_exact",
       "exports": ["vf_median_f32"],

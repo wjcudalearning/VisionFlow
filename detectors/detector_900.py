@@ -70,16 +70,25 @@ class Detector900(BaseDetector):
     def detect(self, image) -> list[dict]:
         config = Detector900Config.from_params(self.params)
         roi, offset_x, offset_y = self._roi_image(image)
-        with self.measure_detection_stage("preprocess"):
-            masks = self._make_masks(roi, offset_x, offset_y)
         analyzer = CandidateAnalyzer()
-        with self.measure_detection_stage("find_contours"):
-            outer_candidates = analyzer.analyze(
-                masks["outer_mask"], config.outer_contour_mode, config.outer_rule
+        summaries_started = time.perf_counter()
+        summaries = self._device_summaries(roi, offset_x, offset_y, config)
+        if summaries is not None:
+            self._detection_stage_durations["device_contour_summaries"] = (
+                time.perf_counter() - summaries_started
             )
-            inner_candidates = analyzer.analyze(
-                masks["inner_mask"], config.inner_contour_mode, config.inner_rule
-            )
+            outer_candidates = analyzer.from_summaries(summaries[0], config.outer_rule)
+            inner_candidates = analyzer.from_summaries(summaries[1], config.inner_rule)
+        else:
+            with self.measure_detection_stage("preprocess"):
+                masks = self._make_masks(roi, offset_x, offset_y)
+            with self.measure_detection_stage("find_contours"):
+                outer_candidates = analyzer.analyze(
+                    masks["outer_mask"], config.outer_contour_mode, config.outer_rule
+                )
+                inner_candidates = analyzer.analyze(
+                    masks["inner_mask"], config.inner_contour_mode, config.inner_rule
+                )
         geometry_started = time.perf_counter()
         match = PairGeometry().find_valid_pair(
             outer_candidates.accepted, inner_candidates.accepted, config.max_edge_gap
@@ -102,11 +111,24 @@ class Detector900(BaseDetector):
 
         return image[inset : height - inset, inset : width - inset], inset, inset
 
+    def _mask_plan(self, image, config: Detector900Config):
+        preprocessor = Detector900MaskPreprocessor(config)
+        return self.cached_preprocess_plan(image, preprocessor.signature, preprocessor.plan)
+
     def _make_masks(self, image, offset_x: int = 0, offset_y: int = 0) -> dict[str, np.ndarray]:
-        preprocessor = Detector900MaskPreprocessor(Detector900Config.from_params(self.params))
-        plan = self.cached_preprocess_plan(
-            image,
-            preprocessor.signature,
-            preprocessor.plan,
-        )
+        plan = self._mask_plan(image, Detector900Config.from_params(self.params))
         return self.execute_preprocess_dag(image, plan, (offset_x, offset_y))
+
+    def _device_summaries(self, image, offset_x: int, offset_y: int, config: Detector900Config):
+        """Outer/inner contour records traced on the device, or ``None`` for the mask path."""
+        if not self.gpu_active:
+            return None
+        return self.execute_dag_contour_summaries(
+            image,
+            self._mask_plan(image, config),
+            (
+                ("outer_mask", CandidateAnalyzer.device_contour_mode(config.outer_contour_mode)),
+                ("inner_mask", CandidateAnalyzer.device_contour_mode(config.inner_contour_mode)),
+            ),
+            (offset_x, offset_y),
+        )

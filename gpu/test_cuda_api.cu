@@ -269,6 +269,39 @@ int main() {
         result = vf_dag_plan_execute_roi(
             dag_plan, resident_generation, 0, 0, dag_outputs, 2);
     }
+    if (result == VF_CUDA_OK) {
+        // Both DAG masks are traced on the device; only the per-contour records come back.
+        const int summary_outputs[2]{0, 1};
+        const int summary_modes[2]{VF_CONTOURS_RETR_LIST, VF_CONTOURS_RETR_EXTERNAL};
+        int summary_counts[2]{-1, -1};
+        result = vf_dag_plan_contour_summaries_roi(
+            dag_plan, resident_generation, 0, 0, summary_outputs, summary_modes, 2,
+            summary_counts);
+        const int summary_total = summary_counts[0] + summary_counts[1];
+        std::vector<VfContourSummaryV1> summaries(
+            static_cast<size_t>(summary_total > 0 ? summary_total : 1));
+        if (result == VF_CUDA_OK && summary_total > 0 &&
+            vf_contour_summaries_download(context, summaries.data(), summary_total - 1) !=
+                VF_CUDA_INVALID_ARGUMENT) {
+            std::cerr << "Short contour summary buffer was not rejected\n";
+            return 20;
+        }
+        if (result == VF_CUDA_OK) {
+            result = vf_contour_summaries_download(context, summaries.data(), summary_total);
+        }
+        for (int index = 0; result == VF_CUDA_OK && index < summary_total; ++index) {
+            const VfContourSummaryV1& record = summaries[static_cast<size_t>(index)];
+            const int expected_request = index < summary_counts[0] ? 0 : 1;
+            if (record.request != expected_request || record.point_count <= 0 ||
+                record.x < 0 || record.y < 0 || record.width <= 0 || record.height <= 0 ||
+                record.x + record.width > width || record.y + record.height > height ||
+                record.area < 0.0 ||
+                record.area > static_cast<double>(record.width) * record.height) {
+                std::cerr << "Contour summary record " << index << " is inconsistent\n";
+                return 20;
+            }
+        }
+    }
     uint64_t free_bytes = 0;
     uint64_t total_bytes = 0;
     if (result == VF_CUDA_OK) result = vf_gpu_memory_info(&free_bytes, &total_bytes);

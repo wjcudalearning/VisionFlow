@@ -155,7 +155,9 @@ class CudaSourceContractTests(unittest.TestCase):
         execute = source.split("VF_CUDA_API int vf_dag_plan_execute(", 1)[1].split(
             "VF_CUDA_API int vf_dag_plan_destroy(", 1
         )[0]
-        device_execute = source.split("static int execute_dag_plan_device(", 1)[1].split(
+        # The node launches and the output download are split so the contour-summary export can
+        # reuse the launches without downloading masks; check them together.
+        device_execute = source.split("static int launch_dag_plan_nodes(", 1)[1].split(
             "VF_CUDA_API int vf_gpu_abi_version", 1
         )[0]
 

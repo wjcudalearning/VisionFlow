@@ -396,6 +396,8 @@ CUDA DLL 建置與驗證：
 
 FFT 是 `visionflow_cuda.dll` 內建的 Stockham radix-2／4 kernel，不需要 cuFFT 或任何外部 FFT runtime，發行套件仍是單一 CUDA DLL。舊版 DLL 沒有這條路徑，此時大模板會回報不支援，`auto` 以 CPU 定位、`cuda` 明確失敗；是否具備列在執行結果的 `capabilities.pattern_match_fft`。
 
+`900-CS-AP-1` 在 GPU 模式下可把雙 mask 的輪廓抽取留在 device：DLL 只回傳每條輪廓的 bbox、面積與點數，不下載 mask；尺寸篩選、內外框配對與 PASS／NG 仍在 CPU。device 輪廓追蹤的成本隨輪廓總點數增加，遇到大量細碎紋理時可能比下載 mask 交給 OpenCV 更慢，所以 `auto` 會在同一個 session 內先實測兩條路徑再選較快者（第一張圖會較慢），`cuda` 一律使用 device 路徑；兩條路徑的檢測結果相同，執行結果的 `device_host_split` 會回報實際使用哪一條。舊版 DLL、`tree` 輪廓模式或開啟 debug 影像時維持原本路徑。
+
 完整的 ABI、resident image、傳輸量、CPU/GPU 等價、benchmark 口徑、已撤回方案與 RTX 指令請閱讀 [`gpu/README.md`](gpu/README.md)。
 
 ## 獨立工具

@@ -37,6 +37,12 @@ CUDA_ERROR_UNSUPPORTED = 8
 CUDA_CONTOURS_EXTERNAL = 0
 CUDA_CONTOURS_LIST = 1
 CONTOUR_MODES = {"list": CUDA_CONTOURS_LIST, "external": CUDA_CONTOURS_EXTERNAL}
+# Mirrors VfContourSummaryV1: cv2.boundingRect, CHAIN_APPROX_SIMPLE point count, request index and
+# cv2.contourArea of one traced contour.
+CONTOUR_SUMMARY_DTYPE = np.dtype([
+    ("x", "<i4"), ("y", "<i4"), ("width", "<i4"), ("height", "<i4"),
+    ("point_count", "<i4"), ("request", "<i4"), ("area", "<f8"),
+])
 # cudaError_t values that leave the process CUDA context unusable until the process exits.
 STICKY_CUDA_ERRORS = frozenset({214, 220, 226, 700, 702, 709, 710, 714, 715, 716, 717, 718, 719})
 
@@ -245,6 +251,10 @@ class GpuRuntime:
         return self._capabilities.plan_find_contours
 
     @property
+    def supports_dag_contour_summaries(self) -> bool:
+        return self._capabilities.dag_contour_summaries
+
+    @property
     def supports_exact_median(self) -> bool:
         return self._capabilities.exact_median
 
@@ -302,6 +312,7 @@ class GpuRuntime:
                 "pattern_match_fft": self.supports_pattern_match_fft,
                 "find_contours": self.supports_find_contours,
                 "plan_find_contours": self.supports_plan_find_contours,
+                "dag_contour_summaries": self.supports_dag_contour_summaries,
                 "exact_median": self.supports_exact_median,
                 "gaussian_blur_f32": self.supports_gaussian_blur_f32,
                 "gaussian_blur_f32_roi": self.supports_gaussian_blur_f32_roi,
@@ -1551,23 +1562,7 @@ class GpuRuntime:
         queued = time.perf_counter()
         with self._queue_slots, self._lock:
             lock_acquired = time.perf_counter()
-            def create_dag_plan():
-                descriptor, operators, output_nodes = self._plan_descriptors.dag(plan, source)
-                created = ctypes.c_void_p()
-                result = int(self._dll.vf_dag_plan_create(
-                    self._context, ctypes.byref(descriptor), int(source.shape[1]),
-                    int(source.shape[0]), ctypes.byref(created)
-                ))
-                if result != 0 or not created.value:
-                    raise self._native_error("vf_dag_plan_create", result)
-                return created
-            handle = NativePlanManager(
-                self._native_dag_plans,
-                self._max_native_plans,
-                self._dll.vf_dag_plan_destroy,
-                self._error_message,
-                GpuRuntimeError,
-            ).get_or_create(key, create_dag_plan)
+            handle = self._dag_plan_handle(plan, source, key)
             node_index = {node.name: index for index, node in enumerate(plan.nodes)}
             encoded_outputs = (_VfDagOutputV1 * len(plan.outputs))(*(
                 _VfDagOutputV1(
@@ -1603,6 +1598,89 @@ class GpuRuntime:
         if result != 0:
             raise self._native_error(function_name, result)
         return outputs
+
+    def _dag_plan_handle(self, plan, source: np.ndarray, key: tuple):
+        """Return the cached native DAG plan for ``key``; the caller holds the runtime lock."""
+        def create_dag_plan():
+            descriptor, operators, output_nodes = self._plan_descriptors.dag(plan, source)
+            created = ctypes.c_void_p()
+            result = int(self._dll.vf_dag_plan_create(
+                self._context, ctypes.byref(descriptor), int(source.shape[1]),
+                int(source.shape[0]), ctypes.byref(created)
+            ))
+            if result != 0 or not created.value:
+                raise self._native_error("vf_dag_plan_create", result)
+            return created
+        return NativePlanManager(
+            self._native_dag_plans,
+            self._max_native_plans,
+            self._dll.vf_dag_plan_destroy,
+            self._error_message,
+            GpuRuntimeError,
+        ).get_or_create(key, create_dag_plan)
+
+    def dag_contour_summaries_roi(
+        self, image: np.ndarray, plan, device_roi: GpuDeviceRoi, requests
+    ) -> list[np.ndarray]:
+        """Run a DAG on a resident ROI and return per-contour records for each requested mask.
+
+        ``requests`` is a sequence of ``(output_name, mode)`` pairs; ``mode`` accepts the same
+        values as :meth:`find_contours_gray`. Each returned array (one per request, dtype
+        ``CONTOUR_SUMMARY_DTYPE``) holds, in ``cv2.findContours(..., CHAIN_APPROX_SIMPLE)`` order,
+        the ``cv2.boundingRect`` (ROI-local), ``cv2.contourArea`` and point count of every contour.
+        Masks and contour points never leave the device; only these records are downloaded.
+        """
+        if not self.supports_dag_contour_summaries:
+            raise GpuRuntimeError("CUDA DLL has no resident DAG contour summary export")
+        source = self._u8_image(image, channels=(1, 3), contiguous=False)
+        supported, reason = self.native_dag_plan_capability(plan, source)
+        if not supported:
+            raise GpuRuntimeError(reason)
+        self._validate_device_roi(device_roi, source)
+        requests = [(str(name), self._contour_mode_code(mode)) for name, mode in requests]
+        if not requests:
+            raise GpuRuntimeError("Contour summary needs at least one requested DAG output")
+        output_index = {name: index for index, name in enumerate(plan.outputs)}
+        unknown = [name for name, _ in requests if name not in output_index]
+        if unknown:
+            raise GpuRuntimeError(f"Contour summary requests unknown DAG outputs: {unknown}")
+        count = len(requests)
+        indices = (ctypes.c_int * count)(*(output_index[name] for name, _ in requests))
+        modes = (ctypes.c_int * count)(*(mode for _, mode in requests))
+        counts = (ctypes.c_int * count)()
+        key = (plan.signature, source.shape, source.dtype.str)
+        records = np.empty(0, dtype=CONTOUR_SUMMARY_DTYPE)
+        queued = time.perf_counter()
+        with self._queue_slots, self._lock:
+            lock_acquired = time.perf_counter()
+            handle = self._dag_plan_handle(plan, source, key)
+            result = int(self._dll.vf_dag_plan_contour_summaries_roi(
+                handle, ctypes.c_uint64(device_roi.image.generation),
+                int(device_roi.x), int(device_roi.y), indices, modes, count, counts,
+            ))
+            if result == 0:
+                total = sum(int(value) for value in counts)
+                records = np.empty(total, dtype=CONTOUR_SUMMARY_DTYPE)
+                result = int(self._dll.vf_contour_summaries_download(
+                    self._context, records.ctypes.data_as(ctypes.c_void_p), total,
+                ))
+            completed = time.perf_counter()
+            self._record_performance(
+                "vf_dag_plan_contour_summaries_roi", 0, int(records.nbytes),
+                completed - lock_acquired, lock_acquired - queued,
+            )
+        if result != 0:
+            raise self._native_error("vf_dag_plan_contour_summaries_roi", result)
+        split = []
+        start = 0
+        for index in range(count):
+            stop = start + int(counts[index])
+            part = records[start:stop]
+            if np.any(part["request"] != index):
+                raise GpuRuntimeError("CUDA contour summary records are out of request order")
+            split.append(part)
+            start = stop
+        return split
 
     def _validate_device_roi(self, device_roi: GpuDeviceRoi, source: np.ndarray) -> None:
         if not self.supports_resident_roi or device_roi.image.runtime is not self:
@@ -1838,6 +1916,18 @@ class GpuRuntime:
                 ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
             ]
             plan_contours.restype = ctypes.c_int
+        dag_summaries = getattr(self._dll, "vf_dag_plan_contour_summaries_roi", None)
+        if dag_summaries is not None:
+            dag_summaries.argtypes = [
+                ctypes.c_void_p, ctypes.c_uint64, ctypes.c_int, ctypes.c_int,
+                ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int), ctypes.c_int,
+                ctypes.POINTER(ctypes.c_int),
+            ]
+            dag_summaries.restype = ctypes.c_int
+        summary_download = getattr(self._dll, "vf_contour_summaries_download", None)
+        if summary_download is not None:
+            summary_download.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
+            summary_download.restype = ctypes.c_int
         if dag is not None:
             dag.argtypes = [
                 ctypes.c_void_p, ctypes.c_uint64, ctypes.c_int, ctypes.c_int,

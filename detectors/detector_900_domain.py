@@ -159,16 +159,43 @@ class CandidateAnalyzer:
             return cv2.RETR_TREE
         return cv2.RETR_EXTERNAL
 
+    @classmethod
+    def device_contour_mode(cls, mode: str) -> str | None:
+        """The device contour mode with the same flat contour list, or ``None`` to stay on host."""
+        return {cv2.RETR_LIST: "list", cv2.RETR_EXTERNAL: "external"}.get(cls.contour_mode(mode))
+
     def analyze(self, binary, mode: str, rule: SizeRule) -> CandidateSet:
         contours, _ = cv2.findContours(binary, self.contour_mode(mode), cv2.CHAIN_APPROX_SIMPLE)
-        candidates = []
+        return self._classify(self._host_measurements(contours), rule)
+
+    @staticmethod
+    def _host_measurements(contours):
+        # boundingRect only for contours that survive the point-count and area filters.
         for contour in contours:
             if len(contour) < 3:
                 continue
             area = float(cv2.contourArea(contour))
             if area <= 0.0:
                 continue
-            candidates.append(Candidate(tuple(int(value) for value in cv2.boundingRect(contour)), area))
+            yield tuple(int(value) for value in cv2.boundingRect(contour)), len(contour), area
+
+    def from_summaries(self, records, rule: SizeRule) -> CandidateSet:
+        """Build the same candidate set from device ``boundingRect``/``contourArea`` records."""
+        return self._classify(
+            (
+                ((int(r["x"]), int(r["y"]), int(r["width"]), int(r["height"])),
+                 int(r["point_count"]), float(r["area"]))
+                for r in records
+            ),
+            rule,
+        )
+
+    def _classify(self, contours, rule: SizeRule) -> CandidateSet:
+        candidates = []
+        for bbox, point_count, area in contours:
+            if point_count < 3 or area <= 0.0:
+                continue
+            candidates.append(Candidate(bbox, area))
         candidates.sort(key=lambda candidate: candidate.area, reverse=True)
         accepted = tuple(candidate for candidate in candidates if self.passes_size(candidate, rule))
         rejected = tuple(

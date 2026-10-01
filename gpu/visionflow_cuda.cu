@@ -180,6 +180,13 @@ struct PersistentContext {
     int contour_point_count = 0;
     uint64_t contour_generation = 0;
     bool contour_result_valid = false;
+    // Contour summary extension: device records of the current request and the host copy of all
+    // requests of the most recent vf_dag_plan_contour_summaries_roi call.
+    VfContourSummaryV1* contour_summaries = nullptr;
+    size_t contour_summary_capacity = 0;
+    std::vector<VfContourSummaryV1> contour_summary_host;
+    uint64_t contour_summary_generation = 0;
+    bool contour_summary_valid = false;
     // Exact-median scratch: the uploaded float values, their monotone-orderable uint32 order keys,
     // the radix-sorted keys, the cub temporary storage and a one-word NaN-presence flag. All
     // grow-only and deliberately separate from the shared plan scratch.
@@ -334,6 +341,7 @@ struct PersistentContext {
         visionflow_cuda::free_device(contour_points);
         visionflow_cuda::free_device(contour_out_offsets);
         visionflow_cuda::free_device(contour_out_points);
+        visionflow_cuda::free_device(contour_summaries);
         visionflow_cuda::free_device(contour_counts);
         visionflow_cuda::free_device(contour_row_counts);
         visionflow_cuda::free_device(contour_row_start);
@@ -457,6 +465,7 @@ ContextMemoryBreakdown context_memory_breakdown(const PersistentContext* context
         capacity_bytes(context->contour_point_capacity, sizeof(int32_t)) +
         capacity_bytes(context->contour_out_offset_capacity, sizeof(int32_t)) +
         capacity_bytes(context->contour_out_point_capacity, sizeof(int32_t)) +
+        capacity_bytes(context->contour_summary_capacity, sizeof(VfContourSummaryV1)) +
         capacity_bytes(context->contour_count_capacity, sizeof(int)) +
         capacity_bytes(context->contour_row_count_capacity, sizeof(int)) +
         capacity_bytes(context->contour_row_start_capacity, sizeof(int)) +
@@ -3438,16 +3447,21 @@ static int execute_linear_plan_device(
     return result;
 }
 
-static int execute_dag_plan_device(
+// Launches every DAG node on the context stream and reports the device buffer of each node. No
+// output is copied and the stream is not synchronized.
+static int launch_dag_plan_nodes(
     NativeDagPlan* compiled,
     uint8_t* root,
-    const VfDagOutputV1* outputs,
-    int output_count) {
+    std::vector<uint8_t*>& values) {
     PersistentContext* context = compiled->context;
     const int width = compiled->width;
     const int height = compiled->height;
     const size_t pixels = static_cast<size_t>(width) * height;
-    std::vector<uint8_t*> values(compiled->operators.size(), nullptr);
+    try {
+        values.assign(compiled->operators.size(), nullptr);
+    } catch (const std::bad_alloc&) {
+        return VF_CUDA_ALLOCATION_FAILED;
+    }
     for (size_t index = 0; index < compiled->operators.size(); ++index) {
         const VfPlanOperatorV1& op = compiled->operators[index];
         uint8_t* input = op.input_node == VF_PLAN_INPUT_NODE ? root : values[op.input_node];
@@ -3529,7 +3543,19 @@ static int execute_dag_plan_device(
                 return VF_CUDA_UNSUPPORTED;
         }
     }
-    int result = visionflow_cuda::kernel_launch_result();
+    return visionflow_cuda::kernel_launch_result();
+}
+
+static int execute_dag_plan_device(
+    NativeDagPlan* compiled,
+    uint8_t* root,
+    const VfDagOutputV1* outputs,
+    int output_count) {
+    PersistentContext* context = compiled->context;
+    const int width = compiled->width;
+    const int height = compiled->height;
+    std::vector<uint8_t*> values;
+    int result = launch_dag_plan_nodes(compiled, root, values);
     if (result != VF_CUDA_OK) return result;
     record_timing_event(context, TIMING_AFTER_KERNEL);
     for (int index = 0; index < output_count; ++index) {
@@ -4365,6 +4391,189 @@ VF_CUDA_API int vf_dag_plan_execute_roi(
     record_timing_event(context, TIMING_AFTER_INPUT);
     return execute_dag_plan_device(
         compiled, context->u8[0], outputs, output_count);
+}
+
+// vf_find_contours_u8 traces RETR_EXTERNAL regions of at least this many pixels with the BKE
+// component route.
+constexpr long long CONTOUR_BKE_MIN_PIXELS = 1LL << 20;
+
+// One warp per contour: cv::boundingRect and cv::contourArea(oriented=false) of the
+// CHAIN_APPROX_SIMPLE points. Every shoelace term is an exact integer in double and the partial
+// sums stay far below 2^53, so the warp reduction order cannot change the result.
+__global__ void contour_summary_kernel(
+    const int32_t* offsets, const int32_t* points, int contour_count, int request,
+    VfContourSummaryV1* out) {
+    const int contour = static_cast<int>((blockIdx.x * blockDim.x + threadIdx.x) >> 5);
+    const int lane = static_cast<int>(threadIdx.x & 31);
+    if (contour >= contour_count) return;
+    const int begin = offsets[contour];
+    const int end = offsets[contour + 1];
+    int min_x = INT_MAX, min_y = INT_MAX, max_x = INT_MIN, max_y = INT_MIN;
+    double twice_area = 0.0;
+    for (int index = begin + lane; index < end; index += 32) {
+        const int px = points[2 * index];
+        const int py = points[2 * index + 1];
+        const int previous = index == begin ? end - 1 : index - 1;
+        const int qx = points[2 * previous];
+        const int qy = points[2 * previous + 1];
+        twice_area += static_cast<double>(qx) * py - static_cast<double>(qy) * px;
+        min_x = min(min_x, px);
+        min_y = min(min_y, py);
+        max_x = max(max_x, px);
+        max_y = max(max_y, py);
+    }
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        twice_area += __shfl_down_sync(0xffffffffu, twice_area, offset);
+        min_x = min(min_x, __shfl_down_sync(0xffffffffu, min_x, offset));
+        min_y = min(min_y, __shfl_down_sync(0xffffffffu, min_y, offset));
+        max_x = max(max_x, __shfl_down_sync(0xffffffffu, max_x, offset));
+        max_y = max(max_y, __shfl_down_sync(0xffffffffu, max_y, offset));
+    }
+    if (lane != 0) return;
+    VfContourSummaryV1 record;
+    const bool empty = end <= begin;
+    record.x = empty ? 0 : min_x;
+    record.y = empty ? 0 : min_y;
+    record.width = empty ? 0 : max_x - min_x + 1;
+    record.height = empty ? 0 : max_y - min_y + 1;
+    record.point_count = end - begin;
+    record.request = request;
+    record.area = fabs(twice_area * 0.5);
+    out[contour] = record;
+}
+
+VF_CUDA_API int vf_dag_plan_contour_summaries_roi(
+    void* plan, uint64_t generation, int x, int y,
+    const int* output_indices, const int* modes, int request_count,
+    int* out_counts) {
+    NativeDagPlan* compiled = static_cast<NativeDagPlan*>(plan);
+    if (compiled == nullptr || compiled->context == nullptr || output_indices == nullptr ||
+        modes == nullptr || out_counts == nullptr || request_count <= 0) {
+        return VF_CUDA_INVALID_ARGUMENT;
+    }
+    PersistentContext* context = compiled->context;
+    if (generation == 0 || generation != context->resident_generation ||
+        context->resident_channels != compiled->input_channels || x < 0 || y < 0 ||
+        x + compiled->width > context->resident_width ||
+        y + compiled->height > context->resident_height) {
+        return VF_CUDA_INVALID_ARGUMENT;
+    }
+    const int output_count = static_cast<int>(compiled->output_nodes.size());
+    for (int index = 0; index < request_count; ++index) {
+        if (output_indices[index] < 0 || output_indices[index] >= output_count ||
+            (modes[index] != VF_CONTOURS_RETR_LIST && modes[index] != VF_CONTOURS_RETR_EXTERNAL)) {
+            return VF_CUDA_INVALID_ARGUMENT;
+        }
+        // A colour node cannot be reinterpreted as a binary mask without changing the foreground
+        // rule, so the caller keeps its host contour reference for it.
+        if (compiled->node_channels[compiled->output_nodes[output_indices[index]]] != 1) {
+            return VF_CUDA_UNSUPPORTED;
+        }
+        // The BKE RETR_EXTERNAL route does not yet reproduce OpenCV's contour order and start
+        // points on dense masks, so large external requests keep the host contour reference.
+        if (modes[index] == VF_CONTOURS_RETR_EXTERNAL &&
+            static_cast<long long>(compiled->width) * compiled->height >= CONTOUR_BKE_MIN_PIXELS) {
+            return VF_CUDA_UNSUPPORTED;
+        }
+    }
+    context->contour_summary_valid = false;
+    context->contour_summary_host.clear();
+
+    reset_timing(context, false);
+    const size_t resident_pitch =
+        static_cast<size_t>(context->resident_width) * context->resident_channels;
+    const size_t roi_row_bytes = static_cast<size_t>(compiled->width) * compiled->input_channels;
+    const uint8_t* source = context->resident_u8 +
+        static_cast<size_t>(y) * resident_pitch + static_cast<size_t>(x) * compiled->input_channels;
+    cudaError_t error = cudaMemcpy2DAsync(
+        context->u8[0], roi_row_bytes, source, resident_pitch, roi_row_bytes, compiled->height,
+        cudaMemcpyDeviceToDevice, context->stream);
+    if (error != cudaSuccess) return cuda_result(error);
+    std::vector<uint8_t*> values;
+    int result = launch_dag_plan_nodes(compiled, context->u8[0], values);
+    if (result != VF_CUDA_OK) return result;
+
+    // Trace each mask with the verified tracer by presenting the node buffer as the resident
+    // single-channel image, exactly like vf_plan_find_contours_roi. The tracer only reads its
+    // input and writes contour-owned scratch, so the other DAG outputs stay intact.
+    uint8_t* original_resident = context->resident_u8;
+    const int original_width = context->resident_width;
+    const int original_height = context->resident_height;
+    const int original_channels = context->resident_channels;
+    for (int index = 0; index < request_count && result == VF_CUDA_OK; ++index) {
+        uint8_t* mask = values[compiled->output_nodes[output_indices[index]]];
+        int contour_count = 0;
+        int point_count = 0;
+        context->resident_u8 = mask;
+        context->resident_width = compiled->width;
+        context->resident_height = compiled->height;
+        context->resident_channels = 1;
+        result = vf_find_contours_u8(
+            context, generation, 0, 0, compiled->width, compiled->height, modes[index],
+            &contour_count, &point_count);
+        context->resident_u8 = original_resident;
+        context->resident_width = original_width;
+        context->resident_height = original_height;
+        context->resident_channels = original_channels;
+        if (result != VF_CUDA_OK) break;
+        out_counts[index] = contour_count;
+        if (contour_count == 0) continue;
+        result = reserve_device(
+            &context->contour_summaries, &context->contour_summary_capacity,
+            static_cast<size_t>(contour_count), &context->allocation_count);
+        if (result != VF_CUDA_OK) break;
+        const long long threads = static_cast<long long>(contour_count) * 32;
+        contour_summary_kernel<<<
+            dim3(static_cast<unsigned int>((threads + 127) / 128), 1, 1), dim3(128, 1, 1), 0,
+            context->stream>>>(
+            context->contour_out_offsets, context->contour_out_points, contour_count, index,
+            context->contour_summaries);
+        result = visionflow_cuda::kernel_launch_result();
+        if (result != VF_CUDA_OK) break;
+        const size_t previous = context->contour_summary_host.size();
+        try {
+            context->contour_summary_host.resize(previous + static_cast<size_t>(contour_count));
+        } catch (const std::bad_alloc&) {
+            result = VF_CUDA_ALLOCATION_FAILED;
+            break;
+        }
+        error = cudaMemcpyAsync(
+            context->contour_summary_host.data() + previous, context->contour_summaries,
+            sizeof(VfContourSummaryV1) * static_cast<size_t>(contour_count),
+            cudaMemcpyDeviceToHost, context->stream);
+        if (error != cudaSuccess) {
+            result = cuda_result(error);
+            break;
+        }
+        result = visionflow_cuda::stream_result(context->stream);
+    }
+    if (result != VF_CUDA_OK) {
+        context->contour_summary_host.clear();
+        return result;
+    }
+    result = visionflow_cuda::stream_result(context->stream);
+    if (result != VF_CUDA_OK) return result;
+    context->contour_summary_generation = generation;
+    context->contour_summary_valid = true;
+    return VF_CUDA_OK;
+}
+
+VF_CUDA_API int vf_contour_summaries_download(
+    void* context, VfContourSummaryV1* out_records, int record_capacity) {
+    PersistentContext* persistent = static_cast<PersistentContext*>(context);
+    if (persistent == nullptr || !persistent->contour_summary_valid ||
+        persistent->contour_summary_generation != persistent->resident_generation) {
+        return VF_CUDA_INVALID_ARGUMENT;
+    }
+    const size_t count = persistent->contour_summary_host.size();
+    if (count == 0) return VF_CUDA_OK;
+    if (out_records == nullptr || record_capacity < 0 ||
+        static_cast<size_t>(record_capacity) < count) {
+        return VF_CUDA_INVALID_ARGUMENT;
+    }
+    std::memcpy(out_records, persistent->contour_summary_host.data(),
+                sizeof(VfContourSummaryV1) * count);
+    return VF_CUDA_OK;
 }
 
 VF_CUDA_API int vf_bgr_to_gray_u8(const uint8_t* src, int w, int h, int stride, int sc, uint8_t* dst, int dstride, int dc) {
@@ -5832,7 +6041,6 @@ VF_CUDA_API int vf_find_contours_u8(
     // only on the mask, so it is built once, before the retry loop, and its size is exact (the
     // per-row counts come back to the host and are prefix-summed there).
     const bool list_mode = (mode == VF_CONTOURS_RETR_LIST);
-    constexpr long long CONTOUR_BKE_MIN_PIXELS = 1LL << 20;
     const long long roi_pixels = static_cast<long long>(width) * height;
     if (!list_mode && roi_pixels >= CONTOUR_BKE_MIN_PIXELS) {
         result = run_contour_bke_external(

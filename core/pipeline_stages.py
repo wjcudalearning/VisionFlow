@@ -144,11 +144,13 @@ class InspectionResultAssembler:
             "vf_find_contours_download",
             "vf_connected_components_u8",
             "vf_cnr_candidates_u8_roi",
+            "vf_dag_plan_contour_summaries_roi",
         ),
         "geometry_and_statistics": (
             "vf_component_stats_u8",
             "vf_ring_statistics_f32",
             "vf_cnr_candidates_u8_roi",
+            "vf_dag_plan_contour_summaries_roi",
         ),
     }
 

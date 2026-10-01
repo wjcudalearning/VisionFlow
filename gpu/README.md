@@ -104,6 +104,25 @@ plan，tile metadata 以 `cpu_crossover` 路線與 `preprocess_routes` 標示。
   **37.08→29.89 ms（減少 19.4%）**、密集短輪廓 **8.93→8.00 ms（減少 10.4%）**，314/314
   逐點相同。`RETR_LIST` 稀疏仍較慢，`ContourShapeAnalyzer` 的 geometry 與 Tile descriptor
   排序仍由 CPU 處理，實際 recipe 尚待驗收，因此不自動切換 CUDA。
+  **2026-10-01 已知限制**：密集圓點 mask（1100×1200，`RETR_EXTERNAL`，≥2^20 像素走 BKE）與
+  `cv2.findContours` 的輪廓集合同樣是 204 條、bbox 與點數相同，但約一半輪廓的起點及清單順序不同；
+  1000×1000（未達 BKE 門檻）則完全相同。修正前，contour summary export 對大型 `RETR_EXTERNAL`
+  明確回 `VF_CUDA_UNSUPPORTED`。
+- `vf_dag_plan_contour_summaries_roi` / `vf_contour_summaries_download`（DAG → 輪廓摘要）：
+  **已接入 `900-CS-AP-1`**。resident ROI 只執行一次 DAG，再把指定的單通道輸出交給上方 tracer，
+  在 device 以一個 warp／輪廓算出 `cv2.boundingRect`、`cv2.contourArea`（double 鞋帶公式，座標
+  < 2^24 時精確）與 `CHAIN_APPROX_SIMPLE` 點數；mask 與輪廓點都不下載，只下載每條輪廓 32 bytes 的
+  `VfContourSummaryV1`。尺寸篩選、面積排序、內外框配對與 PASS／NG 仍在 host 依這些紀錄執行。
+  `tools/check_contour_summary_equivalence.py` 在 RTX 3090 對 OpenCV 38/38 逐欄位相同（含孔洞／島、
+  接邊、細線／單點、空／滿、隨機與 900 雙 mask 非零 ROI offset；1 個大型 `RETR_EXTERNAL` 依上方限制
+  明確拒絕）。tracer 逐點走輪廓，**成本取決於輪廓總點數而非條數**：9999×9999 孤立雜點到 405 萬條仍比
+  「下載 mask＋`cv2.findContours`」快（4.2 vs 6.9 s），但 adaptive threshold C=0 在平坦雜訊上形成的
+  迷宮狀紋理（31 萬條、1,120 萬點）慢約 6 倍。因此 `auto` 以 runtime crossover policy 對每個
+  plan／shape／request 實測兩條路徑後保留較快者（兩者結果相同），strict `cuda` 一律走 summary；
+  `RETR_TREE`、debug 影像、舊 DLL、無 resident ROI 與被拒絕的請求保留 mask＋host 路徑。
+  FRAME_900 正式 Recipe、合成 16384×13000、共用 session 各 6 張：一般圖 CPU 1.78 s、strict CUDA
+  warm 0.11 s、auto 校準後 0.11 s，D2H 400 MB→0；紋理圖 CPU 15.8 s、strict CUDA 約 46 s、auto 首張
+  校準 55.8 s 後改走 mask 路徑 15.4 s；全部與 CPU 結果相同。合成圖不代表實際產線樣本。
 - `vf_cnr_mask_f32`（residual 門檻與候選遮罩一次算完）：**已接入** `detectors/detector_202_1.py`
   的 `_residual_statistics`。它把 `residual` 與 `|residual − median|` 都建在 device 上，用與
   `vf_median_f32` 相同的 key／排序機制取兩個中位數、以 double 算門檻、再以 **float32** 比較
